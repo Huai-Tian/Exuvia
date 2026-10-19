@@ -65,11 +65,14 @@ fn main() -> ExitCode {
         },
         None => match cli.apk {
             Some(apk_path) => match exuvia::track_a::first_pass(&apk_path) {
-                Ok(report) => {
-                    let json = serde_json::to_string_pretty(&report).unwrap();
+                Ok((report, debt)) => {
+                    let rjson = serde_json::to_string_pretty(&report).unwrap();
+                    let djson = serde_json::to_string_pretty(&debt).unwrap();
                     std::fs::create_dir_all("handoff").ok();
-                    std::fs::write("handoff/REPORT.json", &json).ok();
-                    println!("{json}");
+                    std::fs::write("handoff/REPORT.json", &rjson).ok();
+                    std::fs::write("handoff/debt.json", &djson).ok();
+                    println!("{rjson}");
+                    println!("{djson}");
                     ExitCode::SUCCESS
                 }
                 Err(e) => {

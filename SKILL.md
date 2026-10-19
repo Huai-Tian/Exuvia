@@ -22,17 +22,37 @@ Work packages may inject family guidance — follow it first; it outranks genera
   "apk": { "sha256": "…", "size_bytes": 0 },
   "fingerprint": { "matched": false, "family": null, "confidence": null },
   "inventory": {
-    "dex": [{ "name": "classes.dex", "size_bytes": 0, "magic_ok": true }],
+    "dex": [{ "name": "classes.dex", "size_bytes": 0, "magic_ok": true, "parse_ok": true }],
     "so": [{ "name": "lib/arm64-v8a/libtest.so", "abi": "arm64-v8a", "size_bytes": 0 }],
     "assets": [{ "name": "assets/payload.bin", "size_bytes": 0, "entropy": 7.941 }],
     "android_manifest_present": true,
     "other_entries": 0
   },
+  "debt": { "total": 1, "blocked_solvable": 1, "out_of_scope": 0 },
   "unavailable": []
 }
 ```
 
+`debt.json` (entry list; CI fixture):
+
+```json
+{
+  "$schema": "exuvia.debt",
+  "handoff_version": 1,
+  "entries": [
+    {
+      "debt_id": "debt-0001",
+      "method": { "class": "com.example.LoginManager", "name": "sign", "descriptor": "(Landroid/content/Context;[B)[B" },
+      "status": "blocked-solvable",
+      "facts": ["native stub — body outside DEX (access_flags ACC_NATIVE)"],
+      "attempts": 0
+    }
+  ]
+}
+```
+
 - `fingerprint.matched = false` → unknown-family full exploration. Normal, not an error; it is the default while the fence defines no fingerprint.
+- `dex[].magic_ok` false or `parse_ok` false → encrypted/corrupt DEX (hostile-input normal): no method facts from that file; a high-entropy asset beside it is the classic packer shape.
 - `assets[].entropy` = Shannon bits/byte (0..8), a raw measurement — no thresholds applied, interpretation is yours.
 - `unavailable[]` → absent external capabilities; related levels annotated, nothing fails.
 - `workspace/` L1 skeleton is jadx-compatible — if structure/navigation alone answers the task, read it and stop.
