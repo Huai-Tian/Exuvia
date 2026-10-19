@@ -105,3 +105,13 @@ fn unknown_fields_are_rejected() {
     let bad = r#"{"$schema":"exuvia.goal","goal_version":1,"targets":[],"levels":{"default":"L1"},"tracks":[],"stop":"targets-satisfied","surprise_field":true}"#;
     assert!(serde_json::from_str::<Goal>(bad).is_err(), "gate layer 1: unknown fields must be rejected");
 }
+
+#[test]
+fn corrupted_fence_is_a_parse_error() {
+    // 负向锚定：fence 语法坏 = installation-broken 的机制证明
+    // （"# anchor:" 只存在于 fence 首行注释，替换后为非法 TOML 行）
+    let md = skill_md();
+    let corrupted = md.replace("# anchor:", "]]not toml[[");
+    assert_ne!(corrupted, md, "corruption must apply");
+    assert!(exuvia::fence::parse(&corrupted).is_err(), "fence parse must reject corrupt TOML");
+}

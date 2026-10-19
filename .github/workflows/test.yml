@@ -1,0 +1,22 @@
+# Exuvia CI——文档即测试的远端锁（README_AGENT §6）。
+# 每次 push：fixture↔serde 双向锚定、版本锚点一致性、fence 完整性、安装校验 smoke。
+# Windows runner 留给沙箱/probe 的 Windows 路径实现期（python3 别名在 windows runner 不稳，不赌）。
+
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked
+      - run: cargo test --locked
+      # 安装校验 smoke：完整跑一遍 SKILL.md 定位→fence 解析→python3 probe
+      - run: cargo run -q -- --version
+      - run: cargo run -q -- schema --dump goal | head -3
