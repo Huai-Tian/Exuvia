@@ -2,7 +2,7 @@
 //! 三向锚定：SKILL 示例 ↔ serde 类型 ↔ 版本常量。任一侧漂移，此测试即红。
 
 use exuvia::protocol::{Goal, Proposal};
-use exuvia::report::{DebtFile, Report};
+use exuvia::report::{DebtFile, Report, WorkPackage};
 
 fn skill_md() -> String {
     let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("SKILL.md");
@@ -39,7 +39,7 @@ fn fence_extracts_parses_and_is_empty() {
 #[test]
 fn skill_json_fixtures_parse_through_serde_types() {
     let blocks = json_blocks(&skill_md());
-    assert!(blocks.len() >= 4, "expected goal + proposal + report + debt fixtures");
+    assert!(blocks.len() >= 5, "expected goal + proposal + report + debt + workpackage fixtures");
     let mut kinds = 0;
     for b in &blocks {
         let v: serde_json::Value = serde_json::from_str(b).expect("fixture is valid JSON");
@@ -65,10 +65,16 @@ fn skill_json_fixtures_parse_through_serde_types() {
                 assert_eq!(d.handoff_version, exuvia::version::HANDOFF_VERSION);
                 kinds |= 8;
             }
+            Some("exuvia.workpackage") => {
+                let w: WorkPackage = serde_json::from_str(b).expect("workpackage fixture matches WorkPackage type (deny_unknown_fields)");
+                assert_eq!(w.handoff_version, exuvia::version::HANDOFF_VERSION);
+                assert_eq!(w.allowed_debt.len(), w.entries.len());
+                kinds |= 16;
+            }
             other => panic!("fixture with unknown $schema {other:?} — every json block in SKILL.md must be an anchored fixture"),
         }
     }
-    assert_eq!(kinds, 15, "goal, proposal, report and debt fixtures must all be present");
+    assert_eq!(kinds, 31, "all five protocol fixtures must be present");
 }
 
 #[test]

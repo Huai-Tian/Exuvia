@@ -2,6 +2,7 @@
 
 pub mod fence;
 pub mod install;
+pub mod next;
 pub mod protocol;
 pub mod report;
 pub mod track_a;

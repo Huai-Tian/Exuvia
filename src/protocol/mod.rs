@@ -5,7 +5,7 @@
 pub mod goal;
 pub mod proposal;
 
-pub use goal::Goal;
+pub use goal::{Goal, Target, Track};
 pub use proposal::Proposal;
 
 use clap::ValueEnum;

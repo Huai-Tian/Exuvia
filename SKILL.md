@@ -51,6 +51,32 @@ Work packages may inject family guidance — follow it first; it outranks genera
 }
 ```
 
+`workpackage.json` (output of `exuvia next --goal`; scope-gate source; CI fixture):
+
+```json
+{
+  "$schema": "exuvia.workpackage",
+  "goal_sha256": "sha256:…",
+  "handoff_version": 1,
+  "accepts_equivalent": true,
+  "tracks": ["A", "B"],
+  "guidance": [],
+  "allowed_debt": ["debt-0001"],
+  "entries": [
+    {
+      "debt_id": "debt-0001",
+      "method": { "class": "com.example.LoginManager", "name": "sign", "descriptor": "(Landroid/content/Context;[B)[B" },
+      "status": "blocked-solvable",
+      "facts": ["native stub — body outside DEX (access_flags ACC_NATIVE)"],
+      "attempts": 0
+    }
+  ]
+}
+```
+
+- `allowed_debt` is the scope-gate source: your proposal may only claim these debt ids.
+- `guidance` empty = family knowledge not matched/absent in the fence; when present it outranks general intuition.
+
 - `fingerprint.matched = false` → unknown-family full exploration. Normal, not an error; it is the default while the fence defines no fingerprint.
 - `dex[].magic_ok` false or `parse_ok` false → encrypted/corrupt DEX (hostile-input normal): no method facts from that file; a high-entropy asset beside it is the classic packer shape.
 - `assets[].entropy` = Shannon bits/byte (0..8), a raw measurement — no thresholds applied, interpretation is yours.

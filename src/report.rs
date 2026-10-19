@@ -119,3 +119,24 @@ pub struct DebtSummary {
     pub blocked_solvable: u64,
     pub out_of_scope: u64,
 }
+
+// ─── workpackage.json（外包循环：next 的输出、proposal 范围闸的数据源）───
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WorkPackage {
+    #[serde(rename = "$schema")]
+    pub schema: String,
+    /// goal 文件字节锚定（proposal 回流时可复核 goal 未变）
+    pub goal_sha256: String,
+    pub handoff_version: i64,
+    /// goal 声明的副本——Agent 决定 recovered/equivalent 路径的依据
+    pub accepts_equivalent: bool,
+    pub tracks: Vec<crate::protocol::Track>,
+    /// 按 goal 注入的族知识；指纹未匹配 = 空
+    pub guidance: Vec<String>,
+    /// 范围闸数据源：proposal 的 claims 只允许认领这里的 debt_id
+    pub allowed_debt: Vec<String>,
+    /// 条目副本（Agent 无需再翻 debt.json）
+    pub entries: Vec<DebtEntry>,
+}

@@ -32,6 +32,12 @@ enum Cmd {
         #[arg(long)]
         dump: protocol::SchemaName,
     },
+    /// 打包卡点工作包（goal 消费端：机械筛选，不排序不评价）
+    Next {
+        /// 格式化目标文件
+        #[arg(long)]
+        goal: std::path::PathBuf,
+    },
 }
 
 fn main() -> ExitCode {
@@ -60,6 +66,18 @@ fn main() -> ExitCode {
             }
             Err(e) => {
                 eprintln!("{{\"error\":\"{e}\"}}");
+                ExitCode::FAILURE
+            }
+        },
+        Some(Cmd::Next { goal }) => match exuvia::next::build(&goal, std::path::Path::new("handoff")) {
+            Ok(wp) => {
+                let json = serde_json::to_string_pretty(&wp).unwrap();
+                std::fs::write("workpackage.json", &json).ok();
+                println!("{json}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("{{\"error\":\"{}\"}}", e.replace('"', "'"));
                 ExitCode::FAILURE
             }
         },
