@@ -5,6 +5,10 @@ edition = "2024"
 license = "AGPL-3.0-only"
 description = "Deterministic Android unpacking pipeline for AI agents. Separate the shell from what lives inside."
 
+# ci/verify：私有语料对账工具（仓库内 CI 工具，不进发行物——§10 v0.1；比对逻辑公开、样本私有）
+[workspace]
+members = ["ci/verify"]
+
 # 依赖纪律：每个依赖对应一条已拍板的契约，无投机引入。
 [dependencies]
 # CLI 契约（README_AGENT §5）

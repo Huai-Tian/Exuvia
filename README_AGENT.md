@@ -21,12 +21,15 @@ Exuvia 是一个**面向 AI Agent 的 Android 通用脱壳 / 代码恢复流水�
 - **名字**：Exuvia（蝉蜕）——壳留在原地，代码恢复生命
 - **口号**：*"Separate the shell from what lives inside."*
 
-**项目当前状态：v0.1 外循环全链已实现（合成样本验证，23 测试 CI 全绿）。**
-- 契约层：五协议 fixture 双向锚定（goal/proposal/report/debt/workpackage）、serde 类型即格式、错误码公开表、fence 空（生长规则就位）；
-- 轨道 A 前两段：APK 解包 → 清点 → 熵测量（难度信号第一项）→ DEX 解析 → ACC_NATIVE stub → debt.json；
-- 外循环闭合：`exuvia packed.apk → next --goal → [LLM 解卡点] → unpack merge（四层闸门 + 沙箱双锚 + 销账）→ validate`；
+**项目当前状态：v0.1 代码面已补全（合成样本验证，36 测试 CI 全绿）；下一里程碑 = 真实一代壳样本的第一次剖析（实战测试与修正）。**
+- 契约层：六协议物 fixture 双向锚定（goal/proposal/report/debt/workpackage/evidence）、serde 类型即格式、错误码公开表、fence 空（生长规则就位）；
+- 卡点两类：method-native-stub（ACC_NATIVE stub + JNI 符号定位 + 方法体切片）与 encrypted-payload（坏 DEX 自动卡点 + 头部切片 + 解密例程候选机械定位：JNI_OnLoad / .init_array + asset 原始熵清单）——一代壳的解密工作由此进入外包循环；
+- 外循环闭合且留痕：`exuvia packed.apk → next --goal → [LLM 解卡点] → unpack merge（四层闸门 + 沙箱双锚 + 销账）→ validate`；merge 拒绝时 attempts.log 记 merge-rejected + 被认领卡点 attempts 递增（escalation 的数据基础）；recovered DEX 形状产物归档 workspace/<debt_id>/recovered.dex（L1 骨架最小兑现）；
+- CLI 契约表全兑现：--version / --profile（fence 覆盖通道）/ --goal / --json / --resume（幂等）、next、schema --dump（handoff 四类型联合 / goal / proposal）、unpack validate / merge；
+- handoff 结构落盘完整：REPORT.json + REPORT.md、debt.json、evidence/<debt_id>/{manifest.json, <name>.bin}（多切片共存不覆盖）、attempts.log、workspace/；
+- ci/verify（cargo workspace member，不进发行物）：register 语料登记 + check 原包对账——比对逻辑公开、样本私有；CI 用合成对自测；
 - 终点定义已拍板：行为一致的可运行 APK（§2.1）+ 忠实还原原则；
-- **下一里程碑：真实一代壳样本的第一次剖析**（脚手架的实战自检）；其后 so 符号定位（capstone 测量）、repack 四组件逐件生长。
+- **下一里程碑：真实一代壳样本的第一次剖析**（实战测试与修正）；其后 so 符号定位（capstone 测量）、repack 四组件逐件生长。
 
 ---
 

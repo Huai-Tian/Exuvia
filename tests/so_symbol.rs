@@ -63,10 +63,10 @@ fn first_pass_locates_symbol_in_debt_facts() {
     let apk = dir.join("synthetic.apk");
     common::build_synthetic_apk(&apk);
 
-    let (report, debt, slices) = exuvia::track_a::first_pass(&apk).expect("first pass");
+    let (report, debt, groups) = exuvia::track_a::first_pass(&apk).expect("first pass");
     assert_eq!(report.debt.total, 1);
     let e = &debt.entries[0];
-    assert_eq!(e.method.name, "nativeFoo");
+    assert_eq!(e.method.as_ref().unwrap().name, "nativeFoo");
     // 事实层升级：stub → 具体符号 + so 定位（干扰符号 _JNI_OnLoad 不得误命中）
     let symbol_fact = e.facts.iter().find(|f| f.starts_with("symbol ")).expect("symbol fact present");
     assert!(
@@ -76,10 +76,11 @@ fn first_pass_locates_symbol_in_debt_facts() {
         "got: {symbol_fact}"
     );
     // 切片：VA→文件偏移映射 + 内容字节精确
-    assert_eq!(slices.len(), 1);
-    assert_eq!(slices[0].file_offset, 0x1204, "VA 0x204 经 PT_LOAD(p_offset=0x1000) 映射");
+    assert_eq!(groups.len(), 1);
+    let sl = &groups[0].slices[0];
+    assert_eq!(sl.file_offset, 0x1204, "VA 0x204 经 PT_LOAD(p_offset=0x1000) 映射");
     let expected = common::prng_bytes(common::ELF_DATA_SEED, common::ELF_DATA_LEN);
-    assert_eq!(slices[0].bytes, expected[0x204..0x204 + 64]);
+    assert_eq!(sl.bytes, expected[0x204..0x204 + 64]);
     assert_eq!(e.evidence, vec!["evidence/debt-0001/".to_string()]);
     assert!(!e.facts.iter().any(|f| f.contains("_JNI_OnLoad")), "干扰符号不得进入定位事实");
 }
@@ -108,4 +109,16 @@ fn first_pass_reports_symbol_not_found_as_fact() {
         "未命中必须如实标注：{:?}",
         e.facts
     );
+}
+
+#[test]
+fn elf_init_array_located_by_section_name() {
+    // .init_array 解析：段名查表 → 位置与条目数（解密例程候选的机械定位器）
+    let elf_bytes = common::build_minimal_elf_v2(&[("a", 0x10, 8)], &[0x200, 0x210]);
+    let ia = elf::init_array(&elf_bytes).expect("parse").expect("init_array present");
+    assert_eq!(ia.entry_count, 2);
+    assert_eq!(ia.size, 16);
+    // 无 .init_array 的 so：None（事实，不是错误）
+    let plain = common::build_minimal_elf(&[("a", 0x10, 8)]);
+    assert!(elf::init_array(&plain).expect("parse").is_none());
 }

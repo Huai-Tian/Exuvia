@@ -1,0 +1,13 @@
+[package]
+name = "ci-verify"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+description = "Corpus reconciliation for the private orig+packed sample pairs (internal CI tool, never shipped)."
+publish = false
+
+[dependencies]
+exuvia = { path = "../.." }
+serde_json = "1"
+sha2 = "0.11.1"
+zip = "9.0.5"

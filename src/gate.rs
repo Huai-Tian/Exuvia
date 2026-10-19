@@ -43,7 +43,17 @@ pub struct MergeOutcome {
 }
 
 /// 全流程：读 proposal → 四层 → 销账。handoff_dir 为剖析包目录，workpackage_path 为范围闸数据源。
+/// 拒绝时如实留痕：attempts.log 记 merge-rejected 事件 + 对 handoff 中存在的被认领卡点递增 attempts
+/// （escalation §6 的数据基础；best-effort——记账失败不产生新的失败源）。
 pub fn merge(proposal_dir: &Path, handoff_dir: &Path, workpackage_path: &Path) -> Result<MergeOutcome, GateError> {
+    let result = merge_inner(proposal_dir, handoff_dir, workpackage_path);
+    if let Err(e) = &result {
+        record_rejection(proposal_dir, handoff_dir, e);
+    }
+    result
+}
+
+fn merge_inner(proposal_dir: &Path, handoff_dir: &Path, workpackage_path: &Path) -> Result<MergeOutcome, GateError> {
     // ── ① 语法/格式 ──
     let pp = proposal_dir.join("proposal.json");
     let raw = std::fs::read(&pp).map_err(|e| GateError::new("E_READ", format!("proposal.json: {e}")))?;
@@ -166,6 +176,18 @@ pub fn merge(proposal_dir: &Path, handoff_dir: &Path, workpackage_path: &Path) -
             std::fs::write(wdir.join(std::path::Path::new(&t.input).file_name().unwrap_or_default()), std::fs::read(proposal_dir.join(&t.input)).unwrap_or_default()).ok();
             std::fs::write(wdir.join(std::path::Path::new(&t.expected).file_name().unwrap_or_default()), std::fs::read(proposal_dir.join(&t.expected)).unwrap_or_default()).ok();
         }
+        // L1 骨架最小兑现：recovered 产物的闸门验证值呈 DEX 形状 → 归档为 recovered.dex（jadx 可开）。
+        // 数值锚已保证 expected == 沙箱输出，无需重跑；取第一个 DEX 形状的测试对。
+        if c.kind == ClaimKind::Recovered {
+            for t in &c.tests {
+                if let Ok(b) = std::fs::read(proposal_dir.join(&t.expected)) {
+                    if b.starts_with(b"dex\n") {
+                        std::fs::write(wdir.join("recovered.dex"), &b).ok();
+                        break;
+                    }
+                }
+            }
+        }
         let line = serde_json::json!({
             "event": "merge-ok",
             "debt_id": c.debt_id,
@@ -178,7 +200,7 @@ pub fn merge(proposal_dir: &Path, handoff_dir: &Path, workpackage_path: &Path) -
         writeln!(log, "{line}").map_err(|e| GateError::new("E_IO", format!("attempts.log write: {e}")))?;
     }
 
-    // debt.json 与 REPORT.debt 重写（审计事实同步）
+    // debt.json 与 REPORT.debt 重写（审计事实同步；REPORT.md 同步渲染）
     let total = debt.entries.len() as u64;
     std::fs::write(&debt_path, serde_json::to_vec_pretty(&debt).unwrap()).map_err(|e| GateError::new("E_IO", format!("debt write: {e}")))?;
     let report_path = handoff_dir.join("REPORT.json");
@@ -186,12 +208,61 @@ pub fn merge(proposal_dir: &Path, handoff_dir: &Path, workpackage_path: &Path) -
         r.debt.blocked_solvable = r.debt.blocked_solvable.saturating_sub(claimed_set.len() as u64);
         r.debt.total = total;
         std::fs::write(&report_path, serde_json::to_vec_pretty(&r).unwrap()).ok();
+        std::fs::write(handoff_dir.join("REPORT.md"), crate::report::render_markdown(&r)).ok();
     }
 
     Ok(MergeOutcome {
         merged: proposal.claims.iter().map(|c| c.debt_id.clone()).collect(),
         debt_remaining: total,
     })
+}
+
+/// 拒绝留痕（best-effort，任何失败静默放弃——记账不是新的失败源）：
+/// ① attempts.log 追加 merge-rejected（错误码 + hint + 能读出的 generator）；
+/// ② proposal 里被认领且存在于 handoff 的 debt_id，attempts 计数 +1（提交即尝试）。
+fn record_rejection(proposal_dir: &Path, handoff_dir: &Path, e: &GateError) {
+    let mut line = serde_json::json!({
+        "event": "merge-rejected",
+        "code": e.code,
+        "detail": e.detail,
+    });
+    if let Some(h) = &e.hint {
+        line["hint"] = serde_json::json!(h);
+    }
+    let claims: Vec<String> = std::fs::read(proposal_dir.join("proposal.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<Proposal>(&raw).ok())
+        .map(|p| {
+            line["generator"] = serde_json::json!(p.generator);
+            p.claims.into_iter().map(|c| c.debt_id).collect()
+        })
+        .unwrap_or_default();
+    if !claims.is_empty() {
+        line["claims"] = serde_json::json!(claims);
+    }
+    use std::io::Write as _;
+    if let Ok(mut log) = std::fs::OpenOptions::new().create(true).append(true).open(handoff_dir.join("attempts.log")) {
+        let _ = writeln!(log, "{line}");
+    }
+    // attempts 递增：只动 handoff 中存在的条目（范围外认领不动账）
+    let debt_path = handoff_dir.join("debt.json");
+    if let Ok(mut debt) = std::fs::read(&debt_path)
+        .map_err(|_| ())
+        .and_then(|raw| serde_json::from_slice::<DebtFile>(&raw).map_err(|_| ()))
+    {
+        let mut changed = false;
+        for entry in debt.entries.iter_mut() {
+            if claims.contains(&entry.debt_id) {
+                entry.attempts += 1;
+                changed = true;
+            }
+        }
+        if changed {
+            if let Ok(bytes) = serde_json::to_vec_pretty(&debt) {
+                let _ = std::fs::write(&debt_path, bytes);
+            }
+        }
+    }
 }
 
 fn hex_prefix(data: &[u8], n: usize) -> String {

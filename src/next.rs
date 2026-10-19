@@ -46,8 +46,10 @@ pub fn build(goal_path: &Path, handoff_dir: &Path) -> Result<WorkPackage, String
         match t {
             Target::Method { class, method } => {
                 for e in &debt.entries {
-                    if e.method.class == *class && e.method.name == *method && !picked.iter().any(|p| p.debt_id == e.debt_id) {
-                        picked.push(e);
+                    if let Some(m) = &e.method {
+                        if m.class == *class && m.name == *method && !picked.iter().any(|p| p.debt_id == e.debt_id) {
+                            picked.push(e);
+                        }
                     }
                 }
             }
@@ -55,6 +57,16 @@ pub fn build(goal_path: &Path, handoff_dir: &Path) -> Result<WorkPackage, String
                 return Err(format!(
                     "category '{profile}' not defined in fence (fence has no categories yet — growth rules apply)"
                 ));
+            }
+            // payload：匹配全部自动生成的 encrypted-payload 卡点（坏 DEX 机械事实）
+            Target::Payload => {
+                for e in &debt.entries {
+                    if e.kind == crate::report::DebtKind::EncryptedPayload
+                        && !picked.iter().any(|p| p.debt_id == e.debt_id)
+                    {
+                        picked.push(e);
+                    }
+                }
             }
         }
     }

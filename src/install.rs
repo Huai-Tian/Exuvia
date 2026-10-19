@@ -61,9 +61,15 @@ pub fn python_probe() -> Result<String, String> {
     Ok(first.to_string())
 }
 
-/// 全量校验：SKILL.md 存在 + fence 可提取可解析 + python3 probe 通过。
-/// 失败返回结构化错误信息（stderr 输出给 Agent 读）。
-pub fn check() -> Result<(), String> {
+/// 全量校验：SKILL.md 存在 + fence 可提取可解析（或 --profile 覆盖文件可解析）+ python3 probe 通过。
+/// --profile = 判断外置通道（CLI 契约）：TOML 解析失败 = 判断源损坏 = installation-broken。
+/// fence 字段的消费者按 x3 挣得后逐个接线；当前通道就位即止。
+pub fn check(profile: Option<&Path>) -> Result<(), String> {
+    if let Some(p) = profile {
+        let raw = std::fs::read_to_string(p).map_err(|e| format!("--profile {} unreadable: {e}", p.display()))?;
+        toml::from_str::<toml::Value>(&raw)
+            .map_err(|e| format!("--profile TOML parse error: {e} (from {})", p.display()))?;
+    }
     let path = find_skill_md().ok_or("SKILL.md not found (installation-broken)")?;
     let md = std::fs::read_to_string(&path).map_err(|e| format!("SKILL.md unreadable: {e}"))?;
     fence::parse(&md).map_err(|e| format!("{e} (from {})", path.display()))?;

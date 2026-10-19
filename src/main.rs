@@ -1,7 +1,9 @@
 //! CLI 入口（README_AGENT §5）。
 //! 任何命令前先跑安装完整性校验——installation-broken 拒绝一切运行，不存在降级模式。
+//! check 需要 --profile（判断外置通道），故顺序 = parse → check → 分发。
+//! 输出恒 JSON（CLI 就是 API）；--version 例外为人类行，--json 时亦 JSON 化。
 
-use exuvia::{install, protocol, version};
+use exuvia::{install, protocol, report, version};
 use clap::{CommandFactory, Parser, Subcommand};
 use std::process::ExitCode;
 
@@ -15,6 +17,18 @@ struct Cli {
     /// 打印版本 + 支持的协议版本
     #[arg(long)]
     version: bool,
+
+    /// 覆盖 SKILL fence 内嵌的默认判断（TOML；解析失败 = installation-broken）
+    #[arg(long, value_name = "FILE")]
+    profile: Option<std::path::PathBuf>,
+
+    /// 幂等续跑：handoff 的 apk sha256 一致时跳过重剖析
+    #[arg(long)]
+    resume: bool,
+
+    /// 输出恒 JSON（CLI 就是 API）；此 flag 使 --version 亦 JSON 化
+    #[arg(long)]
+    json: bool,
 
     /// 拖入即用：APK 剖析（解包 → 清点 → 熵测量 → handoff/REPORT.json）
     #[arg(value_name = "APK")]
@@ -53,9 +67,30 @@ enum UnpackCmd {
     Validate { dir: std::path::PathBuf },
 }
 
+fn sha256_file(path: &std::path::Path) -> Result<String, String> {
+    use sha2::Digest as _;
+    let mut f = std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    let mut h = sha2::Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        use std::io::Read as _;
+        let n = f.read(&mut buf).map_err(|e| format!("read {}: {e}", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    Ok(format!(
+        "sha256:{}",
+        h.finalize().iter().map(|b| format!("{b:02x}")).collect::<String>()
+    ))
+}
+
 fn main() -> ExitCode {
+    let cli = Cli::parse();
+
     // 启动校验：失败输出结构化错误（给 Agent 读），退出码 2（DRAFT 值）
-    if let Err(e) = install::check() {
+    if let Err(e) = install::check(cli.profile.as_deref()) {
         eprintln!(
             "{{\"status\":\"installation-broken\",\"detail\":\"{}\"}}",
             e.replace('"', "'")
@@ -63,11 +98,20 @@ fn main() -> ExitCode {
         return ExitCode::from(install::BROKEN_EXIT as u8);
     }
 
-    let cli = Cli::parse();
-
     if cli.version {
-        println!("exuvia {}", version::EXUVIA_VERSION);
-        println!("{}", version::protocol_line());
+        if cli.json {
+            println!(
+                "{{\"version\":\"{}\",\"skill_version\":\"{}\",\"handoff_version\":{},\"goal_version\":{},\"proposal_version\":{}}}",
+                version::EXUVIA_VERSION,
+                version::SKILL_VERSION,
+                version::HANDOFF_VERSION,
+                version::GOAL_VERSION,
+                version::PROPOSAL_VERSION
+            );
+        } else {
+            println!("exuvia {}", version::EXUVIA_VERSION);
+            println!("{}", version::protocol_line());
+        }
         return ExitCode::SUCCESS;
     }
 
@@ -125,46 +169,77 @@ fn main() -> ExitCode {
             },
         },
         None => match cli.apk {
-            Some(apk_path) => match exuvia::track_a::first_pass(&apk_path) {
-                Ok((report, debt, slices)) => {
-                    let rjson = serde_json::to_string_pretty(&report).unwrap();
-                    let djson = serde_json::to_string_pretty(&debt).unwrap();
-                    std::fs::create_dir_all("handoff").ok();
-                    std::fs::write("handoff/REPORT.json", &rjson).ok();
-                    std::fs::write("handoff/debt.json", &djson).ok();
-                    // evidence 切片落盘：slice.bin + hash 锚定 manifest
-                    for s in &slices {
-                        let dir = format!("handoff/evidence/{}", s.debt_id);
-                        std::fs::create_dir_all(&dir).ok();
-                        std::fs::write(format!("{dir}/slice.bin"), &s.bytes).ok();
-                        let digest = {
-                            use sha2::Digest as _;
-                            format!(
-                                "sha256:{}",
-                                sha2::Sha256::digest(&s.bytes).iter().map(|b| format!("{b:02x}")).collect::<String>()
-                            )
-                        };
-                        let m = exuvia::report::EvidenceManifest {
-                            schema: "exuvia.evidence".to_string(),
-                            debt_id: s.debt_id.clone(),
-                            so: s.so_name.clone(),
-                            symbol: s.symbol.clone(),
-                            st_value: s.st_value,
-                            st_size: s.st_size,
-                            file_offset: s.file_offset,
-                            slice_sha256: digest,
-                        };
-                        std::fs::write(format!("{dir}/manifest.json"), serde_json::to_vec_pretty(&m).unwrap()).ok();
+            Some(apk_path) => {
+                // --resume：幂等续跑。已有 handoff 且 apk sha256 一致 → 跳过重剖析
+                if cli.resume {
+                    if let Ok(raw) = std::fs::read("handoff/REPORT.json") {
+                        if let Ok(r) = serde_json::from_slice::<report::Report>(&raw) {
+                            if let Ok(cur) = sha256_file(&apk_path) {
+                                if r.apk.sha256 == cur {
+                                    let out = serde_json::json!({
+                                        "resumed": true,
+                                        "apk_sha256": r.apk.sha256,
+                                        "debt_remaining": r.debt.total,
+                                    });
+                                    println!("{out}");
+                                    return ExitCode::SUCCESS;
+                                }
+                            }
+                        }
                     }
-                    println!("{rjson}");
-                    println!("{djson}");
-                    ExitCode::SUCCESS
+                    // 无 handoff / sha 不符 → 落入全量剖析（断点续跑：换样本从头来）
                 }
-                Err(e) => {
-                    eprintln!("{{\"error\":\"{}\"}}", e.replace('"', "'"));
-                    ExitCode::FAILURE
+                match exuvia::track_a::first_pass(&apk_path) {
+                    Ok((r, debt, groups)) => {
+                        let rjson = serde_json::to_string_pretty(&r).unwrap();
+                        let djson = serde_json::to_string_pretty(&debt).unwrap();
+                        std::fs::create_dir_all("handoff").ok();
+                        std::fs::write("handoff/REPORT.json", &rjson).ok();
+                        std::fs::write("handoff/REPORT.md", report::render_markdown(&r)).ok();
+                        std::fs::write("handoff/debt.json", &djson).ok();
+                        // handoff 结构基线（§4.2）：workspace/ 与 attempts.log 就位（可续作状态）
+                        std::fs::create_dir_all("handoff/workspace").ok();
+                        if !std::path::Path::new("handoff/attempts.log").exists() {
+                            std::fs::write("handoff/attempts.log", b"").ok();
+                        }
+                        // evidence 落盘：evidence/<debt_id>/{manifest.json, <name>.bin}——多切片共存
+                        for g in &groups {
+                            let dir = format!("handoff/evidence/{}", g.debt_id);
+                            std::fs::create_dir_all(&dir).ok();
+                            let mut manifest_slices = Vec::with_capacity(g.slices.len());
+                            for s in &g.slices {
+                                std::fs::write(format!("{dir}/{}.bin", s.name), &s.bytes).ok();
+                                manifest_slices.push(report::SliceEntry {
+                                    name: s.name.clone(),
+                                    source: s.source.clone(),
+                                    symbol: s.symbol.clone(),
+                                    st_value: s.st_value,
+                                    st_size: s.st_size,
+                                    file_offset: s.file_offset,
+                                    slice_sha256: sha256_file(std::path::Path::new(&format!(
+                                        "{dir}/{}.bin",
+                                        s.name
+                                    )))
+                                    .unwrap_or_default(),
+                                });
+                            }
+                            let m = report::EvidenceManifest {
+                                schema: "exuvia.evidence".to_string(),
+                                debt_id: g.debt_id.clone(),
+                                slices: manifest_slices,
+                            };
+                            std::fs::write(format!("{dir}/manifest.json"), serde_json::to_vec_pretty(&m).unwrap()).ok();
+                        }
+                        println!("{rjson}");
+                        println!("{djson}");
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("{{\"error\":\"{}\"}}", e.replace('"', "'"));
+                        ExitCode::FAILURE
+                    }
                 }
-            },
+            }
             None => {
                 Cli::command().print_help().unwrap();
                 ExitCode::SUCCESS

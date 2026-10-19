@@ -42,6 +42,7 @@ Work packages may inject family guidance — follow it first; it outranks genera
   "entries": [
     {
       "debt_id": "debt-0001",
+      "kind": "method-native-stub",
       "method": { "class": "com.example.LoginManager", "name": "sign", "descriptor": "(Landroid/content/Context;[B)[B" },
       "status": "blocked-solvable",
       "facts": [
@@ -50,10 +51,26 @@ Work packages may inject family guidance — follow it first; it outranks genera
       ],
       "evidence": ["evidence/debt-0001/"],
       "attempts": 0
+    },
+    {
+      "debt_id": "debt-0002",
+      "kind": "encrypted-payload",
+      "method": null,
+      "status": "blocked-solvable",
+      "facts": [
+        "claimed-DEX file classes.dex with non-DEX magic (encrypted or renamed payload — mechanical fact)",
+        "decrypt-routine candidate JNI_OnLoad → lib/arm64-v8a/libtest.so (dynsym, st_value=0x300, st_size=32) — mechanical locator",
+        "init_array: 2 entries at file_offset 0x1180 in lib/arm64-v8a/libtest.so — decrypt-routine candidates, mechanical locator"
+      ],
+      "evidence": ["evidence/debt-0002/"],
+      "attempts": 0
     }
   ]
 }
 ```
+
+- `kind` routes the entry shape: `method-native-stub` (method facts + so symbol slices) vs `encrypted-payload` (a claimed-DEX file whose bytes are not DEX — mechanical fact only, no entropy thresholds; nearby asset entropies are listed as raw facts). Auto-generated for every DEX with `magic_ok=false` or `parse_ok=false`.
+- `attempts` counts rejected proposals for this entry (merge gate increments on rejection; read it before retrying).
 
 `workpackage.json` (output of `exuvia next --goal`; scope-gate source; CI fixture):
 
@@ -69,6 +86,7 @@ Work packages may inject family guidance — follow it first; it outranks genera
   "entries": [
     {
       "debt_id": "debt-0001",
+      "kind": "method-native-stub",
       "method": { "class": "com.example.LoginManager", "name": "sign", "descriptor": "(Landroid/content/Context;[B)[B" },
       "status": "blocked-solvable",
       "facts": [
@@ -85,34 +103,40 @@ Work packages may inject family guidance — follow it first; it outranks genera
 - `allowed_debt` is the scope-gate source: your proposal may only claim these debt ids.
 - `guidance` empty = family knowledge not matched/absent in the fence; when present it outranks general intuition.
 
-`evidence/<debt_id>/` (sliced so bytes for each symbol hit; CI fixture):
+`evidence/<debt_id>/` (sliced bytes per debt entry; CI fixture):
 
 ```json
 {
   "$schema": "exuvia.evidence",
   "debt_id": "debt-0001",
-  "so": "lib/arm64-v8a/libtest.so",
-  "symbol": "Java_com.example.LoginManager_sign",
-  "st_value": 4612,
-  "st_size": 64,
-  "file_offset": 4628,
-  "slice_sha256": "sha256:…"
+  "slices": [
+    {
+      "name": "lib-arm64-v8a-libtest.so--Java_com_example_LoginManager_sign",
+      "source": "lib/arm64-v8a/libtest.so",
+      "symbol": "Java_com_example_LoginManager_sign",
+      "st_value": 4612,
+      "st_size": 64,
+      "file_offset": 4628,
+      "slice_sha256": "sha256:…"
+    }
+  ]
 }
 ```
 
-- `slice.bin` beside the manifest carries the method-body bytes; verify the hash before trusting them.
+- Each `slices[]` entry is a file `<name>.bin` beside `manifest.json` — the sliced bytes; verify `slice_sha256` before trusting them. A debt may carry several slices (multiple symbol hits, payload-head samples, decrypt-routine candidate bodies); multiple hits never overwrite each other.
+- `encrypted-payload` slices carry `symbol`/`st_value`/`st_size` as `null`; `source` is the APK-internal path, `file_offset` the slice start within it. Claimed-DEX files are sliced from byte 0 (first 65536 bytes; the total size is in the facts).
 
 - `fingerprint.matched = false` → unknown-family full exploration. Normal, not an error; it is the default while the fence defines no fingerprint.
-- `dex[].magic_ok` false or `parse_ok` false → encrypted/corrupt DEX (hostile-input normal): no method facts from that file; a high-entropy asset beside it is the classic packer shape.
+- `dex[].magic_ok` false or `parse_ok` false → encrypted/corrupt DEX (hostile-input normal): no method facts from that file; it becomes an `encrypted-payload` debt entry automatically, so the decrypt work enters the outsourcing loop; a high-entropy asset beside it is the classic packer shape.
 - `assets[].entropy` = Shannon bits/byte (0..8), a raw measurement — no thresholds applied, interpretation is yours.
 - `unavailable[]` → absent external capabilities; related levels annotated, nothing fails.
-- `workspace/` L1 skeleton is jadx-compatible — if structure/navigation alone answers the task, read it and stop.
+- `workspace/` L1 skeleton is jadx-compatible — if structure/navigation alone answers the task, read it and stop. A `recovered` claim whose output has DEX shape is archived as `workspace/<debt_id>/recovered.dex` on merge (open it in jadx directly).
 - debt entry = facts + difficulty signals, no cost estimates (you price tokens):
   - `status = blocked-solvable` → your arena; `out-of-scope` → spend nothing;
   - `jni_calls` high → JNI idiom lens; `vm_handlers` high → VMP, weigh out-of-scope (§6 step 2) first; `opcode_entropy` high without vm_handlers → control-flow obfuscation, tractable;
   - thresholds live in the fence (§7).
-- Two output paths per method, chosen by cost comparison (yours, from the facts above): `recovered` (restore original bytes) vs `equivalent` (read the L2 decompilation of the native code, write a functionally equivalent implementation). When recovery cost far exceeds equivalent-implementation cost, take the `equivalent` path — but only if `accepts_equivalent` is set in the goal (§3).
-- `attempts.log`: read before attempting. A path that died twice is dead.
+- Two output paths per debt entry, chosen by cost comparison (yours, from the facts above): `recovered` (restore original bytes) vs `equivalent` (read the L2 decompilation of the native code, write a functionally equivalent implementation). When recovery cost far exceeds equivalent-implementation cost, take the `equivalent` path — but only if `accepts_equivalent` is set in the goal (§3).
+- `attempts.log`: read before attempting. A path that died twice is dead. Rejected proposals increment `attempts` on every claimed debt that exists in the handoff.
 
 ## 3. goal.json — DRAFT v0
 
@@ -122,13 +146,15 @@ Every field machine-decidable. Categories are named lookup tables defined in the
 |---|---|
 | `$schema` | literal `"exuvia.goal"` |
 | `goal_version` | `1` |
-| `targets[].kind` | `"method"` or `"category"` |
+| `targets[].kind` | `"method"`, `"category"` or `"payload"` |
 | `targets[].class` / `.method` | exact match, names as they appear in debt.json |
 | `targets[].profile` | category name defined in the fence |
 | `levels.default` | `"L1"` / `"L2"` / `"L3"` |
 | `tracks` | subset of `["A","B","C"]` |
 | `accepts_equivalent` | bool, default `false` — if true, debt may be cleared by a `kind = "equivalent"` proposal (§4) |
 | `stop` | `"targets-satisfied"` — targets cleared, a fact not a promise |
+
+`kind = "payload"` selects every auto-generated `encrypted-payload` debt entry (claimed-DEX files whose bytes are not DEX). Semantic targeting of which file is the payload stays with the goal author; the tool only matches the mechanical fact.
 
 Example (CI fixture):
 
@@ -138,7 +164,8 @@ Example (CI fixture):
   "goal_version": 1,
   "targets": [
     { "kind": "method", "class": "com.example.LoginManager", "method": "sign" },
-    { "kind": "category", "profile": "network-entrypoints" }
+    { "kind": "category", "profile": "network-entrypoints" },
+    { "kind": "payload" }
   ],
   "levels": { "default": "L2" },
   "tracks": ["A", "B"],
@@ -227,7 +254,7 @@ Documented error codes (this set is authoritative; do not rely on others):
 ## 8. Version anchors
 
 ```text
-SKILL_VERSION: 1.0.0
+SKILL_VERSION: 1.1.0
 handoff_version: 1    goal_version: 1    proposal_version: 1
 ```
 

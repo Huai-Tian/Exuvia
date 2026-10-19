@@ -1,9 +1,10 @@
 //! APK 解包与清点——轨道 A 第一段。
 //! 只做结构测量（zip 遍历、sha256、DEX magic 格式事实、asset 熵），零业务语义。
+//! 卡点两类：method-native-stub（ACC_NATIVE）与 encrypted-payload（坏 DEX 机械事实）。
 
 use crate::report::{
-    ApkInfo, AssetEntry, DebtEntry, DebtFile, DebtStatus, DebtSummary, DexEntry, EvidenceSlice,
-    Fingerprint, Inventory, MethodRef, Report, SoEntry,
+    ApkInfo, AssetEntry, DebtEntry, DebtFile, DebtKind, DebtStatus, DebtSummary, DexEntry,
+    EvidenceGroup, Fingerprint, Inventory, MethodRef, Report, SliceBytes, SoEntry,
 };
 use crate::track_a::entropy::EntropyCounter;
 use sha2::{Digest, Sha256};
@@ -14,10 +15,14 @@ use zip::ZipArchive;
 
 const BUF: usize = 64 * 1024;
 
-/// 第一遍竖切：解包 + 清点 + 熵测量 + DEX 方法清点 + 符号定位切片 → (REPORT, debt, evidence 切片)。
+/// encrypted-payload 卡点的头部切片上限（机械常量；总大小在 facts 里如实标注）
+const PAYLOAD_HEAD: usize = 64 * 1024;
+
+/// 第一遍竖切：解包 + 清点 + 熵测量 + DEX 方法清点 + 符号定位切片 → (REPORT, debt, evidence 组)。
 /// 指纹判定不在此处——fence 未配置指纹字段，一切样本按未知族主线输出（matched=false）。
-/// 加密 DEX（magic 不符）是敌意输入常态：不进 debt，仅以 magic_ok=false 留在清点事实里。
-pub fn first_pass(apk_path: &Path) -> Result<(Report, DebtFile, Vec<EvidenceSlice>), String> {
+/// 加密 DEX（magic 不符/表损坏）自动成为 encrypted-payload 卡点（机械事实，无熵阈值）：
+/// 解密工作由此进入外包循环；方法事实仍不收（敌意输入常态不因成卡点而改变）。
+pub fn first_pass(apk_path: &Path) -> Result<(Report, DebtFile, Vec<EvidenceGroup>), String> {
     let file = File::open(apk_path).map_err(|e| format!("open apk: {e}"))?;
     let meta = file.metadata().map_err(|e| format!("apk metadata: {e}"))?;
     let mut archive = ZipArchive::new(file).map_err(|e| format!("apk zip parse: {e}"))?;
@@ -40,6 +45,8 @@ pub fn first_pass(apk_path: &Path) -> Result<(Report, DebtFile, Vec<EvidenceSlic
     let mut so = Vec::new();
     // (so 名, 字节, 导出符号)——bytes 供 debt 阶段切片；MB 级 so 内存可承受
     let mut so_cache: Vec<(String, Vec<u8>, Vec<crate::track_a::elf::ExportedSymbol>)> = Vec::new();
+    // 坏 DEX 字节（encrypted-payload 卡点切片来源；同样在内存可承受范围）
+    let mut bad_dex: Vec<(String, Vec<u8>, bool, bool)> = Vec::new(); // (name, bytes, magic_ok, parse_ok)
     let mut assets = Vec::new();
     let mut manifest_present = false;
     let mut other: u64 = 0;
@@ -77,6 +84,9 @@ pub fn first_pass(apk_path: &Path) -> Result<(Report, DebtFile, Vec<EvidenceSlic
                     }
                     Err(_) => {}
                 }
+            }
+            if !magic_ok || !parse_ok {
+                bad_dex.push((name.clone(), bytes, magic_ok, parse_ok));
             }
             dex.push(DexEntry { name, size_bytes: size, magic_ok, parse_ok });
         } else if let Some(rest) = name.strip_prefix("lib/") {
@@ -121,13 +131,17 @@ pub fn first_pass(apk_path: &Path) -> Result<(Report, DebtFile, Vec<EvidenceSlic
         }
     }
 
-    // native stubs → debt 条目 + evidence 切片（事实，无判断；debt_id 稳定排序保证产物字节确定性）
-    let mut entries = Vec::with_capacity(native_methods.len());
-    let mut slices: Vec<EvidenceSlice> = Vec::new();
+    // ── 卡点生成（事实，无判断；debt_id 稳定排序保证产物字节确定性）──
+    // 编号规则：method-native-stub 在前（类名/方法名/描述符序），encrypted-payload 在后（文件名序）
+    let mut entries: Vec<DebtEntry> = Vec::new();
+    let mut groups: Vec<EvidenceGroup> = Vec::new();
+    let mut next_id = 1usize;
+
+    // 1) method-native-stub
     {
         let mut sorted = native_methods.clone();
         sorted.sort_by(|a, b| (&a.class, &a.name, &a.descriptor).cmp(&(&b.class, &b.name, &b.descriptor)));
-        for (i, m) in sorted.iter().enumerate() {
+        for m in sorted.iter() {
             // descriptor "Lcom/example/Foo;" → FQCN "com.example.Foo"（机械变换）
             let fqcn = m
                 .class
@@ -135,14 +149,15 @@ pub fn first_pass(apk_path: &Path) -> Result<(Report, DebtFile, Vec<EvidenceSlic
                 .and_then(|s| s.strip_suffix(';'))
                 .unwrap_or(&m.class)
                 .replace('/', ".");
-            let debt_id = format!("debt-{:04}", i + 1);
+            let debt_id = format!("debt-{next_id:04}");
+            next_id += 1;
             // 符号定位（JNI 规范机械推导 → 全 so 导出表查表）：命中为事实，未命中也是事实
             let mut facts = vec![
                 "native stub — body outside DEX (access_flags ACC_NATIVE)".to_string(),
             ];
             let cands = crate::track_a::jni::candidates(&fqcn, &m.name, &m.descriptor);
             let mut hits: Vec<String> = Vec::new();
-            let mut evidence: Vec<String> = Vec::new();
+            let mut slices: Vec<SliceBytes> = Vec::new();
             for (so_name, so_bytes, syms) in &so_cache {
                 for sym in syms {
                     if sym.name == cands[0] || sym.name == cands[1] {
@@ -153,14 +168,14 @@ pub fn first_pass(apk_path: &Path) -> Result<(Report, DebtFile, Vec<EvidenceSlic
                         // 切片：VA → 文件偏移 → 方法体字节（越界 = 敌意/异常，事实标注不切片）
                         match crate::track_a::elf::va_to_file_offset(so_bytes, sym.st_value) {
                             Ok(off) if (off as usize) + (sym.st_size as usize) <= so_bytes.len() => {
-                                let bytes = so_bytes[off as usize..off as usize + sym.st_size as usize].to_vec();
-                                evidence.push(format!("evidence/{debt_id}/"));
-                                slices.push(EvidenceSlice {
-                                    debt_id: debt_id.clone(),
-                                    so_name: so_name.clone(),
-                                    symbol: sym.name.clone(),
-                                    st_value: sym.st_value,
-                                    st_size: sym.st_size,
+                                let bytes =
+                                    so_bytes[off as usize..off as usize + sym.st_size as usize].to_vec();
+                                slices.push(SliceBytes {
+                                    name: format!("{}--{}", so_name.replace('/', "-"), sym.name.replace('/', "-")),
+                                    source: so_name.clone(),
+                                    symbol: Some(sym.name.clone()),
+                                    st_value: Some(sym.st_value),
+                                    st_size: Some(sym.st_size),
                                     file_offset: off,
                                     bytes,
                                 });
@@ -182,14 +197,100 @@ pub fn first_pass(apk_path: &Path) -> Result<(Report, DebtFile, Vec<EvidenceSlic
             } else {
                 facts.extend(hits);
             }
+            let evidence: Vec<String> = if slices.is_empty() {
+                Vec::new()
+            } else {
+                vec![format!("evidence/{debt_id}/")]
+            };
             entries.push(DebtEntry {
                 debt_id: debt_id.clone(),
-                method: MethodRef { class: fqcn, name: m.name.clone(), descriptor: m.descriptor.clone() },
+                kind: DebtKind::MethodNativeStub,
+                method: Some(MethodRef { class: fqcn, name: m.name.clone(), descriptor: m.descriptor.clone() }),
                 status: DebtStatus::BlockedSolvable,
                 facts,
                 evidence,
                 attempts: 0,
             });
+            if !slices.is_empty() {
+                groups.push(EvidenceGroup { debt_id, slices });
+            }
+        }
+    }
+
+    // 2) encrypted-payload（坏 DEX：声称是 DEX 但字节不是——机械事实，无熵阈值）
+    {
+        let mut sorted = bad_dex.clone();
+        sorted.sort_by(|a, b| a.0.cmp(&b.0));
+        for (name, bytes, magic_ok, _parse_ok) in &sorted {
+            let debt_id = format!("debt-{next_id:04}");
+            next_id += 1;
+            let mut facts = vec![if !*magic_ok {
+                format!("claimed-DEX file {name} with non-DEX magic (encrypted or renamed payload — mechanical fact)")
+            } else {
+                format!("claimed-DEX file {name} with valid magic but broken tables (parse failed — mechanical fact)")
+            }];
+            // 邻近 asset 的原始熵清单（数据非判断：分档阈值属 fence，未挣得即不存在）
+            for a in &assets {
+                facts.push(format!(
+                    "asset {}: {} bytes, entropy {} bits/byte",
+                    a.name, a.size_bytes, a.entropy
+                ));
+            }
+            let mut slices: Vec<SliceBytes> = vec![SliceBytes {
+                name: name.replace('/', "-"),
+                source: name.clone(),
+                symbol: None,
+                st_value: None,
+                st_size: None,
+                file_offset: 0,
+                bytes: bytes.iter().copied().take(PAYLOAD_HEAD).collect(),
+            }];
+            facts.push(format!(
+                "sliced first {} bytes of {name} (total {} bytes)",
+                slices[0].bytes.len(),
+                bytes.len()
+            ));
+            // 解密例程候选（机械定位器：JNI_OnLoad 精确查表 + .init_array 段事实；无语义断言）
+            for (so_name, so_bytes, syms) in &so_cache {
+                for sym in syms {
+                    if sym.name == "JNI_OnLoad" {
+                        facts.push(format!(
+                            "decrypt-routine candidate JNI_OnLoad → {} (dynsym, st_value=0x{:x}, st_size={}) — mechanical locator",
+                            so_name, sym.st_value, sym.st_size
+                        ));
+                        match crate::track_a::elf::va_to_file_offset(so_bytes, sym.st_value) {
+                            Ok(off) if (off as usize) + (sym.st_size as usize) <= so_bytes.len() => {
+                                slices.push(SliceBytes {
+                                    name: format!("{}--JNI_OnLoad", so_name.replace('/', "-")),
+                                    source: so_name.clone(),
+                                    symbol: Some(sym.name.clone()),
+                                    st_value: Some(sym.st_value),
+                                    st_size: Some(sym.st_size),
+                                    file_offset: off,
+                                    bytes: so_bytes[off as usize..off as usize + sym.st_size as usize].to_vec(),
+                                });
+                            }
+                            _ => facts.push(format!("JNI_OnLoad in {so_name} not sliced (out of bounds)")),
+                        }
+                    }
+                }
+                if let Some(ia) = crate::track_a::elf::init_array(so_bytes).unwrap_or(None) {
+                    facts.push(format!(
+                        "init_array: {} entries at file_offset 0x{:x} in {} — decrypt-routine candidates, mechanical locator (function bodies have no symbol bounds, not sliced)",
+                        ia.entry_count, ia.file_offset, so_name
+                    ));
+                }
+            }
+            entries.push(DebtEntry {
+                debt_id: debt_id.clone(),
+                kind: DebtKind::EncryptedPayload,
+                method: None,
+                status: DebtStatus::BlockedSolvable,
+                facts,
+                evidence: vec![format!("evidence/{debt_id}/")],
+                attempts: 0,
+            });
+            groups.push(EvidenceGroup { debt_id, slices });
         }
     }
 
@@ -213,6 +314,6 @@ pub fn first_pass(apk_path: &Path) -> Result<(Report, DebtFile, Vec<EvidenceSlic
             unavailable: Vec::new(),
         },
         debt_file,
-        slices,
+        groups,
     ))
 }

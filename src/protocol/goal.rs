@@ -23,6 +23,8 @@ pub struct Goal {
 pub enum Target {
     Method { class: String, method: String },
     Category { profile: String },
+    /// 匹配全部自动生成的 encrypted-payload 卡点（坏 DEX 机械事实；语义定位在 goal 作者）
+    Payload,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]

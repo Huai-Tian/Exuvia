@@ -85,6 +85,11 @@ fn merge_happy_path_recovered() {
     let debt: exuvia::report::DebtFile = serde_json::from_slice(&std::fs::read(dir.join("handoff/debt.json")).unwrap()).unwrap();
     assert!(debt.entries.is_empty(), "条目必须被移除");
     assert!(dir.join("handoff/workspace/debt-0001/artifact").is_file(), "artifact 必须归档");
+    // L1 骨架最小兑现：recovered 产物（DEX 形状）归档为 recovered.dex（jadx 可开）
+    let rdx = dir.join("handoff/workspace/debt-0001/recovered.dex");
+    assert!(rdx.is_file(), "recovered.dex 必须落盘");
+    let saved = std::fs::read(&rdx).unwrap();
+    assert_eq!(saved, common::build_minimal_dex(), "归档字节 = 闸门验证过的期望值");
     let log = std::fs::read_to_string(dir.join("handoff/attempts.log")).unwrap();
     assert!(log.contains("\"event\":\"merge-ok\"") && log.contains("\"kind\":\"recovered\""));
     // 剖析包状态一致（validate 过）
@@ -138,6 +143,22 @@ fn merge_rejects_output_mismatch() {
     let err = gate::merge(&pdir, &dir.join("handoff"), &wpp).unwrap_err();
     assert_eq!(err.code, "E_OUTPUT_MISMATCH");
     assert!(err.hint.is_some(), "修复循环的 hint 必须在场");
+    // 拒绝留痕（attempts 闭环）：merge-rejected 事件 + debt 条目 attempts 计数递增
+    let log = std::fs::read_to_string(dir.join("handoff/attempts.log")).unwrap();
+    assert!(
+        log.contains("\"event\":\"merge-rejected\"") && log.contains("E_OUTPUT_MISMATCH"),
+        "{log}"
+    );
+    let debt: exuvia::report::DebtFile =
+        serde_json::from_slice(&std::fs::read(dir.join("handoff/debt.json")).unwrap()).unwrap();
+    assert_eq!(debt.entries[0].attempts, 1, "提交即尝试：被拒一次即计数 +1");
+    assert_eq!(debt.entries.len(), 1, "拒绝不得销账");
+    // 第二次拒绝 → attempts=2（escalation §6 "A path that died twice is dead" 的数据基础）
+    let err2 = gate::merge(&pdir, &dir.join("handoff"), &wpp).unwrap_err();
+    assert_eq!(err2.code, "E_OUTPUT_MISMATCH");
+    let debt: exuvia::report::DebtFile =
+        serde_json::from_slice(&std::fs::read(dir.join("handoff/debt.json")).unwrap()).unwrap();
+    assert_eq!(debt.entries[0].attempts, 2, "再次被拒再次递增");
 }
 
 #[test]

@@ -19,9 +19,16 @@ pub enum SchemaName {
 }
 
 /// 从类型按需派生机器可读格式（schema 是视图不是实体，无静态 schema 文件）。
+/// handoff = 四协议物的联合视图（report / debt / workpackage / evidence）。
 pub fn schema_dump(name: SchemaName) -> Result<String, String> {
     match name {
-        SchemaName::Handoff => Err("handoff format not yet defined (DRAFT pending maintainer)".into()),
+        SchemaName::Handoff => Ok(serde_json::to_string_pretty(&serde_json::json!({
+            "report": schemars::schema_for!(crate::report::Report),
+            "debt": schemars::schema_for!(crate::report::DebtFile),
+            "workpackage": schemars::schema_for!(crate::report::WorkPackage),
+            "evidence": schemars::schema_for!(crate::report::EvidenceManifest),
+        }))
+        .unwrap()),
         SchemaName::Goal => Ok(serde_json::to_string_pretty(&schemars::schema_for!(Goal)).unwrap()),
         SchemaName::Proposal => Ok(serde_json::to_string_pretty(&schemars::schema_for!(Proposal)).unwrap()),
     }

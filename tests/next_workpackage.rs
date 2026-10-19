@@ -53,7 +53,7 @@ fn next_builds_workpackage_from_method_target() {
     assert_eq!(wp.tracks, vec![Track::A]);
     assert_eq!(wp.allowed_debt, vec!["debt-0001".to_string()]);
     assert_eq!(wp.entries.len(), 1);
-    assert_eq!(wp.entries[0].method.name, "nativeFoo");
+    assert_eq!(wp.entries[0].method.as_ref().unwrap().name, "nativeFoo");
     // 指纹未匹配（fence 无族条目）→ guidance 必空，不得编造
     assert!(wp.guidance.is_empty());
 }
@@ -114,4 +114,36 @@ fn next_rejects_version_mismatch() {
 
     let err = next::build(&goal, &dir.join("handoff")).expect_err("version mismatch must fail");
     assert!(err.contains("goal_version"), "{err}");
+}
+
+#[test]
+fn next_payload_target_selects_only_payload_debt() {
+    // 一代壳形态：坏 DEX → encrypted-payload 卡点；goal {"kind":"payload"} 只选中它
+    let dir = std::env::temp_dir().join("exuvia_test_next_payload");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let apk = dir.join("encrypted.apk");
+    common::build_encrypted_apk(&apk);
+    let (report, debt, _groups) = first_pass(&apk).unwrap();
+    assert_eq!(debt.entries.len(), 2, "stub + payload 两卡点");
+    let hd = dir.join("handoff");
+    std::fs::create_dir_all(&hd).unwrap();
+    std::fs::write(hd.join("debt.json"), serde_json::to_vec(&debt).unwrap()).unwrap();
+    std::fs::write(hd.join("REPORT.json"), serde_json::to_vec(&report).unwrap()).unwrap();
+
+    let goal = write_goal(&dir, r#"{
+      "$schema": "exuvia.goal",
+      "goal_version": 1,
+      "targets": [{ "kind": "payload" }],
+      "levels": { "default": "L2" },
+      "tracks": ["A"],
+      "accepts_equivalent": true,
+      "stop": "targets-satisfied"
+    }"#);
+
+    let wp = next::build(&goal, &hd).expect("build");
+    assert_eq!(wp.allowed_debt, vec!["debt-0002".to_string()], "只选 payload 卡点，stub 不选");
+    assert_eq!(wp.entries.len(), 1);
+    assert_eq!(wp.entries[0].kind, exuvia::report::DebtKind::EncryptedPayload);
+    assert!(wp.entries[0].method.is_none());
 }

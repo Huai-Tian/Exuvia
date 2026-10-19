@@ -87,13 +87,24 @@ pub struct DebtFile {
 #[serde(deny_unknown_fields)]
 pub struct DebtEntry {
     pub debt_id: String,
-    pub method: MethodRef,
+    /// 卡点类型：路由条目形态与 next 的 payload 匹配
+    pub kind: DebtKind,
+    /// 方法卡点才有；encrypted-payload 为 null
+    pub method: Option<MethodRef>,
     pub status: DebtStatus,
     /// 事实列表（无判断；难度信号字段待 so 分析段挣得后加入）
     pub facts: Vec<String>,
-    /// 切片目录引用（handoff/evidence/<debt_id>/；符号未命中时为空）
+    /// 切片目录引用（handoff/evidence/<debt_id>/；无切片时为空）
     pub evidence: Vec<String>,
     pub attempts: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+pub enum DebtKind {
+    #[serde(rename = "method-native-stub")]
+    MethodNativeStub,
+    #[serde(rename = "encrypted-payload")]
+    EncryptedPayload,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -143,18 +154,28 @@ pub struct WorkPackage {
     pub entries: Vec<DebtEntry>,
 }
 
-// ─── evidence 切片（符号命中的 so 方法体字节 + hash 锚定 manifest）───
+// ─── evidence 切片（按 debt 分组：payload 头部样本 / 符号命中的方法体字节 + hash 锚定 manifest）───
 
-/// 内存态切片（bytes 不进 JSON；写盘时落 slice.bin）
+/// 内存态切片（bytes 不进 JSON；写盘时落 <name>.bin）
 #[derive(Debug, Clone)]
-pub struct EvidenceSlice {
-    pub debt_id: String,
-    pub so_name: String,
-    pub symbol: String,
-    pub st_value: u64,
-    pub st_size: u64,
+pub struct SliceBytes {
+    /// manifest.slices[].name 同名；落盘为 <name>.bin
+    pub name: String,
+    /// APK 内路径（dex/asset/so）
+    pub source: String,
+    /// so 符号名；非符号切片为 None
+    pub symbol: Option<String>,
+    pub st_value: Option<u64>,
+    pub st_size: Option<u64>,
     pub file_offset: u64,
     pub bytes: Vec<u8>,
+}
+
+/// 内存态证据组（一个 debt 一组；多命中切片共存，互不覆盖）
+#[derive(Debug, Clone)]
+pub struct EvidenceGroup {
+    pub debt_id: String,
+    pub slices: Vec<SliceBytes>,
 }
 
 /// handoff/evidence/<debt_id>/manifest.json（CI fixture 之一）
@@ -164,10 +185,70 @@ pub struct EvidenceManifest {
     #[serde(rename = "$schema")]
     pub schema: String,
     pub debt_id: String,
-    pub so: String,
-    pub symbol: String,
-    pub st_value: u64,
-    pub st_size: u64,
+    pub slices: Vec<SliceEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SliceEntry {
+    /// 与同目录 <name>.bin 对应
+    pub name: String,
+    /// APK 内路径（dex/asset/so）
+    pub source: String,
+    /// so 符号名；非符号切片为 null
+    pub symbol: Option<String>,
+    pub st_value: Option<u64>,
+    pub st_size: Option<u64>,
     pub file_offset: u64,
     pub slice_sha256: String,
+}
+
+// ─── REPORT.md（人类可读摘要；纯事实渲染，无判断）───
+
+/// 渲染 REPORT.md（handoff 结构 §4.2 的人类可读半边）。内容 = REPORT.json 的事实平铺。
+pub fn render_markdown(r: &Report) -> String {
+    let mut s = String::new();
+    s.push_str("# Exuvia handoff report\n\n");
+    s.push_str(&format!("- APK: {} ({} bytes)\n", r.apk.sha256, r.apk.size_bytes));
+    s.push_str(&format!(
+        "- fingerprint: {} ({})\n",
+        if r.fingerprint.matched { "matched" } else { "unmatched (unknown family — default state)" },
+        r.fingerprint.family.as_deref().unwrap_or("none")
+    ));
+    s.push_str("\n## Inventory\n\n");
+    s.push_str("| kind | name | facts |\n|---|---|---|\n");
+    for d in &r.inventory.dex {
+        s.push_str(&format!(
+            "| dex | {} | {} bytes, magic {}, parse {} |\n",
+            d.name,
+            d.size_bytes,
+            if d.magic_ok { "ok" } else { "MISMATCH" },
+            if d.parse_ok { "ok" } else { "FAILED" }
+        ));
+    }
+    for so in &r.inventory.so {
+        s.push_str(&format!("| so | {} | {}, {} bytes |\n", so.name, so.abi, so.size_bytes));
+    }
+    for a in &r.inventory.assets {
+        s.push_str(&format!("| asset | {} | {} bytes, entropy {} bits/byte |\n", a.name, a.size_bytes, a.entropy));
+    }
+    s.push_str(&format!(
+        "| other | AndroidManifest.xml | {} |\n| other | (remaining entries) | {} |\n",
+        if r.inventory.android_manifest_present { "present" } else { "absent" },
+        r.inventory.other_entries
+    ));
+    s.push_str("\n## Debt\n\n");
+    s.push_str(&format!(
+        "- total: {} (blocked-solvable: {}, out-of-scope: {})\n",
+        r.debt.total, r.debt.blocked_solvable, r.debt.out_of_scope
+    ));
+    s.push_str("\n## Unavailable capabilities\n\n");
+    if r.unavailable.is_empty() {
+        s.push_str("- none\n");
+    } else {
+        for u in &r.unavailable {
+            s.push_str(&format!("- {u}\n"));
+        }
+    }
+    s
 }

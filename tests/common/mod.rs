@@ -1,4 +1,6 @@
 //! 集成测试共享构造器（合成 APK / 最小 DEX）——零样本纪律：全部自造，永不引真实样本。
+//! 各测试目标按需 include，未用到的构造器属正常（fixture 惯例）。
+#![allow(dead_code)]
 
 use std::io::Write;
 
@@ -232,6 +234,111 @@ pub fn build_minimal_elf(symbols: &[(&str, u64, u64)]) -> Vec<u8> {
 pub const ELF_DATA_SEED: u64 = 7;
 pub const ELF_DATA_LEN: usize = 0x400;
 
+/// 最小 arm64 ELF64 + .init_array 段（解密例程候选定位的 fixture）。
+/// 与 build_minimal_elf 同骨架；数据区后追加 init_array 数据段与段表项。
+/// symbols: [(name, st_value=VA, st_size)]；init_entries: init_array 条目（内容为 VA）。
+pub fn build_minimal_elf_v2(symbols: &[(&str, u64, u64)], init_entries: &[u64]) -> Vec<u8> {
+    // 与 v1 同骨架 + init_array（独立构造，避免 v1 签名改动）
+    let mut out = vec![0u8; 64];
+    out[0..4].copy_from_slice(b"\x7fELF");
+    out[4] = 2;
+    out[5] = 1;
+    out[6] = 1;
+    out[16..18].copy_from_slice(&3u16.to_le_bytes());
+    out[18..20].copy_from_slice(&183u16.to_le_bytes());
+    out[20..24].copy_from_slice(&1u32.to_le_bytes());
+    out[0x20..0x28].copy_from_slice(&64u64.to_le_bytes());
+    out[52..54].copy_from_slice(&64u16.to_le_bytes());
+    out[54..56].copy_from_slice(&56u16.to_le_bytes());
+    out[56..58].copy_from_slice(&1u16.to_le_bytes());
+    out[58..60].copy_from_slice(&64u16.to_le_bytes());
+    out[60..62].copy_from_slice(&5u16.to_le_bytes()); // e_shnum = 5
+    out[62..64].copy_from_slice(&3u16.to_le_bytes()); // e_shstrndx = 3
+
+    // PT_LOAD
+    let mut ph = Vec::new();
+    ph.extend_from_slice(&1u32.to_le_bytes());
+    ph.extend_from_slice(&5u32.to_le_bytes());
+    ph.extend_from_slice(&0x1000u64.to_le_bytes());
+    ph.extend_from_slice(&0u64.to_le_bytes());
+    ph.extend_from_slice(&0u64.to_le_bytes());
+    ph.extend_from_slice(&0x400u64.to_le_bytes());
+    ph.extend_from_slice(&0x400u64.to_le_bytes());
+    ph.extend_from_slice(&0x1000u64.to_le_bytes());
+    out.extend_from_slice(&ph);
+
+    let pad = 0x1000 - out.len();
+    out.extend_from_slice(&prng_bytes(5, pad));
+    out.extend_from_slice(&prng_bytes(7, 0x400)); // 数据区 [0x1000,0x1400)
+
+    // .init_array 数据段（数据区之后）
+    let init_off = out.len();
+    for v in init_entries {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    let init_size = init_entries.len() * 8;
+
+    // .dynsym + .dynstr
+    let mut dynsym = vec![0u8; 24];
+    let mut dynstr = vec![0u8];
+    let mut name_offs = Vec::new();
+    for (name, _, _) in symbols {
+        name_offs.push(dynstr.len());
+        dynstr.extend_from_slice(name.as_bytes());
+        dynstr.push(0);
+    }
+    for (i, (_, value, size)) in symbols.iter().enumerate() {
+        dynsym.extend_from_slice(&(name_offs[i] as u32).to_le_bytes());
+        dynsym.push(0x12);
+        dynsym.push(0);
+        dynsym.extend_from_slice(&1u16.to_le_bytes());
+        dynsym.extend_from_slice(&value.to_le_bytes());
+        dynsym.extend_from_slice(&size.to_le_bytes());
+    }
+
+    let mut shstr = vec![0u8];
+    let n1 = shstr.len();
+    shstr.extend_from_slice(b".dynsym\0");
+    let n2 = shstr.len();
+    shstr.extend_from_slice(b".dynstr\0");
+    let n3 = shstr.len();
+    shstr.extend_from_slice(b".shstrtab\0");
+    let n4 = shstr.len();
+    shstr.extend_from_slice(b".init_array\0");
+
+    let dynsym_off = out.len();
+    out.extend_from_slice(&dynsym);
+    let dynstr_off = out.len();
+    out.extend_from_slice(&dynstr);
+    let shstr_off = out.len();
+    out.extend_from_slice(&shstr);
+    while out.len() % 8 != 0 {
+        out.push(0);
+    }
+    let shoff = out.len();
+
+    let mut h = |name: usize, ty: u32, off: usize, size: usize, link: u32, entsize: u64, buf: &mut Vec<u8>| {
+        buf.extend_from_slice(&(name as u32).to_le_bytes());
+        buf.extend_from_slice(&ty.to_le_bytes());
+        buf.extend_from_slice(&0u64.to_le_bytes());
+        buf.extend_from_slice(&0u64.to_le_bytes());
+        buf.extend_from_slice(&(off as u64).to_le_bytes());
+        buf.extend_from_slice(&(size as u64).to_le_bytes());
+        buf.extend_from_slice(&link.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&1u64.to_le_bytes());
+        buf.extend_from_slice(&entsize.to_le_bytes());
+    };
+    out.extend_from_slice(&[0u8; 64]); // NULL 段
+    h(n1, 11, dynsym_off, dynsym.len(), 2, 24, &mut out);
+    h(n2, 3, dynstr_off, dynstr.len(), 0, 0, &mut out);
+    h(n3, 3, shstr_off, shstr.len(), 0, 0, &mut out);
+    h(n4, 14, init_off, init_size, 0, 8, &mut out); // SHT_INIT_ARRAY
+
+    out[0x28..0x30].copy_from_slice(&(shoff as u64).to_le_bytes());
+    out
+}
+
 /// 完整合成 APK：manifest + 真 DEX（1 native stub）+ 高/低熵 asset + **带 dynsym 的 so** + res 条目。
 pub fn build_synthetic_apk(path: &std::path::Path) {
     let file = std::fs::File::create(path).expect("create apk");
@@ -261,6 +368,41 @@ pub fn build_synthetic_apk(path: &std::path::Path) {
 
     w.start_file("res/layout/main.xml", opts).unwrap();
     w.write_all(b"<layout/>").unwrap();
+
+    w.finish().unwrap();
+}
+
+/// 一代壳形态的合成 APK（encrypted-payload 卡点的竖切 fixture）：
+/// 好 classes.dex（stub 卡点）+ 坏 classes2.dex（payload 卡点）+ 高熵 asset
+/// + 带 JNI_OnLoad 与 .init_array 的 so（解密例程候选定位）。
+pub fn build_encrypted_apk(path: &std::path::Path) {
+    let file = std::fs::File::create(path).expect("create apk");
+    let mut w = zip::ZipWriter::new(file);
+    let opts = zip::write::SimpleFileOptions::default();
+
+    w.start_file("AndroidManifest.xml", opts).unwrap();
+    w.write_all(&[0x03, 0x00, 0x08, 0x00, 0xff, 0xff]).unwrap();
+
+    w.start_file("classes.dex", opts).unwrap();
+    w.write_all(&build_minimal_dex()).unwrap();
+
+    // "整体加密-单段型"的机械形态：声称是 DEX 但字节不是（seed 99 的伪随机字节）
+    w.start_file("classes2.dex", opts).unwrap();
+    w.write_all(&prng_bytes(99, 4096)).unwrap();
+
+    w.start_file("assets/payload.bin", opts).unwrap();
+    w.write_all(&prng_bytes(42, 4096)).unwrap();
+
+    // so：stub 符号 + JNI_OnLoad（候选定位命中）+ .init_array 两条目
+    w.start_file("lib/arm64-v8a/libtest.so", opts).unwrap();
+    let elf = build_minimal_elf_v2(
+        &[
+            ("Java_com_example_NativeProbe_nativeFoo", 0x204, 64),
+            ("JNI_OnLoad", 0x300, 32),
+        ],
+        &[0x200, 0x210],
+    );
+    w.write_all(&elf).unwrap();
 
     w.finish().unwrap();
 }
