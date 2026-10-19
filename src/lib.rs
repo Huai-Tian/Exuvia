@@ -3,4 +3,6 @@
 pub mod fence;
 pub mod install;
 pub mod protocol;
+pub mod report;
+pub mod track_a;
 pub mod version;

@@ -13,7 +13,27 @@ Work packages may inject family guidance — follow it first; it outranks genera
 
 ## 2. Handoff
 
-- `fingerprint.matched = false` → unknown-family full exploration. Normal, not an error.
+`REPORT.json` (machine index; CI fixture):
+
+```json
+{
+  "$schema": "exuvia.report",
+  "handoff_version": 1,
+  "apk": { "sha256": "…", "size_bytes": 0 },
+  "fingerprint": { "matched": false, "family": null, "confidence": null },
+  "inventory": {
+    "dex": [{ "name": "classes.dex", "size_bytes": 0, "magic_ok": true }],
+    "so": [{ "name": "lib/arm64-v8a/libtest.so", "abi": "arm64-v8a", "size_bytes": 0 }],
+    "assets": [{ "name": "assets/payload.bin", "size_bytes": 0, "entropy": 7.941 }],
+    "android_manifest_present": true,
+    "other_entries": 0
+  },
+  "unavailable": []
+}
+```
+
+- `fingerprint.matched = false` → unknown-family full exploration. Normal, not an error; it is the default while the fence defines no fingerprint.
+- `assets[].entropy` = Shannon bits/byte (0..8), a raw measurement — no thresholds applied, interpretation is yours.
 - `unavailable[]` → absent external capabilities; related levels annotated, nothing fails.
 - `workspace/` L1 skeleton is jadx-compatible — if structure/navigation alone answers the task, read it and stop.
 - debt entry = facts + difficulty signals, no cost estimates (you price tokens):

@@ -16,6 +16,10 @@ struct Cli {
     #[arg(long)]
     version: bool,
 
+    /// 拖入即用：APK 剖析（解包 → 清点 → 熵测量 → handoff/REPORT.json）
+    #[arg(value_name = "APK")]
+    apk: Option<std::path::PathBuf>,
+
     #[command(subcommand)]
     cmd: Option<Cmd>,
 }
@@ -59,10 +63,24 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
-        // 无命令、无输入：打印帮助（拖入即用留给 packed.apk 参数，轨道 A 实现期接入）
-        None => {
-            Cli::command().print_help().unwrap();
-            ExitCode::SUCCESS
-        }
+        None => match cli.apk {
+            Some(apk_path) => match exuvia::track_a::first_pass(&apk_path) {
+                Ok(report) => {
+                    let json = serde_json::to_string_pretty(&report).unwrap();
+                    std::fs::create_dir_all("handoff").ok();
+                    std::fs::write("handoff/REPORT.json", &json).ok();
+                    println!("{json}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("{{\"error\":\"{}\"}}", e.replace('"', "'"));
+                    ExitCode::FAILURE
+                }
+            },
+            None => {
+                Cli::command().print_help().unwrap();
+                ExitCode::SUCCESS
+            }
+        },
     }
 }
