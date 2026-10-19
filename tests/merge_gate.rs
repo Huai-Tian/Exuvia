@@ -15,7 +15,7 @@ fn setup(dir: &Path, accepts_equivalent: bool) -> PathBuf {
     std::fs::create_dir_all(dir).unwrap();
     let apk = dir.join("synthetic.apk");
     common::build_synthetic_apk(&apk);
-    let (report, debt) = first_pass(&apk).unwrap();
+    let (report, debt, _slices) = first_pass(&apk).unwrap();
 
     let handoff = dir.join("handoff");
     std::fs::create_dir_all(&handoff).unwrap();

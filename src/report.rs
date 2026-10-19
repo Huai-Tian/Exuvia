@@ -91,6 +91,8 @@ pub struct DebtEntry {
     pub status: DebtStatus,
     /// 事实列表（无判断；难度信号字段待 so 分析段挣得后加入）
     pub facts: Vec<String>,
+    /// 切片目录引用（handoff/evidence/<debt_id>/；符号未命中时为空）
+    pub evidence: Vec<String>,
     pub attempts: u64,
 }
 
@@ -139,4 +141,33 @@ pub struct WorkPackage {
     pub allowed_debt: Vec<String>,
     /// 条目副本（Agent 无需再翻 debt.json）
     pub entries: Vec<DebtEntry>,
+}
+
+// ─── evidence 切片（符号命中的 so 方法体字节 + hash 锚定 manifest）───
+
+/// 内存态切片（bytes 不进 JSON；写盘时落 slice.bin）
+#[derive(Debug, Clone)]
+pub struct EvidenceSlice {
+    pub debt_id: String,
+    pub so_name: String,
+    pub symbol: String,
+    pub st_value: u64,
+    pub st_size: u64,
+    pub file_offset: u64,
+    pub bytes: Vec<u8>,
+}
+
+/// handoff/evidence/<debt_id>/manifest.json（CI fixture 之一）
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EvidenceManifest {
+    #[serde(rename = "$schema")]
+    pub schema: String,
+    pub debt_id: String,
+    pub so: String,
+    pub symbol: String,
+    pub st_value: u64,
+    pub st_size: u64,
+    pub file_offset: u64,
+    pub slice_sha256: String,
 }

@@ -12,7 +12,7 @@ fn first_pass_inventories_synthetic_apk() {
     let apk = dir.join("synthetic.apk");
     build_synthetic_apk(&apk);
 
-    let (report, debt) = first_pass(&apk).expect("first pass");
+    let (report, debt, slices) = first_pass(&apk).expect("first pass");
 
     // apk 基本事实
     assert!(report.apk.sha256.starts_with("sha256:"));
@@ -56,6 +56,14 @@ fn first_pass_inventories_synthetic_apk() {
     assert_eq!(e.method.descriptor, "(Landroid/content/Context;)V");
     assert_eq!(e.status, exuvia::report::DebtStatus::BlockedSolvable);
     assert!(e.facts.iter().any(|f| f.contains("ACC_NATIVE")));
+    // evidence：符号命中 → 切片引用 + 内容 = so 数据区对应段（VA 0x204 → 文件 0x1204）
+    assert_eq!(e.evidence, vec!["evidence/debt-0001/".to_string()]);
+    assert_eq!(slices.len(), 1);
+    let sl = &slices[0];
+    assert_eq!(sl.st_value, 0x204);
+    assert_eq!(sl.file_offset, 0x1204);
+    let expected = common::prng_bytes(common::ELF_DATA_SEED, common::ELF_DATA_LEN);
+    assert_eq!(sl.bytes, expected[0x204..0x204 + 64], "切片必须精确等于数据区对应字节");
 }
 
 #[test]

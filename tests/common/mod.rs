@@ -127,21 +127,45 @@ pub fn build_minimal_dex() -> Vec<u8> {
     out
 }
 
-/// 最小合法 arm64 ELF64（带 .dynsym 导出表）——符号定位段的可信 fixture。
-/// symbols: [(name, st_value, st_size)]；null 段首条目由规范要求自动生成。
+/// 最小合法 arm64 ELF64（带 .dynsym + PT_LOAD）——符号定位与切片段的可信 fixture。
+/// 布局：header(64) + phdr(56) + pad→0x1000 + 数据区[0x1000,0x1400) + dynsym/dynstr/shstr + 段头。
+/// PT_LOAD: p_offset=0x1000, p_vaddr=0 → 符号 st_value 是 VA（0x204 → 文件偏移 0x1204，非平凡映射）。
+/// symbols: [(name, st_value=VA, st_size)]；数据区 = prng_bytes(7, 0x400)。
 pub fn build_minimal_elf(symbols: &[(&str, u64, u64)]) -> Vec<u8> {
     let mut out = vec![0u8; 64];
     out[0..4].copy_from_slice(b"\x7fELF");
     out[4] = 2; // ELF64
     out[5] = 1; // LE
     out[6] = 1; // EV_CURRENT
-    out[16..18].copy_from_slice(&2u16.to_le_bytes()); // e_type = EXEC
+    out[16..18].copy_from_slice(&3u16.to_le_bytes()); // e_type = DYN（so 常态）
     out[18..20].copy_from_slice(&183u16.to_le_bytes()); // e_machine = AArch64
     out[20..24].copy_from_slice(&1u32.to_le_bytes()); // e_version
+    out[0x20..0x28].copy_from_slice(&64u64.to_le_bytes()); // e_phoff
     out[52..54].copy_from_slice(&64u16.to_le_bytes()); // e_ehsize
+    out[54..56].copy_from_slice(&56u16.to_le_bytes()); // e_phentsize
+    out[56..58].copy_from_slice(&1u16.to_le_bytes()); // e_phnum
     out[58..60].copy_from_slice(&64u16.to_le_bytes()); // e_shentsize
     out[60..62].copy_from_slice(&4u16.to_le_bytes()); // e_shnum
     out[62..64].copy_from_slice(&3u16.to_le_bytes()); // e_shstrndx
+
+    // PT_LOAD（Elf64_Phdr = 56B）：p_type=1, p_flags=5(R|X), p_offset=0x1000, p_vaddr=0,
+    // p_paddr=0, p_filesz=0x400, p_memsz=0x400, p_align=0x1000
+    let mut ph = Vec::new();
+    ph.extend_from_slice(&1u32.to_le_bytes());
+    ph.extend_from_slice(&5u32.to_le_bytes());
+    ph.extend_from_slice(&0x1000u64.to_le_bytes());
+    ph.extend_from_slice(&0u64.to_le_bytes());
+    ph.extend_from_slice(&0u64.to_le_bytes());
+    ph.extend_from_slice(&0x400u64.to_le_bytes());
+    ph.extend_from_slice(&0x400u64.to_le_bytes());
+    ph.extend_from_slice(&0x1000u64.to_le_bytes());
+    out.extend_from_slice(&ph);
+
+    // padding 到 0x1000（确定性 PRNG）
+    let pad = 0x1000 - out.len();
+    out.extend_from_slice(&prng_bytes(5, pad));
+    // 数据区 [0x1000, 0x1400)：切片内容来源
+    out.extend_from_slice(&prng_bytes(7, 0x400));
 
     // .dynsym（null 条目 + 各符号；Elf64_Sym = 24B）
     let mut dynsym = vec![0u8; 24];
@@ -170,7 +194,7 @@ pub fn build_minimal_elf(symbols: &[(&str, u64, u64)]) -> Vec<u8> {
     let n3 = shstr.len();
     shstr.extend_from_slice(b".shstrtab\0");
 
-    // 数据区布局
+    // 数据区之后的表布局
     let dynsym_off = out.len();
     out.extend_from_slice(&dynsym);
     let dynstr_off = out.len();
@@ -204,6 +228,10 @@ pub fn build_minimal_elf(symbols: &[(&str, u64, u64)]) -> Vec<u8> {
     out
 }
 
+/// ELF 数据区内容（切片期望值的计算来源）：prng_bytes(7, 0x400)
+pub const ELF_DATA_SEED: u64 = 7;
+pub const ELF_DATA_LEN: usize = 0x400;
+
 /// 完整合成 APK：manifest + 真 DEX（1 native stub）+ 高/低熵 asset + **带 dynsym 的 so** + res 条目。
 pub fn build_synthetic_apk(path: &std::path::Path) {
     let file = std::fs::File::create(path).expect("create apk");
@@ -223,11 +251,11 @@ pub fn build_synthetic_apk(path: &std::path::Path) {
     let low = (0..4096).map(|i| if i % 2 == 0 { b'a' } else { b'b' }).collect::<Vec<u8>>();
     w.write_all(&low).unwrap();
 
-    // so：真导出表——目标符号 + 一个干扰符号（防误命中的查表检验）
+    // so：真导出表——目标符号（VA 0x204）+ 一个干扰符号（防误命中的查表检验）
     w.start_file("lib/arm64-v8a/libtest.so", opts).unwrap();
     let elf = build_minimal_elf(&[
-        ("Java_com_example_NativeProbe_nativeFoo", 0x1204, 64),
-        ("_JNI_OnLoad", 0x1300, 32),
+        ("Java_com_example_NativeProbe_nativeFoo", 0x204, 64),
+        ("_JNI_OnLoad", 0x300, 32),
     ]);
     w.write_all(&elf).unwrap();
 

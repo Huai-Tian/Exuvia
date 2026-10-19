@@ -9,6 +9,36 @@ pub struct ExportedSymbol {
     pub st_size: u64,
 }
 
+/// VA → 文件偏移映射（PT_LOAD：p_offset/p_vaddr/p_filesz）。
+/// 无 PT_LOAD 且 va 落在文件内：退化直用（合成 so 的形态；真 so 恒有 PT_LOAD）。
+pub fn va_to_file_offset(data: &[u8], va: u64) -> Result<u64, String> {
+    let phoff = u64_at(data, 0x20)?;
+    let phentsize = u16_at(data, 0x36)? as usize;
+    let phnum = u16_at(data, 0x38)? as usize;
+    if phnum == 0 || phentsize < 56 {
+        // 退化：无 program header 的合成形态，va < len 时直用
+        return if (va as usize) < data.len() {
+            Ok(va)
+        } else {
+            Err(format!("elf: va 0x{va:x} out of file (no PT_LOAD)"))
+        };
+    }
+    check(data, phoff, phnum as u64 * phentsize as u64, "program headers")?;
+    for i in 0..phnum {
+        let base = phoff as usize + i * phentsize;
+        if u32_at(data, base)? != 1 {
+            continue; // 非 PT_LOAD
+        }
+        let p_offset = u64_at(data, base + 8)?;
+        let p_vaddr = u64_at(data, base + 16)?;
+        let p_filesz = u64_at(data, base + 32)?;
+        if va >= p_vaddr && va < p_vaddr + p_filesz {
+            return Ok(va - p_vaddr + p_offset);
+        }
+    }
+    Err(format!("elf: va 0x{va:x} not in any PT_LOAD"))
+}
+
 const EM_AARCH64: u16 = 183;
 const SHT_DYNSYM: u32 = 11;
 

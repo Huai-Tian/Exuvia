@@ -48,6 +48,7 @@ Work packages may inject family guidance — follow it first; it outranks genera
         "native stub — body outside DEX (access_flags ACC_NATIVE)",
         "symbol Java_com.example.LoginManager_sign → lib/arm64-v8a/libtest.so (dynsym, st_value=0x1204, st_size=64)"
       ],
+      "evidence": ["evidence/debt-0001/"],
       "attempts": 0
     }
   ]
@@ -74,6 +75,7 @@ Work packages may inject family guidance — follow it first; it outranks genera
         "native stub — body outside DEX (access_flags ACC_NATIVE)",
         "symbol Java_com.example.LoginManager_sign → lib/arm64-v8a/libtest.so (dynsym, st_value=0x1204, st_size=64)"
       ],
+      "evidence": ["evidence/debt-0001/"],
       "attempts": 0
     }
   ]
@@ -82,6 +84,23 @@ Work packages may inject family guidance — follow it first; it outranks genera
 
 - `allowed_debt` is the scope-gate source: your proposal may only claim these debt ids.
 - `guidance` empty = family knowledge not matched/absent in the fence; when present it outranks general intuition.
+
+`evidence/<debt_id>/` (sliced so bytes for each symbol hit; CI fixture):
+
+```json
+{
+  "$schema": "exuvia.evidence",
+  "debt_id": "debt-0001",
+  "so": "lib/arm64-v8a/libtest.so",
+  "symbol": "Java_com.example.LoginManager_sign",
+  "st_value": 4612,
+  "st_size": 64,
+  "file_offset": 4628,
+  "slice_sha256": "sha256:…"
+}
+```
+
+- `slice.bin` beside the manifest carries the method-body bytes; verify the hash before trusting them.
 
 - `fingerprint.matched = false` → unknown-family full exploration. Normal, not an error; it is the default while the fence defines no fingerprint.
 - `dex[].magic_ok` false or `parse_ok` false → encrypted/corrupt DEX (hostile-input normal): no method facts from that file; a high-entropy asset beside it is the classic packer shape.

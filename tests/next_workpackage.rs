@@ -11,7 +11,7 @@ fn setup_handoff(dir: &Path) {
     let apk = dir.join("synthetic.apk");
     common::build_synthetic_apk(&apk);
 
-    let (report, debt) = first_pass(&apk).unwrap();
+    let (report, debt, _slices) = first_pass(&apk).unwrap();
     assert_eq!(report.debt.total, 1, "一个 native stub → 一条欠账");
     assert_eq!(debt.entries.len(), 1);
     let hd = dir.join("handoff");

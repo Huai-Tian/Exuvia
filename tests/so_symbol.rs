@@ -25,13 +25,13 @@ fn jni_name_derivation_is_mechanical() {
 #[test]
 fn elf_exported_symbols_reads_dynsym() {
     let elf_bytes = common::build_minimal_elf(&[
-        ("Java_com_example_NativeProbe_nativeFoo", 0x1204, 64),
-        ("_JNI_OnLoad", 0x1300, 32),
+        ("Java_com_example_NativeProbe_nativeFoo", 0x204, 64),
+        ("_JNI_OnLoad", 0x300, 32),
     ]);
     let syms = elf::exported_symbols(&elf_bytes).expect("parse elf");
     assert_eq!(syms.len(), 2, "null 条目不入表");
     let target = syms.iter().find(|s| s.name == "Java_com_example_NativeProbe_nativeFoo").expect("hit");
-    assert_eq!(target.st_value, 0x1204);
+    assert_eq!(target.st_value, 0x204);
     assert_eq!(target.st_size, 64);
 }
 
@@ -63,7 +63,7 @@ fn first_pass_locates_symbol_in_debt_facts() {
     let apk = dir.join("synthetic.apk");
     common::build_synthetic_apk(&apk);
 
-    let (report, debt) = exuvia::track_a::first_pass(&apk).expect("first pass");
+    let (report, debt, slices) = exuvia::track_a::first_pass(&apk).expect("first pass");
     assert_eq!(report.debt.total, 1);
     let e = &debt.entries[0];
     assert_eq!(e.method.name, "nativeFoo");
@@ -72,9 +72,15 @@ fn first_pass_locates_symbol_in_debt_facts() {
     assert!(
         symbol_fact.contains("Java_com_example_NativeProbe_nativeFoo")
             && symbol_fact.contains("lib/arm64-v8a/libtest.so")
-            && symbol_fact.contains("st_value=0x1204"),
+            && symbol_fact.contains("st_value=0x204"),
         "got: {symbol_fact}"
     );
+    // 切片：VA→文件偏移映射 + 内容字节精确
+    assert_eq!(slices.len(), 1);
+    assert_eq!(slices[0].file_offset, 0x1204, "VA 0x204 经 PT_LOAD(p_offset=0x1000) 映射");
+    let expected = common::prng_bytes(common::ELF_DATA_SEED, common::ELF_DATA_LEN);
+    assert_eq!(slices[0].bytes, expected[0x204..0x204 + 64]);
+    assert_eq!(e.evidence, vec!["evidence/debt-0001/".to_string()]);
     assert!(!e.facts.iter().any(|f| f.contains("_JNI_OnLoad")), "干扰符号不得进入定位事实");
 }
 
@@ -95,7 +101,7 @@ fn first_pass_reports_symbol_not_found_as_fact() {
     use std::io::Write as _;
     w.finish().unwrap();
 
-    let (_, debt) = exuvia::track_a::first_pass(&apk).expect("first pass");
+    let (_, debt, _) = exuvia::track_a::first_pass(&apk).expect("first pass");
     let e = &debt.entries[0];
     assert!(
         e.facts.iter().any(|f| f.contains("not found in any so export table")),

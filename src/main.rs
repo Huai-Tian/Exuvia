@@ -126,12 +126,36 @@ fn main() -> ExitCode {
         },
         None => match cli.apk {
             Some(apk_path) => match exuvia::track_a::first_pass(&apk_path) {
-                Ok((report, debt)) => {
+                Ok((report, debt, slices)) => {
                     let rjson = serde_json::to_string_pretty(&report).unwrap();
                     let djson = serde_json::to_string_pretty(&debt).unwrap();
                     std::fs::create_dir_all("handoff").ok();
                     std::fs::write("handoff/REPORT.json", &rjson).ok();
                     std::fs::write("handoff/debt.json", &djson).ok();
+                    // evidence 切片落盘：slice.bin + hash 锚定 manifest
+                    for s in &slices {
+                        let dir = format!("handoff/evidence/{}", s.debt_id);
+                        std::fs::create_dir_all(&dir).ok();
+                        std::fs::write(format!("{dir}/slice.bin"), &s.bytes).ok();
+                        let digest = {
+                            use sha2::Digest as _;
+                            format!(
+                                "sha256:{}",
+                                sha2::Sha256::digest(&s.bytes).iter().map(|b| format!("{b:02x}")).collect::<String>()
+                            )
+                        };
+                        let m = exuvia::report::EvidenceManifest {
+                            schema: "exuvia.evidence".to_string(),
+                            debt_id: s.debt_id.clone(),
+                            so: s.so_name.clone(),
+                            symbol: s.symbol.clone(),
+                            st_value: s.st_value,
+                            st_size: s.st_size,
+                            file_offset: s.file_offset,
+                            slice_sha256: digest,
+                        };
+                        std::fs::write(format!("{dir}/manifest.json"), serde_json::to_vec_pretty(&m).unwrap()).ok();
+                    }
                     println!("{rjson}");
                     println!("{djson}");
                     ExitCode::SUCCESS
