@@ -21,7 +21,12 @@ Exuvia 是一个**面向 AI Agent 的 Android 通用脱壳 / 代码恢复流水�
 - **名字**：Exuvia（蝉蜕）——壳留在原地，代码恢复生命
 - **口号**：*"Separate the shell from what lives inside."*
 
-**项目当前状态：spec 阶段。** 尚无实现代码。第一个 commit 是接口与灵魂（见第 6 节），不是源码。
+**项目当前状态：v0.1 外循环全链已实现（合成样本验证，23 测试 CI 全绿）。**
+- 契约层：五协议 fixture 双向锚定（goal/proposal/report/debt/workpackage）、serde 类型即格式、错误码公开表、fence 空（生长规则就位）；
+- 轨道 A 前两段：APK 解包 → 清点 → 熵测量（难度信号第一项）→ DEX 解析 → ACC_NATIVE stub → debt.json；
+- 外循环闭合：`exuvia packed.apk → next --goal → [LLM 解卡点] → unpack merge（四层闸门 + 沙箱双锚 + 销账）→ validate`；
+- 终点定义已拍板：行为一致的可运行 APK（§2.1）+ 忠实还原原则；
+- **下一里程碑：真实一代壳样本的第一次剖析**（脚手架的实战自检）；其后 so 符号定位（capstone 测量）、repack 四组件逐件生长。
 
 ---
 
