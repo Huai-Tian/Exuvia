@@ -38,6 +38,19 @@ enum Cmd {
         #[arg(long)]
         goal: std::path::PathBuf,
     },
+    /// 剖析包操作（validate 自检 / merge proposal 回流）
+    Unpack {
+        #[command(subcommand)]
+        cmd: UnpackCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum UnpackCmd {
+    /// proposal 回流：四层闸门（语法/格式 → 对账 → 语义双锚 → 销账）
+    Merge { dir: std::path::PathBuf },
+    /// 剖析包自检（下游消费前跑）
+    Validate { dir: std::path::PathBuf },
 }
 
 fn main() -> ExitCode {
@@ -80,6 +93,36 @@ fn main() -> ExitCode {
                 eprintln!("{{\"error\":\"{}\"}}", e.replace('"', "'"));
                 ExitCode::FAILURE
             }
+        },
+        Some(Cmd::Unpack { cmd }) => match cmd {
+            UnpackCmd::Merge { dir } => {
+                match exuvia::gate::merge(&dir, std::path::Path::new("handoff"), std::path::Path::new("workpackage.json")) {
+                    Ok(out) => {
+                        let json = serde_json::to_string_pretty(&out).unwrap();
+                        println!("{json}");
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        // 结构化拒绝：错误码 + 定位 + 期望 + hint（报错是给 Agent 看的）
+                        let mut o = serde_json::json!({ "error": e.code, "detail": e.detail });
+                        if let Some(h) = &e.hint {
+                            o["hint"] = serde_json::json!(h);
+                        }
+                        eprintln!("{o}");
+                        ExitCode::FAILURE
+                    }
+                }
+            }
+            UnpackCmd::Validate { dir } => match exuvia::gate::validate(&dir) {
+                Ok(v) => {
+                    println!("{v}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("{{\"error\":\"{}\",\"detail\":\"{}\"}}", e.code, e.detail.replace('"', "'"));
+                    ExitCode::FAILURE
+                }
+            },
         },
         None => match cli.apk {
             Some(apk_path) => match exuvia::track_a::first_pass(&apk_path) {

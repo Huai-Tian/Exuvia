@@ -160,7 +160,23 @@ Example (CI fixture):
 ## 5. Merge gate
 
 Layers: syntax/format (serde, unknown fields rejected) → scope + hash reconciliation (including `accepts_equivalent` check for `kind = "equivalent"` claims) → semantic, routed by `kind`: structural assertion Rust-side × byte tests (`recovered`) or behavioral differential (`equivalent`) → verdict.
-Rejection = `error code + location + expected + hint`. The hint outranks intuition. Error codes are implementation-defined — do not invent or rely on undocumented ones.
+Rejection = `error code + detail + hint` on stderr, exit 1. The hint outranks intuition.
+
+Documented error codes (this set is authoritative; do not rely on others):
+
+| code | layer | meaning |
+|---|---|---|
+| `E_JSON` / `E_SCHEMA` / `E_VERSION` | ① | manifest parse failed / wrong `$schema` / unsupported version |
+| `E_SCOPE_SOURCE` | ② | workpackage.json missing or unreadable (re-run `next`) |
+| `E_SCOPE` / `E_DUPLICATE_CLAIM` | ② | debt id outside `allowed_debt` / claimed twice |
+| `E_EQUIV_NOT_ACCEPTED` | ② | `equivalent` claim while goal lacks `accepts_equivalent` |
+| `E_HASH_MISMATCH` | ② | artifact bytes ≠ declared hash |
+| `E_MISSING_FILE` | ② | artifact or test file absent |
+| `E_IMPORT_BLOCKED` | ② | import outside the sandbox whitelist |
+| `E_SANDBOX_TIMEOUT` / `E_SANDBOX` | ③ | soft timeout (CPU rlimit is the hard backstop) / execution failure |
+| `E_OUTPUT_MISMATCH` | ③ | output ≠ expected test value |
+| `E_STRUCT_INVALID` | ③ | output has DEX shape but fails structural parse (Rust-side anchor) |
+| `E_READ` / `E_IO` / `E_INTERNAL_STATE` | — | tool-side I/O or handoff state inconsistency |
 
 ## 6. Escalation
 

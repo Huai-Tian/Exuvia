@@ -279,6 +279,7 @@ name = "exuvia"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "libc",
  "schemars",
  "serde",
  "serde_json",
