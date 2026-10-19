@@ -20,6 +20,7 @@ Work packages may inject family guidance — follow it first; it outranks genera
   - `status = blocked-solvable` → your arena; `out-of-scope` → spend nothing;
   - `jni_calls` high → JNI idiom lens; `vm_handlers` high → VMP, weigh out-of-scope (§6 step 2) first; `opcode_entropy` high without vm_handlers → control-flow obfuscation, tractable;
   - thresholds live in the fence (§7).
+- Two output paths per method, chosen by cost comparison (yours, from the facts above): `recovered` (restore original bytes) vs `equivalent` (read the L2 decompilation of the native code, write a functionally equivalent implementation). When recovery cost far exceeds equivalent-implementation cost, take the `equivalent` path — but only if `accepts_equivalent` is set in the goal (§3).
 - `attempts.log`: read before attempting. A path that died twice is dead.
 
 ## 3. goal.json — DRAFT v0
@@ -35,6 +36,7 @@ Every field machine-decidable. Categories are named lookup tables defined in the
 | `targets[].profile` | category name defined in the fence |
 | `levels.default` | `"L1"` / `"L2"` / `"L3"` |
 | `tracks` | subset of `["A","B","C"]` |
+| `accepts_equivalent` | bool, default `false` — if true, debt may be cleared by a `kind = "equivalent"` proposal (§4) |
 | `stop` | `"targets-satisfied"` — targets cleared, a fact not a promise |
 
 Example (CI fixture):
@@ -49,6 +51,7 @@ Example (CI fixture):
   ],
   "levels": { "default": "L2" },
   "tracks": ["A", "B"],
+  "accepts_equivalent": true,
   "stop": "targets-satisfied"
 }
 ```
@@ -60,8 +63,9 @@ Natural language in targets is rejected.
 Structure: `proposal.json` (manifest) + `artifacts/` + `tests/`. Rules:
 
 - claims limited to work-package debt ids (scope gate);
+- `claims[].kind` routes gate validation: `"recovered"` → structural assertion (legal DEX, magic, class-count reconciliation) × byte-level tests; `"equivalent"` → behavioral differential tests only; an `equivalent` claim against a goal without `accepts_equivalent` is rejected at the scope layer;
 - artifacts: pure functions, bytes → bytes, no I/O / network / global state; sandbox enforces an import whitelist;
-- `.in`/`.out` pairs built from independent format facts (DEX magic = `"dex\n035\0"`), never from your own algorithm's output — the dual anchor catches self-consistent errors;
+- test pairs: for `recovered`, expected values from independent format facts (DEX magic = `"dex\n035\0"`), never from your own algorithm's output; for `equivalent`, expected values derived from reading the L2 decompilation of the native code — the differential proves behavior on covered cases, not full equivalence;
 - artifact hashes byte-exact; hash before submitting;
 - no timestamps or machine names — identical content must produce identical bytes.
 
@@ -74,6 +78,7 @@ Example (CI fixture):
   "claims": [
     {
       "debt_id": "debt-0f3a",
+      "kind": "recovered",
       "artifact": "artifacts/decrypt_a3f9.py",
       "entry": "decrypt",
       "tests": [{ "input": "tests/slice-a3f9.in", "expected": "tests/slice-a3f9.out" }]
@@ -88,16 +93,17 @@ Example (CI fixture):
 
 ## 5. Merge gate
 
-Layers: syntax/format (serde, unknown fields rejected) → scope + hash reconciliation → semantic (structural assertion Rust-side × numeric tests in sandbox) → verdict.
+Layers: syntax/format (serde, unknown fields rejected) → scope + hash reconciliation (including `accepts_equivalent` check for `kind = "equivalent"` claims) → semantic, routed by `kind`: structural assertion Rust-side × byte tests (`recovered`) or behavioral differential (`equivalent`) → verdict.
 Rejection = `error code + location + expected + hint`. The hint outranks intuition. Error codes are implementation-defined — do not invent or rely on undocumented ones.
 
 ## 6. Escalation
 
 1. Re-read work-package guidance + attempts.log for this debt id.
 2. Signals indicate out-of-scope (vm_handlers high, device-bound key, network payload) → conclude without a proposal; report. Exit.
-3. Need a prerequisite (adjacent method, key derivation) → reorder `targets` next round.
-4. Rejected twice → hint holds the reason; one more fix with a different approach. A third identical approach is waste.
-5. Still stuck → attempts.log-grade note: tried / why failed / next. Honest debt is a valid deliverable.
+3. Recovery cost far exceeds equivalent-implementation cost (heavy VMP, aggressive control-flow) → switch to the `equivalent` path (§2), requires `accepts_equivalent` in the goal; goal not set → reorder `targets` next round with it set, or report the trade-off to the user.
+4. Need a prerequisite (adjacent method, key derivation) → reorder `targets` next round.
+5. Rejected twice → hint holds the reason; one more fix with a different approach. A third identical approach is waste.
+6. Still stuck → attempts.log-grade note: tried / why failed / next. Honest debt is a valid deliverable.
 
 ## 7. Profile fence
 

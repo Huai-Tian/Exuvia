@@ -1,0 +1,107 @@
+//! 文档即测试：SKILL.md 的 fixture 与版本锚点是活契约。
+//! 三向锚定：SKILL 示例 ↔ serde 类型 ↔ 版本常量。任一侧漂移，此测试即红。
+
+use exuvia::protocol::{Goal, Proposal};
+
+fn skill_md() -> String {
+    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("SKILL.md");
+    std::fs::read_to_string(p).expect("SKILL.md readable")
+}
+
+/// 提取 SKILL.md 中全部 ```json 块（按出现顺序）。
+fn json_blocks(md: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut inside = false;
+    for line in md.lines() {
+        let t = line.trim();
+        if t == "```json" {
+            inside = true;
+            out.push(String::new());
+        } else if inside && t == "```" {
+            inside = false;
+        } else if inside {
+            out.last_mut().unwrap().push_str(line);
+            out.last_mut().unwrap().push('\n');
+        }
+    }
+    out
+}
+
+#[test]
+fn fence_extracts_parses_and_is_empty() {
+    let md = skill_md();
+    let raw = exuvia::fence::extract(&md).expect("fence found");
+    let val: toml::Value = toml::from_str(&raw).expect("fence parses as TOML");
+    assert!(val.as_table().map_or(true, |t| t.is_empty()), "fence must stay empty by design until fields are earned (growth rules)");
+}
+
+#[test]
+fn skill_json_fixtures_parse_through_serde_types() {
+    let blocks = json_blocks(&skill_md());
+    assert!(blocks.len() >= 2, "expected goal + proposal fixtures");
+    let mut kinds = 0;
+    for b in &blocks {
+        let v: serde_json::Value = serde_json::from_str(b).expect("fixture is valid JSON");
+        match v.get("$schema").and_then(|s| s.as_str()) {
+            Some("exuvia.goal") => {
+                let g: Goal = serde_json::from_str(b).expect("goal fixture matches Goal type (deny_unknown_fields)");
+                assert_eq!(g.goal_version, exuvia::version::GOAL_VERSION);
+                assert_eq!(g.schema, "exuvia.goal");
+                kinds |= 1;
+            }
+            Some("exuvia.proposal") => {
+                let p: Proposal = serde_json::from_str(b).expect("proposal fixture matches Proposal type (deny_unknown_fields)");
+                assert_eq!(p.proposal_version, exuvia::version::PROPOSAL_VERSION);
+                kinds |= 2;
+            }
+            other => panic!("fixture with unknown $schema {other:?} — every json block in SKILL.md must be an anchored fixture"),
+        }
+    }
+    assert_eq!(kinds, 3, "both goal and proposal fixtures must be present");
+}
+
+#[test]
+fn version_anchors_match_source_constants() {
+    let md = skill_md();
+    // 限定在 §8 Version anchors 节内解析，避免匹配到 §3/§4 fixture 中的同名字段
+    let anchors = md
+        .split("## 8. Version anchors")
+        .nth(1)
+        .expect("version anchors section exists");
+    let skill_v = anchors
+        .lines()
+        .find(|l| l.contains("SKILL_VERSION:"))
+        .expect("SKILL_VERSION anchor line")
+        .split("SKILL_VERSION:")
+        .nth(1)
+        .unwrap()
+        .trim();
+    assert_eq!(skill_v, exuvia::version::SKILL_VERSION, "SKILL.md §8 anchor must equal src/version.rs");
+    for (name, got) in [
+        ("handoff_version", exuvia::version::HANDOFF_VERSION),
+        ("goal_version", exuvia::version::GOAL_VERSION),
+        ("proposal_version", exuvia::version::PROPOSAL_VERSION),
+    ] {
+        let line = anchors.lines().find(|l| l.contains(name)).unwrap_or_else(|| panic!("{name} anchor exists"));
+        let doc: i64 = line
+            .split(name)
+            .nth(1)
+            .unwrap()
+            .trim()
+            .trim_start_matches(':')
+            .trim()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .trim_end_matches(',')
+            .parse()
+            .expect("numeric anchor");
+        assert_eq!(doc, got, "{name} anchor must equal src/version.rs");
+    }
+}
+
+#[test]
+fn unknown_fields_are_rejected() {
+    let bad = r#"{"$schema":"exuvia.goal","goal_version":1,"targets":[],"levels":{"default":"L1"},"tracks":[],"stop":"targets-satisfied","surprise_field":true}"#;
+    assert!(serde_json::from_str::<Goal>(bad).is_err(), "gate layer 1: unknown fields must be rejected");
+}

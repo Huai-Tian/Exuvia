@@ -129,6 +129,7 @@ release = 两个平台二进制 + SKILL.md + checksums。**纯文件，无目录
   ],
   "levels": { "default": "L2" },
   "tracks": ["A", "B"],
+  "accepts_equivalent": true,
   "stop": "targets-satisfied"
 }
 ```
@@ -286,6 +287,8 @@ OS 沙箱按平台分文件实现（单一接口 `run_sandboxed(code, args)`）�
 | 轨道 B/C 是推迟项 | 主路径（roadmap 期工程化） | 同上；四代壳处理原则从边界条款升格为主战场规则 |
 | 目标壳从一代壳起步 = 产品定位 | 一代壳 = 协议自检脚手架 | **主攻方向（新代企业壳）与工程第一步（便宜壳打通协议）是两件事**；验收语料直接用真实"原包+加固包"对 |
 
+**语义等效还原（通用恢复策略，非四代壳专属）**：每个方法有两条产出路径——`recovered`（还原原始字节）与 `equivalent`（读 L2 反编译的机器码，写出功能等效实现）。路径选择按**成本比较**，判断者是下游 LLM（工具只给难度事实，不做终审）；goal 的 `accepts_equivalent` 字段声明目标是否接受等效销账，proposal 的 `claims[].kind` 路由闸门验证（recovered → 结构断言×字节测试；equivalent → 行为差分）。**差分证明的是覆盖行为上的等价，不是全面等价**——audit trail 只记事实。
+
 ---
 
 ## 9. 范围边界（诚实清单，勿过度承诺）
@@ -323,6 +326,7 @@ OS 沙箱按平台分文件实现（单一接口 `run_sandboxed(code, args)`）�
 | fence | SKILL.md 内的 TOML 代码块（info string: `toml profile`），可执行判断的容器 |
 | installation-broken / unavailable | 自身组件损坏（拒绝运行）/ 外部能力缺席（降级标注）——严格二分 |
 | 卡点外包 | 把智能缺口压缩成工作包交给外部 LLM 的循环模式；全流程唯一烧 token 处 |
+| 语义等效还原 | 产出路径 `equivalent`：读机器码写功能等效实现，按成本比较选择；差分验证覆盖行为等价 |
 | 零学习曲线 | 不依赖历史积累，性能从第一次即峰值 |
 | 结构三次法则 | 新文件/目录/发行物需"同一需要出现三次"的实证 |
 | 躯体 / 灵魂 / 接口 | 二进制（含内嵌 runner）/ SKILL.md 单文件 / 三条协议数据流 |
