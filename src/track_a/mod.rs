@@ -2,6 +2,8 @@
 
 pub mod apk;
 pub mod dex;
+pub mod elf;
 pub mod entropy;
+pub mod jni;
 
 pub use apk::first_pass;

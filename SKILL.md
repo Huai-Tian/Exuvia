@@ -44,7 +44,10 @@ Work packages may inject family guidance — follow it first; it outranks genera
       "debt_id": "debt-0001",
       "method": { "class": "com.example.LoginManager", "name": "sign", "descriptor": "(Landroid/content/Context;[B)[B" },
       "status": "blocked-solvable",
-      "facts": ["native stub — body outside DEX (access_flags ACC_NATIVE)"],
+      "facts": [
+        "native stub — body outside DEX (access_flags ACC_NATIVE)",
+        "symbol Java_com.example.LoginManager_sign → lib/arm64-v8a/libtest.so (dynsym, st_value=0x1204, st_size=64)"
+      ],
       "attempts": 0
     }
   ]
@@ -67,7 +70,10 @@ Work packages may inject family guidance — follow it first; it outranks genera
       "debt_id": "debt-0001",
       "method": { "class": "com.example.LoginManager", "name": "sign", "descriptor": "(Landroid/content/Context;[B)[B" },
       "status": "blocked-solvable",
-      "facts": ["native stub — body outside DEX (access_flags ACC_NATIVE)"],
+      "facts": [
+        "native stub — body outside DEX (access_flags ACC_NATIVE)",
+        "symbol Java_com.example.LoginManager_sign → lib/arm64-v8a/libtest.so (dynsym, st_value=0x1204, st_size=64)"
+      ],
       "attempts": 0
     }
   ]

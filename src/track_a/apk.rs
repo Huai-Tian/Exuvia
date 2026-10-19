@@ -38,6 +38,7 @@ pub fn first_pass(apk_path: &Path) -> Result<(Report, DebtFile), String> {
 
     let mut dex = Vec::new();
     let mut so = Vec::new();
+    let mut so_symbols: Vec<(String, Vec<crate::track_a::elf::ExportedSymbol>)> = Vec::new();
     let mut assets = Vec::new();
     let mut manifest_present = false;
     let mut other: u64 = 0;
@@ -83,6 +84,15 @@ pub fn first_pass(apk_path: &Path) -> Result<(Report, DebtFile), String> {
                 None => (String::new(), false),
             };
             if has_file {
+                // 读 so 字节 → 导出符号表（符号定位的事实来源；敌意 ELF 由解析器范围校验兜底）
+                let mut bytes = Vec::new();
+                let e: &mut dyn std::io::Read = entry.by_ref();
+                e.read_to_end(&mut bytes).map_err(|x| format!("so read {name}: {x}"))?;
+                match crate::track_a::elf::exported_symbols(&bytes) {
+                    Ok(syms) => so_symbols.push((name.clone(), syms)),
+                    // 非 ELF / 解析失败：清点事实保留（name/abi/size），符号层如实缺席
+                    Err(_) => so_symbols.push((name.clone(), Vec::new())),
+                }
                 so.push(SoEntry { name, abi, size_bytes: size });
             } else {
                 other += 1;
@@ -126,13 +136,35 @@ pub fn first_pass(apk_path: &Path) -> Result<(Report, DebtFile), String> {
                 .and_then(|s| s.strip_suffix(';'))
                 .unwrap_or(&m.class)
                 .replace('/', ".");
+            // 符号定位（JNI 规范机械推导 → 全 so 导出表查表）：命中为事实，未命中也是事实
+            let mut facts = vec![
+                "native stub — body outside DEX (access_flags ACC_NATIVE)".to_string(),
+            ];
+            let cands = crate::track_a::jni::candidates(&fqcn, &m.name, &m.descriptor);
+            let mut hits: Vec<String> = Vec::new();
+            for (so_name, syms) in &so_symbols {
+                for sym in syms {
+                    if sym.name == cands[0] || sym.name == cands[1] {
+                        hits.push(format!(
+                            "symbol {} → {} (dynsym, st_value=0x{:x}, st_size={})",
+                            sym.name, so_name, sym.st_value, sym.st_size
+                        ));
+                    }
+                }
+            }
+            if hits.is_empty() {
+                facts.push(format!(
+                    "symbol candidates [{}, {}] not found in any so export table (checked {} so)",
+                    cands[0], cands[1], so_symbols.len()
+                ));
+            } else {
+                facts.extend(hits);
+            }
             entries.push(DebtEntry {
                 debt_id: format!("debt-{:04}", i + 1),
                 method: MethodRef { class: fqcn, name: m.name.clone(), descriptor: m.descriptor.clone() },
                 status: DebtStatus::BlockedSolvable,
-                facts: vec![
-                    "native stub — body outside DEX (access_flags ACC_NATIVE)".to_string(),
-                ],
+                facts,
                 attempts: 0,
             });
         }
