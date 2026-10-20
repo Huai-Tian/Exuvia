@@ -331,7 +331,7 @@ def make_libc(uc, elf):
         return addr
 
     table = {
-        'malloc': f_malloc, '_Znwm': f_malloc, 'calloc': f_calloc,
+        'malloc': f_malloc, '_Znwm': f_malloc, '_Znam': f_malloc, 'calloc': f_calloc,
         'free': f_free, '_ZdlPv': f_free, '_ZdaPv': f_free,
         'memcpy': f_memcpy, 'memmove': f_memcpy, 'memset': f_memset,
         'memcmp': f_memcmp, 'strlen': f_strlen, '__strlen_chk': f_strlen,
@@ -442,13 +442,19 @@ def main():
         if rtype == R_RELATIVE:
             uc.mem_write(r_offset, struct.pack('<Q', addend))
     # unbound-slot defaults (shell runtime-patched slots → malloc/memcpy semantics)
+    # r16 fix: each --got override gets its OWN stub slot — the old single shared
+    # slot meant "a:malloc b:memcpy" silently collapsed to the last name and the
+    # first call site executed the wrong semantics (Battle-1: decoy-GOT shells
+    # need several overrides in one run).
+    got_i = 0
     for slot, name in (map(lambda p: (int(p[0], 16), p[1]), (kv.split(':', 1) for kv in args.got))):
-        sa = STUB + 0x8000
+        sa = STUB + 0x8000 + 8 * got_i
+        got_i += 1
         stub_addr[sa] = libc.get(name, lambda x0, x1, x2, x3, x4=0, x5=0: 0)
         uc.mem_write(slot, struct.pack('<Q', sa))
-    sa = STUB + 0x8008
+    sa = STUB + 0x9000
     stub_addr[sa] = libc['malloc']
-    sa2 = STUB + 0x8010
+    sa2 = STUB + 0x9008
     stub_addr[sa2] = libc['memcpy']
 
     if args.java:
