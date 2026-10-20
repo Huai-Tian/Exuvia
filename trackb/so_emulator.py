@@ -152,6 +152,7 @@ class Elf:
 # bionic libc semantics (format-level behavior only; failures return 0 like stubs)
 def make_libc(uc, elf):
     heap_ptr = [HEAP]
+    import zlib
 
     def bump(sz):
         p = heap_ptr[0]
@@ -172,6 +173,41 @@ def make_libc(uc, elf):
                 return bytes(out)
             out += c
             a += 1
+
+    # zlib bridge (inflate family): the z_stream lives in emulated memory, the
+    # decompression state machine lives here — keyed by the stream pointer.
+    zlib_objs = {}
+
+    def f_inflateInit_(x0, x1, x2, x3):
+        zlib_objs[x0] = {'d': zlib.decompressobj(), 'pending': b''}
+        return 0  # Z_OK
+
+    def f_inflateEnd(x0, x1, x2, x3):
+        zlib_objs.pop(x0, None)
+        return 0
+
+    def f_inflate(x0, x1, x2, x3):
+        s = x0
+        st = zlib_objs.setdefault(s, {'d': zlib.decompressobj(), 'pending': b''})
+        next_in = struct.unpack_from('<Q', rd(s, 8))[0]
+        avail_in = struct.unpack_from('<I', rd(s + 8, 4))[0]
+        next_out = struct.unpack_from('<Q', rd(s + 0x18, 8))[0]
+        avail_out = struct.unpack_from('<I', rd(s + 0x20, 4))[0]
+        total_out = struct.unpack_from('<Q', rd(s + 0x28, 8))[0]
+        data = st['pending'] + (rd(next_in, avail_in) if avail_in and next_in else b'')
+        try:
+            out = st['d'].decompress(data, avail_out)
+            st['pending'] = st['d'].unconsumed_tail
+        except zlib.error:
+            return -3  # Z_DATA_ERROR
+        consumed = len(data) - len(st['pending'])
+        if next_out and out:
+            wr(next_out, out)
+        wr(s + 0x00, struct.pack('<Q', (next_in + consumed) & 0xFFFFFFFFFFFFFFFF))
+        wr(s + 0x08, struct.pack('<I', len(st['pending'])))
+        wr(s + 0x20, struct.pack('<I', max(avail_out - len(out), 0)))
+        wr(s + 0x28, struct.pack('<Q', total_out + len(out)))
+        return 1 if st['d'].eof else 0  # Z_STREAM_END / Z_OK
 
     def f_malloc(x0, x1, x2, x3):
         return bump(max(x0, 1))
@@ -221,6 +257,7 @@ def make_libc(uc, elf):
         'srand': f_noop, 'rand': lambda x0, x1, x2, x3: 42,
         'dladdr': lambda x0, x1, x2, x3: (wr(x1, struct.pack('<QQQQ', 0, 0, 0, 0)), 0)[1],
         'dlerror': f_noop, '__errno': f_errno, 'sysconf': lambda x0, x1, x2, x3: 4096,
+        'inflate': f_inflate, 'inflateInit_': f_inflateInit_, 'inflateEnd': f_inflateEnd,
     }
     return table
 
@@ -235,6 +272,10 @@ def main():
     ap.add_argument('--got', action='append', default=[],
                     help='slot:name — override a GOT slot semantics (hex slot, libc name)')
     ap.add_argument('--java', action='store_true', help='stub JavaVM/JNIEnv (fake tables, RegisterNatives capture)')
+    ap.add_argument('--poke', action='append', default=[],
+                    help='addr:hex — write bytes into emulated memory before run (e.g. this-struct setup)')
+    ap.add_argument('--load', action='append', default=[],
+                    help='file:va — map an external file into emulated memory (cross-file black-box, e.g. a ciphertext container living in another file)')
     ap.add_argument('--timeout', type=int, default=60, help='emulation timeout seconds')
     args = ap.parse_args()
 
@@ -332,6 +373,20 @@ def main():
 
     uc.mem_write(TLS + 0x28, b'\xDE\xAD\xBE\xEF\xCA\xFE\x00\x01')
     uc.reg_write(UC_ARM64_REG_TPIDR_EL0, TLS)
+    for spec in args.load:
+        path, va_s = spec.rsplit(':', 1)
+        blob = open(path, 'rb').read()
+        va = int(va_s, 0)
+        base = va & ~(PAGE - 1)
+        end = (va + len(blob) + PAGE - 1) & ~(PAGE - 1)
+        try:
+            uc.mem_map(base, end - base)
+        except Exception:
+            pass  # already mapped — plain write below
+        uc.mem_write(va, blob)
+    for spec in args.poke:
+        addr_s, hexdata = spec.split(':', 1)
+        uc.mem_write(int(addr_s, 0), bytes.fromhex(hexdata))
     uc.reg_write(UC_ARM64_REG_SP, STACK + STACKSZ // 2)
     for spec in args.arg:
         reg, val = spec.split('=')

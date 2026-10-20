@@ -26,7 +26,7 @@ Exuvia 是一个**面向 AI Agent 的 Android 通用脱壳 / 代码恢复流水�
 - 卡点两类：method-native-stub（ACC_NATIVE stub + JNI 符号定位 + 方法体切片）与 encrypted-payload（三机械来源：坏 DEX 文件 / so 内明文 DEX 扫描命中 / assets ELF 零命中负事实）+ 解密例程候选机械定位（JNI_OnLoad / init_array 双路径：PT_DYNAMIC 运行时视角优先）；
 - 外循环闭合且留痕：`exuvia packed.apk → next --goal → [LLM 解卡点] → unpack merge（四层闸门 + 沙箱双锚 + 销账）→ validate`；merge 拒绝时 attempts.log 记 merge-rejected + 被认领卡点 attempts 递增；recovered DEX 形状产物归档 workspace/<debt_id>/recovered.dex；
 - 实战修正（真实样本驱动，全部机械规则、零厂商特判）：#1 DEX 解析器按规范对齐（method_id 8B / type_list u16）；#2 assets ELF 纳入清点与符号查表；#3 so 内明文 DEX 机械扫描；#4 PT_DYNAMIC 运行时视角双路径 + ELF64 全架构符号 + 导出符号清单进 facts；
-- 第一战已测绘（attempts.log 诚实台账）：壳形态 = dex 尾部密文载体 + so 内嵌段 + interpreter 化控制流 + RegisterNatives 动态注册；解密链已解至 RC4 变体（KSA/PRGA 全解、unicorn 与 python 复现交叉验证一致）；卡点 = 分层密钥（静态 key 属内层，外层来源待解）；两个密文容器已定位；ELF32 记为候选修正；
+- 第一战已测绘（attempts.log 诚实台账，三轮留痕）：壳形态 = dex 尾部密文载体 + so 内嵌段 + interpreter 化控制流 + RegisterNatives 动态注册；解密链已解至 RC4 变体（KSA/PRGA 全解、unicorn 与 python 复现交叉验证一致）+ zlib 解压实锤（112B z_stream 的 inflateInit_）；key 常量确认在只读段（真静态）；**终局结论（六路静态 + 两路黑盒 + 双架构对照收敛）：该技术族把 DynCryptor 的调用现场（真实密文指针/长度）作为纯运行时事实——轨道 A 与函数级轨道 B 在此结构性到界，免费档即需轨道 C 的运行时事实（§9 VMP 条款的预判被提前命中）**。产品路径确认：轨道 C 按设计保持用户侧能力（§3.1），本项目的交付职责 = 把卡点与验证回流定义到机械可判（hook 剧本作为工作包 guidance 附件——**fence 首条族知识候选，待维护者确认**）；ELF32 记为候选修正；
 - CLI 契约表全兑现：--version / --profile / --goal / --json / --resume、next、schema --dump、unpack validate / merge；
 - handoff 结构落盘完整：REPORT.json + REPORT.md、debt.json、evidence/<debt_id>/{manifest.json, <name>.bin}、attempts.log、workspace/；
 - ci/verify（cargo workspace member，不进发行物）：register 语料登记 + check 原包对账——比对逻辑公开、样本私有；
