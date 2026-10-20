@@ -692,10 +692,19 @@ def main():
         # r20: 崩溃现场寄存器快照（x0-x7/sp/lr/pc）——深链故障定位刚需（装载器清零
         # 循环越界类崩溃的写入目标只能从这里读出）
         regs = {}
+        from unicorn.arm64_const import (UC_ARM64_REG_X19, UC_ARM64_REG_X20, UC_ARM64_REG_X21,
+                                         UC_ARM64_REG_X22, UC_ARM64_REG_X23, UC_ARM64_REG_X24,
+                                         UC_ARM64_REG_X25, UC_ARM64_REG_X26, UC_ARM64_REG_X27,
+                                         UC_ARM64_REG_X28)
         for name, const in (('x0', UC_ARM64_REG_X0), ('x1', UC_ARM64_REG_X1),
                             ('x2', UC_ARM64_REG_X2), ('x3', UC_ARM64_REG_X3),
                             ('x4', UC_ARM64_REG_X4), ('x5', UC_ARM64_REG_X5),
                             ('x6', UC_ARM64_REG_X6), ('x7', UC_ARM64_REG_X7),
+                            ('x19', UC_ARM64_REG_X19), ('x20', UC_ARM64_REG_X20),
+                            ('x21', UC_ARM64_REG_X21), ('x22', UC_ARM64_REG_X22),
+                            ('x23', UC_ARM64_REG_X23), ('x24', UC_ARM64_REG_X24),
+                            ('x25', UC_ARM64_REG_X25), ('x26', UC_ARM64_REG_X26),
+                            ('x27', UC_ARM64_REG_X27), ('x28', UC_ARM64_REG_X28),
                             ('sp', UC_ARM64_REG_SP), ('lr', UC_ARM64_REG_LR)):
             try:
                 regs[name] = '0x%x' % uc.reg_read(const)
