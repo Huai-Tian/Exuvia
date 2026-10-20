@@ -137,6 +137,12 @@ HASH_IVS = {
 
 
 def cmd_hash_scan(path):
+    """Instruction-level movz/movk hash-IV scan — A64 ONLY.
+
+    Battle-1 blind spot, documented honestly: MOVZ/MOVK are AArch64 instructions;
+    32-bit libraries load their constants via ldr-literal pools (PIC-relative,
+    runtime-GOT-composed — raw IV bytes were absent too). 32-bit IV detection
+    needs ldr-literal target tracking (unimplemented recon gap, x1)."""
     import struct as st
     data = open(path, 'rb').read()
     hits = []
