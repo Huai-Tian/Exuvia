@@ -279,6 +279,67 @@ def test_sm4recon():
         print('sm4recon OK: --iv scan hits the planted offset with E(IV) block-1')
 
 
+def test_elfrecon():
+    """elfrecon: synthetic stripped-magic ELF scan + dynsym backtracking recovery.
+
+    Fixture A: a 60-byte magic-stripped aarch64 ET_DYN header planted at a PRNG
+    ocean offset — `scan` must report exactly that offset and the fields we set.
+    Fixture B: an Elf64_Sym table (3 defined FUNC + 1 UND import) before a
+    .dynstr (with foreign metadata between) — `symbols --strtab-at` must recover
+    all 4 names/vals through the slack backtracking route.
+    """
+    import struct
+    # ---- fixture A: stripped-magic ELF header
+    hdr = bytearray(60)
+    hdr[0] = 2          # EI_CLASS = 64-bit
+    hdr[1] = 1          # EI_DATA = LE
+    hdr[2] = 1          # EI_VERSION
+    struct.pack_into('<HH', hdr, 12, 3, 0xB7)       # e_type=ET_DYN, e_machine=aarch64
+    struct.pack_into('<I', hdr, 16, 1)              # e_version
+    struct.pack_into('<QQ', hdr, 20, 0x31fe0, 0x40)  # e_entry, e_phoff
+    struct.pack_into('<HHHHHH', hdr, 48, 0x40, 56, 4, 64, 8, 7)  # ehsize..shstrndx
+    ocean = bytearray()
+    s = 0xbeef
+    for _ in range(8192):
+        s ^= (s << 13) & 0xFFFFFFFFFFFFFFFF
+        s ^= s >> 7
+        s ^= (s << 17) & 0xFFFFFFFFFFFFFFFF
+        ocean.append((s * 0x2545F4914F6CDD1D >> 56) & 0xFF)
+    plant = 1234
+    blob = bytes(ocean[:plant]) + bytes(hdr) + bytes(ocean[plant:]) + bytes(hdr)  # one at tail too
+    with tempfile.TemporaryDirectory() as td:
+        fa = os.path.join(td, 'ocean.bin')
+        open(fa, 'wb').write(blob)
+        r = subprocess.run([sys.executable, os.path.join(HERE, 'elfrecon.py'), 'scan', fa],
+                           capture_output=True, text=True, timeout=120)
+        assert r.returncode == 0, f'scan exit {r.returncode}: {r.stderr}'
+        assert '0x%08x' % plant in r.stdout and 'stripped' in r.stdout and 'aarch64' in r.stdout, r.stdout
+        assert '0x%08x' % (len(blob) - 60) in r.stdout, r.stdout  # tail hit too
+        print('elfrecon scan OK: stripped-magic ELF found at planted + tail offsets')
+    # ---- fixture B: dynsym backtrack through slack
+    strtab = b'\x00'
+    names = []
+    for nm in (b'JNI_OnLoad', b'parse_entry', b'read_bits', b'lseek'):
+        names.append(len(strtab))
+        strtab += nm + b'\x00'
+    symtab = bytearray()
+    for st_name, val in zip(names, (0x40, 0x80, 0xc0, 0)):
+        symtab += struct.pack('<IBBHQQ', st_name, (1 << 4) | 2, 0, 0 if val == 0 else 7, val, 64)
+    pad = b'\xcc' * 16  # foreign metadata between symtab end and strtab
+    fb = bytes(symtab) + pad + strtab
+    with tempfile.TemporaryDirectory() as td:
+        fbb = os.path.join(td, 'symblob.bin')
+        open(fbb, 'wb').write(fb)
+        strtab_at = len(symtab) + len(pad)
+        r = subprocess.run([sys.executable, os.path.join(HERE, 'elfrecon.py'), 'symbols', fbb,
+                            '--strtab-at', str(strtab_at)], capture_output=True, text=True, timeout=120)
+        assert r.returncode == 0, f'symbols exit {r.returncode}: {r.stderr}'
+        for nm in ('JNI_OnLoad', 'parse_entry', 'read_bits', 'lseek'):
+            assert nm in r.stdout, r.stdout
+        assert 'val=0x000000c0' in r.stdout and 'val=0x00000040' in r.stdout, r.stdout
+        print('elfrecon symbols OK: 4-entry dynsym recovered through 16B slack (backtrack route)')
+
+
 def test_rc4mat():
     """rc4mat (r17 tool): material-space scan — synthetic 14B-header material ->
     parity-key derivation round-trip + planted scan hit via the CLI."""
@@ -338,5 +399,6 @@ if __name__ == '__main__':
     test_disasm()
     test_sigx()
     test_sm4recon()
+    test_elfrecon()
     test_rc4mat()
     print('trackb selftest: ALL GREEN')
