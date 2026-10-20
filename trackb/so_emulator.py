@@ -329,21 +329,47 @@ def main():
         for slot in range(240):
             uc.mem_write(JNIF + 8 * slot, struct.pack('<Q', JNIF + 0x800 + 8 * slot))
         regs = {}
+        fake_heap = [JNIF + 0x3000]
+
+        def fake_obj():
+            p = fake_heap[0]
+            fake_heap[0] += 16
+            return p
+
+        # Battle-1 earned JNI semantics (fake-world policy, shell-agnostic):
+        #  - ExceptionCheck(228) MUST return 0 (non-zero reads as "pending exception" and fails every shell)
+        #  - Call*Method family returns non-null fake objects (null trips failure paths)
+        #  - GetStaticIntField(150) feeds a modern SDK_INT
+        #  - default for unnamed slots: non-null fake object (Battle-1: null stubs caused the wall)
+        def jni_ret(idx, x0, x1, x2, x3):
+            if idx == 228:  # ExceptionCheck
+                return 0
+            if idx == 215:  # RegisterNatives — capture verbatim
+                try:
+                    for k in range(min(x3, 64)):
+                        nm, sig, fn = struct.unpack('<QQQ', bytes(uc.mem_read(x2 + k * 24, 24)))
+                        name = bytes(uc.mem_read(nm, 128)).split(b'\0')[0].decode(errors='replace')
+                        sigs = bytes(uc.mem_read(sig, 128)).split(b'\0')[0].decode(errors='replace')
+                        regs[(name, sigs)] = fn
+                except Exception:
+                    pass
+                return 0
+            if idx == 150:  # GetStaticIntField — Build.VERSION.SDK_INT
+                return 34
+            if idx == 151:  # GetStaticLongField
+                return 34
+            if idx in (4,):  # GetVersion
+                return 0x00010006
+            if idx in (21, 22, 23):  # GlobalRef/LocalRef management
+                return 0
+            # Call*/New*/Get*Object family + default: fake non-null object
+            return fake_obj()
 
         def jni_hook(uc_, addr, size, user):
             idx = (addr - (JNIF + 0x800)) // 8
             x0, x1, x2, x3 = (uc_.reg_read(r) for r in (UC_ARM64_REG_X0, UC_ARM64_REG_X1, UC_ARM64_REG_X2, UC_ARM64_REG_X3))
-            if idx == 215:  # RegisterNatives (JNI table slot — captured verbatim)
-                try:
-                    n = x3
-                    for k in range(min(n, 64)):
-                        nm, sig, fn = struct.unpack('<QQQ', bytes(uc_.mem_read(x2 + k * 24, 24)))
-                        name = bytes(uc_.mem_read(nm, 128)).split(b'\0')[0].decode(errors='replace')
-                        sigs = bytes(uc_.mem_read(sig, 128)).split(b'\0')[0].decode(errors='replace')
-                        regs[(name, sigs)] = fn
-                except Exception:
-                    pass
-            uc_.reg_write(UC_ARM64_REG_X0, 0)
+            r = jni_ret(idx, x0, x1, x2, x3)
+            uc_.reg_write(UC_ARM64_REG_X0, r & 0xFFFFFFFFFFFFFFFF)
             uc_.reg_write(UC_ARM64_REG_PC, uc_.reg_read(UC_ARM64_REG_LR))
         uc.hook_add(UC_HOOK_CODE, jni_hook, begin=JNIF + 0x800, end=JNIF + 0x800 + 8 * 260)
 
