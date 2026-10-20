@@ -214,10 +214,57 @@ def test_sigx():
         print('sigx OK: synthetic signing block -> DER round-trip')
 
 
+def test_sm4recon():
+    """sm4recon.py: GB/T 32907 Appendix-A vector + CFB round-trip + scan hit (r12 tool)."""
+    sys.path.insert(0, HERE)
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('sm4recon', os.path.join(HERE, 'sm4recon.py'))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    key = bytes.fromhex('0123456789abcdeffedcba9876543210')
+    rk = mod.rk_standard(key)
+    out = mod.sm4_block(rk, key)
+    expected = bytes.fromhex('681edf34d206965e86b3e94f536e4246')
+    assert out == expected, f'SM4 vector mismatch: {out.hex()}'
+    print('sm4recon OK: GB/T 32907 Appendix-A vector matches')
+    # CFB round-trip：encrypt（feedback 走输出）→ decrypt（feedback 走输入）== 明文
+    plain = bytes((i * 31 + 7) & 0xFF for i in range(64))
+    cipher = mod.cfb_encrypt(rk, plain)
+    assert mod.cfb_crypt(cipher, 0, 64, rk) == plain, 'CFB round-trip failed'
+    print('sm4recon OK: CFB round-trip')
+    # scan：把合成材料头藏进随机海洋 → form=material 必须命中
+    import struct as _s
+    mat = bytearray(16)
+    _s.pack_into('<h', mat, 6, 32)     # keylen = 32
+    _s.pack_into('<H', mat, 8, 1)      # flag
+    mat[0xe] = 8                       # shift
+    carrier = bytearray()
+    s = 0x1234
+    for _ in range(2048):
+        s ^= (s << 13) & 0xFFFFFFFFFFFFFFFF
+        s ^= s >> 7
+        s ^= (s << 17) & 0xFFFFFFFFFFFFFFFF
+        carrier.append((s * 0x2545F4914F6CDD1D >> 56) & 0xFF)
+    off = 777
+    carrier[off:off+16] = bytes(a ^ b for a, b in zip(mat, mod.sm4_block(rk, b'\0'*16)))
+    with tempfile.TemporaryDirectory() as td:
+        f = os.path.join(td, 'carrier.bin')
+        open(f, 'wb').write(bytes(carrier))
+        rkf = os.path.join(td, 'rk.bin')
+        open(rkf, 'wb').write(struct.pack('<32I', *rk))
+        r = subprocess.run([sys.executable, os.path.join(HERE, 'sm4recon.py'), 'scan', f,
+                            '--rk', rkf, '--form', 'material', '--limit', '5'],
+                           capture_output=True, text=True, timeout=60)
+        assert r.returncode == 0, f'sm4recon scan exit {r.returncode}: {r.stderr}'
+        assert 'material' in r.stdout and '0x309' in r.stdout, r.stdout  # 777 = 0x309
+        print('sm4recon OK: material-form scan hits the planted offset')
+
+
 if __name__ == '__main__':
     test_so_emulator()
     test_rc4_vector()
     test_recon_smoke()
     test_disasm()
     test_sigx()
+    test_sm4recon()
     print('trackb selftest: ALL GREEN')
