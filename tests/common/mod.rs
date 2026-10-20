@@ -211,7 +211,7 @@ pub fn build_minimal_elf(symbols: &[(&str, u64, u64)]) -> Vec<u8> {
 
     // 段头：[0] NULL + [1] .dynsym + [2] .dynstr + [3] .shstrtab（Elf64_Shdr = 64B）
     out.extend_from_slice(&[0u8; 64]);
-    let mut h = |name: usize, ty: u32, off: usize, size: usize, link: u32, entsize: u64, buf: &mut Vec<u8>| {
+    let h = |name: usize, ty: u32, off: usize, size: usize, link: u32, entsize: u64, buf: &mut Vec<u8>| {
         buf.extend_from_slice(&(name as u32).to_le_bytes());
         buf.extend_from_slice(&ty.to_le_bytes());
         buf.extend_from_slice(&0u64.to_le_bytes()); // sh_flags
@@ -318,7 +318,7 @@ pub fn build_minimal_elf_v2(symbols: &[(&str, u64, u64)], init_entries: &[u64]) 
     }
     let shoff = out.len();
 
-    let mut h = |name: usize, ty: u32, off: usize, size: usize, link: u32, entsize: u64, buf: &mut Vec<u8>| {
+    let h = |name: usize, ty: u32, off: usize, size: usize, link: u32, entsize: u64, buf: &mut Vec<u8>| {
         buf.extend_from_slice(&(name as u32).to_le_bytes());
         buf.extend_from_slice(&ty.to_le_bytes());
         buf.extend_from_slice(&0u64.to_le_bytes());

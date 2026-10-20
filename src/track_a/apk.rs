@@ -335,7 +335,7 @@ pub fn first_pass(apk_path: &Path) -> Result<(Report, DebtFile, Vec<EvidenceGrou
         }
 
         // 2c) so 内明文 DEX 命中（修正案 #2 正事实：机械扫描命中即提取，卡点即成果）
-        for (i, (so_name, so_bytes, _)) in so_cache.iter().enumerate() {
+        for (i, (so_name, _so_bytes, _)) in so_cache.iter().enumerate() {
             for (k, (off, fsize, dex_bytes)) in so_hits[i].iter().enumerate() {
                 let headline = format!(
                     "plaintext DEX found in {so_name} at offset 0x{off:x} (declared file_size {fsize}, sliced {} bytes) — mechanical scan hit",

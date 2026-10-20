@@ -101,11 +101,10 @@ fn merge_happy_path_recovered() {
 fn merge_rejects_out_of_scope_claim() {
     let dir = std::env::temp_dir().join("exuvia_test_merge_scope");
     let wpp = setup(&dir, true);
-    let mut pdir = build_identity_proposal(&dir, "recovered");
+    let pdir = build_identity_proposal(&dir, "recovered");
     // 篡改 debt_id 为范围外
     let m = std::fs::read_to_string(pdir.join("proposal.json")).unwrap().replace("debt-0001", "debt-9999");
     std::fs::write(pdir.join("proposal.json"), m).unwrap();
-    pdir = pdir;
     let err = gate::merge(&pdir, &dir.join("handoff"), &wpp).unwrap_err();
     assert_eq!(err.code, "E_SCOPE");
 }

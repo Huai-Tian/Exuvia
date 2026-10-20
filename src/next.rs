@@ -76,9 +76,13 @@ pub fn build(goal_path: &Path, handoff_dir: &Path) -> Result<WorkPackage, String
     let allowed_debt: Vec<String> = picked.iter().map(|e| e.debt_id.clone()).collect();
     let entries: Vec<DebtEntry> = picked.into_iter().cloned().collect();
 
-    // guidance 注入：fence 族知识的全量注入（fence 条目按三次法则生长、天然少量；
-    // 机械侧不做族匹配判断——下游 LLM 按卡点事实自行取舍，guidance 语义 = 可选参考知识）
-    let guidance = fence_guidance();
+    // guidance 注入（两段）：
+    // ① 工具包三要素——工作包的固定形态（产品定位：预分析器 + 工具包；切片是坐标，
+    //    深挖靠工具在原始物上跑——实战校准：LLM 的高价值养料是原始物+工具+坐标，
+    //    不是预切产物）
+    // ② fence 族知识全量注入（三次法则生长；机械侧不做族匹配判断，取舍在下游）
+    let mut guidance = toolkit_guidance();
+    guidance.extend(fence_guidance());
 
     Ok(WorkPackage {
         schema: "exuvia.workpackage".to_string(),
@@ -90,6 +94,19 @@ pub fn build(goal_path: &Path, handoff_dir: &Path) -> Result<WorkPackage, String
         allowed_debt,
         entries,
     })
+}
+
+/// 工作包固定形态四要素（产品定位的机械化：预分析器 + 分析器 + 工具包）。
+/// 实战校准（第一战 11 轮 attempts 复盘）：下游 LLM 的高价值养料排序为
+/// 原始物 + 可参数化工具 > 全量普查文本 > 预切切片——切片的真实价值是坐标。
+/// 第四条 = 洋葱循环：解卡产物回注剖析器（packers layer their defenses）。
+fn toolkit_guidance() -> Vec<String> {
+    vec![
+        "RAW: work on the original objects themselves (apk entries, native libraries — paths appear in facts and evidence references). Slices are coordinates, not the working set.".to_string(),
+        "TOOLKIT: trackb/ ships with the product — disasm.py (full-arch disassembly streams, PT_DYNAMIC view survives stripped section headers), so_emulator.py (black-box execution with JNI/world semantics and --fs file bridge), crypto_recon.py (entropy / ecb / aes / rc4 / hash / dxor recon); the binary itself carries `exuvia hunt` (L2 parameter-space search: when facts establish the cipher family + key, it mechanically recovers the ciphertext segment coordinates — a hit hands you the decrypt inputs, a negative fact rules out the standard zero-aligned model). Tools answer your NEXT question; static artifacts only answer the designer's questions.".to_string(),
+        "COORDINATES: evidence slices are entry coordinates. Deep work = tools over raw objects, starting from those coordinates.".to_string(),
+        "RE-ANALYZE LOOP: when a claim settles and a recovered DEX lands (workspace/<debt_id>/recovered.dex), run `exuvia analyze --dex` over it — packers layer their defenses (shell → strings → methods → VMP); each settled debt reveals the next layer's debt map. The handoff map is a per-layer sequence, not a one-shot census.".to_string(),
+    ]
 }
 
 /// fence 全部族条目的 guidance 清单（工具机械全注入，匹配判断在下游智能侧）。

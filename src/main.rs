@@ -57,6 +57,31 @@ enum Cmd {
         #[command(subcommand)]
         cmd: UnpackCmd,
     },
+    /// 洋葱二次分析：对解卡产物（recovered DEX）再剖析 → 下一层欠账地图
+    Analyze {
+        /// 单个 DEX 文件（如 workspace/<debt_id>/recovered.dex）
+        #[arg(long)]
+        dex: std::path::PathBuf,
+        /// 输出目录（剖析包；默认 handoff-2/）
+        #[arg(long, default_value = "handoff-2")]
+        out: std::path::PathBuf,
+    },
+    /// L2 参数空间搜索：已知算法（rc4/xor + key）× 未知密文段参数 → 机械命中
+    /// （轨道 C 桌面化：算法与 key 来自 facts/LLM 复现，段起点/长度由判据链自决）
+    Hunt {
+        /// 密文载体文件（evidence 切片 / so 内嵌段 / 任意字节流）
+        #[arg(long)]
+        carrier: std::path::PathBuf,
+        /// 标准 RC4 key（hex；可重复：多谓词并行全空间搜索）
+        #[arg(long = "rc4", value_name = "HEX")]
+        rc4: Vec<String>,
+        /// 循环 XOR key（hex；可重复）
+        #[arg(long = "xor", value_name = "HEX")]
+        xor: Vec<String>,
+        /// 输出目录（hunt.json + hits/<n>.dex；默认 hunt/）
+        #[arg(long, default_value = "hunt")]
+        out: std::path::PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -138,6 +163,49 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Some(Cmd::Analyze { dex, out }) => {
+            match exuvia::track_a::reanalyze::analyze_dex(&dex, &out) {
+                Ok(debt) => {
+                    let json = serde_json::to_string_pretty(&debt).unwrap();
+                    println!("{json}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("{{\"error\":\"{}\"}}", e.replace('"', "'"));
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Some(Cmd::Hunt { carrier, rc4, xor, out }) => {
+            use exuvia::track_a::hunt::{hex_to_bytes, run, Predicate};
+            let mut predicates = Vec::new();
+            for (k, is_rc4) in rc4.iter().map(|k| (k, true)).chain(xor.iter().map(|k| (k, false))) {
+                match hex_to_bytes(k) {
+                    Ok(key) if !key.is_empty() => {
+                        predicates.push(if is_rc4 { Predicate::Rc4 { key } } else { Predicate::Xor { key } })
+                    }
+                    Ok(_) => {
+                        eprintln!("{{\"error\":\"key {k} is empty\"}}");
+                        return ExitCode::FAILURE;
+                    }
+                    Err(e) => {
+                        eprintln!("{{\"error\":\"{}\"}}", e.replace('"', "'"));
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            match run(&carrier, &predicates, &out) {
+                Ok(file) => {
+                    let json = serde_json::to_string_pretty(&file).unwrap();
+                    println!("{json}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("{{\"error\":\"{}\"}}", e.replace('"', "'"));
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Some(Cmd::Unpack { cmd }) => match cmd {
             UnpackCmd::Merge { dir } => {
                 match exuvia::gate::merge(&dir, std::path::Path::new("handoff"), std::path::Path::new("workpackage.json")) {

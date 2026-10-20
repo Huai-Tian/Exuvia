@@ -21,17 +21,18 @@ Exuvia 是一个**面向 AI Agent 的 Android 通用脱壳 / 代码恢复流水�
 - **名字**：Exuvia（蝉蜕）——壳留在原地，代码恢复生命
 - **口号**：*"Separate the shell from what lives inside."*
 
-**项目当前状态：v0.1 代码面已补全（38 测试 CI 全绿）；第一战（真实加固样本）实测进行中，已产出 4 个实战修正。**
+**项目当前状态：v0.1 代码面已补全（43 测试 CI 全绿）；第一战（真实加固样本）实测进行中，已产出 4 个实战修正。**
 - 契约层：六协议物 fixture 双向锚定（goal/proposal/report/debt/workpackage/evidence）、serde 类型即格式、错误码公开表、fence 空（生长规则就位）；
 - 卡点两类：method-native-stub（ACC_NATIVE stub + JNI 符号定位 + 方法体切片）与 encrypted-payload（三机械来源：坏 DEX 文件 / so 内明文 DEX 扫描命中 / assets ELF 零命中负事实）+ 解密例程候选机械定位（JNI_OnLoad / init_array 双路径：PT_DYNAMIC 运行时视角优先）；
 - 外循环闭合且留痕：`exuvia packed.apk → next --goal → [LLM 解卡点] → unpack merge（四层闸门 + 沙箱双锚 + 销账）→ validate`；merge 拒绝时 attempts.log 记 merge-rejected + 被认领卡点 attempts 递增；recovered DEX 形状产物归档 workspace/<debt_id>/recovered.dex；
 - 实战修正（真实样本驱动，全部机械规则、零厂商特判）：#1 DEX 解析器按规范对齐（method_id 8B / type_list u16）；#2 assets ELF 纳入清点与符号查表；#3 so 内明文 DEX 机械扫描；#4 PT_DYNAMIC 运行时视角双路径 + ELF64 全架构符号 + 导出符号清单进 facts；
-- 第一战已测绘（attempts.log 诚实台账，三轮留痕）：壳形态 = dex 尾部密文载体 + so 内嵌段 + interpreter 化控制流 + RegisterNatives 动态注册；解密链已解至 RC4 变体（KSA/PRGA 全解、unicorn 与 python 复现交叉验证一致）+ zlib 解压实锤（112B z_stream 的 inflateInit_）；key 常量确认在只读段（真静态）；**终局结论（六路静态 + 两路黑盒 + 双架构对照收敛）：该技术族把 DynCryptor 的调用现场（真实密文指针/长度）作为纯运行时事实——轨道 A 与函数级轨道 B 在此结构性到界，免费档即需轨道 C 的运行时事实（§9 VMP 条款的预判被提前命中）**。产品路径确认：轨道 C 按设计保持用户侧能力（§3.1），本项目的交付职责 = 把卡点与验证回流定义到机械可判（hook 剧本作为工作包 guidance 附件——**fence 首条族知识候选，待维护者确认**）；ELF32 记为候选修正；
-- CLI 契约表全兑现：--version / --profile / --goal / --json / --resume、next、schema --dump、unpack validate / merge；
+- 第一战已测绘（attempts.log 诚实台账，三轮留痕）：壳形态 = dex 尾部密文载体 + so 内嵌段 + interpreter 化控制流 + RegisterNatives 动态注册；解密链已解至 RC4 变体（KSA/PRGA 全解、unicorn 与 python 复现交叉验证一致）+ zlib 解压实锤（112B z_stream 的 inflateInit_）；key 常量确认在只读段（真静态）。**到界结论的桌面化重判（2026-10 拍板：摒弃真机/模拟器——成本高，且企业壳反检测使真机路线在主战场不可行）**：算法与 key 已知时，"调用现场参数（密文段起点/长度）"不再是必须上真机的运行时事实，而是机械可搜的有限空间——`exuvia hunt`（L2 参数空间搜索器）内置落地：keystream 从零对齐模型 × 全空间 offset 搜索，长度由判据链自决（zlib 流边界 / DEX file_size 字段），判据链全机械（RFC 1950 头校验 → inflate → DEX magic → 全表 parse 自洽），命中产物存档 hits/<n>.dex、负事实按谓词诚实落盘；hunt 不销账——命中即机械事实，proposal → merge 四层闸门链条不变（LLM 从"探索"降为"誊写"）；ELF32 记为候选修正；
+- 洋葱二次分析已落地：`exuvia analyze --dex`（解卡产物回注 → 下一层欠账地图，与 first_pass 协议同构，同一外包循环复用）；
+- CLI 契约表全兑现：--version / --profile / --goal / --json / --resume、next、schema --dump、unpack validate / merge、analyze --dex、hunt；
 - handoff 结构落盘完整：REPORT.json + REPORT.md、debt.json、evidence/<debt_id>/{manifest.json, <name>.bin}、attempts.log、workspace/；
 - ci/verify（cargo workspace member，不进发行物）：register 语料登记 + check 原包对账——比对逻辑公开、样本私有；
-- 终点定义已拍板：行为一致的可运行 APK（§2.1）+ 忠实还原原则；
-- **下一步：终点闭合（用户侧两步）**：① 有真机/模拟器的分析者执行 fence 族知识里的 inflate 边界 hook 剧本（一次截获 = 密文流 + 原始 DEX 双产物）→ 密文↔明文对照蒸馏纯函数 decrypt → proposal → merge 销账；② `trackb/repack.py` 重组 + 用户侧 zipalign/apksigner + 装机运行对比——**终点链已用语料占位演练到 100% 对账**（class/method coverage 1.0，2,179 类 / 5,847 方法），工程侧全部就位；其后 so 符号定位（capstone 测量）、ELF32。
+- 终点定义已拍板（2026-10 桌面化修订）：桌面三重验收（结构对账 + DEX 全量可解析 + 语义复原判定，§2.1）+ 忠实还原原则；
+- **下一步：终点闭合（桌面三步）**：① 对第一战密文载体跑 `exuvia hunt --carrier <切片> --rc4 <key>`（标准族落空 = 诚实负事实，指向变体——变体复现走 proposal 外循环，trackb/so_emulator.py 黑盒调用解密函数补位）；② proposal 誊写（RC4+zlib 纯函数 + hunt 给出的段坐标）→ merge 销账 → `analyze --dex` 产下一层欠账地图；③ `trackb/repack.py` 重组 + 用户侧 zipalign/apksigner——**终点链已用语料占位演练到 100% 对账**（class/method coverage 1.0，2,179 类 / 5,847 方法），工程侧全部就位；其后 L3 桌面 mini-loader（Unicorn 模拟 linker + JNIEnv 桩跑 JNI_OnLoad，截获 RegisterNatives 注册表——轨道 C 完全桌面化的候选路径）、so 符号定位（capstone 测量）、ELF32。
 
 ---
 
@@ -66,25 +67,30 @@ Exuvia 是一个**面向 AI Agent 的 Android 通用脱壳 / 代码恢复流水�
 
 **已接受的宿命**：这是猫鼠游戏。工具火了之后壳厂商会加反 Exuvia 检测——但本架构不靠知识库吃饭（判断力在架构里，不在积累里），新壳出现就是又一次"像第二次一样的第一次"。
 
-### 2.1 终点定义（产品验收的最终形态）
+### 2.1 终点定义（产品验收的最终形态；2026-10 桌面化修订）
 
-Exuvia 的终点：**行为一致（behavioral parity）的可安装、可运行 APK**。不追求字节级一致——字节只是手段，行为才是验收。
+Exuvia 的终点：**桌面可判定的代码恢复完成度**（桌面三重验收）。不追求字节级一致——字节只是手段；也不依赖装机运行——**真机/模拟器已从验收链摒弃**（成本高，且企业壳反检测使真机路线在主战场不可行；维护者拍板）。
 
-- `recovered`（原始字节可得：一/二代壳）：恢复原始字节是达成行为一致的**最可靠手段**（字节回来了，行为天然一致）；
-- `equivalent`（原始字节不存在：四代壳）：等效实现 + 行为差分覆盖证明；
-- 两条路径服务于**同一个终点标准**：装上就能跑，可感知行为与原包一致。
-- 验收线随之统一为**行为验证**（装机运行对比）；原包字节对账降级为 `ci/verify/` 的内部开发指标，不是产品验收标准。
+桌面三重验收（全部机械可判或外包循环可判）：
+
+1. **结构对账**：class/method coverage 对账（repack 产物 vs L1 骨架清点——ci/verify 与语料占位演练已达 100% 模式）；
+2. **DEX 全量可解析**：recovered DEX 经 `exuvia analyze --dex` 全表 parse 自洽（magic/header/方法表零失败）；
+3. **语义复原判定**：关键方法（goal 声明的 targets）由下游 LLM 按反编译证据判定语义复原——外包循环既有能力，工具不做终审。
+
+- `recovered`（原始字节可得：一/二代壳）：恢复原始字节是达成验收的**最可靠手段**（字节回来了，结构对账天然全绿）；
+- `equivalent`（原始字节不存在：四代壳）：等效实现 + 行为差分覆盖证明（差分在沙箱桌面跑，不上机）；
+- 装机运行降级为**可选增强档**（用户自愿复核，不进交付必选链）；原包字节对账降级为 `ci/verify/` 的内部开发指标，不是产品验收标准。
 
 **终点合成阶段 `repack`**（debt 清零或 goal 满足后触发；四组件按三次法则逐件生长，不预写）：
 
 ```
 ① DEX writer     还原/等效的方法体 → 合法 DEX（现有 parser 的镜像工程）
 ② 重组器          资源搬运 + Manifest 修复（loader 移除、Application 还原）——AXML 解析届时上桌
-③ zipalign+自签  系统装机的硬前提（v2/v3）
-④ 运行验证       装机冒烟（可作为卡点外包给下游）
+③ zipalign+自签  用户自愿装机时的硬前提（v2/v3；桌面验收不依赖）
+④ 装机冒烟        可选增强档（用户自愿；不进桌面验收链）
 ```
 
-**签名自校验条款（已拍板：忠实还原原则）**：Exuvia 是恢复器，不是 patcher。签名自校验逻辑与任何其他逻辑**同等对待**——`recovered` 忠实恢复，`equivalent` 忠实等价其机器码行为（含校验分支）。自签重包若因校验逻辑退出，这是忠实还原的**正确表现**，不是产品失败："行为一致"验收携带环境谓词（原厂签名物理不可复制，此项差异如实标注，不算还原缺陷）。恒真 patch 属于使用者的修改行为，永远不在 Exuvia 的功能面——这条线同时是"研究恢复"与"破解"的法律分界线。
+**签名自校验条款（已拍板：忠实还原原则）**：Exuvia 是恢复器，不是 patcher。签名自校验逻辑与任何其他逻辑**同等对待**——`recovered` 忠实恢复，`equivalent` 忠实等价其机器码行为（含校验分支）。自签重包若因校验逻辑退出，这是忠实还原的**正确表现**，不是产品失败：装机复核（可选档）携带环境谓词（原厂签名物理不可复制，此项差异如实标注，不算还原缺陷）。恒真 patch 属于使用者的修改行为，永远不在 Exuvia 的功能面——这条线同时是"研究恢复"与"破解"的法律分界线。
 
 ---
 
@@ -107,15 +113,18 @@ release = 两个平台二进制 + SKILL.md + checksums。**纯文件，无目录
 
 **零发行纪律（结构三次法则）**：生态已有的东西一概不发行——系统有 python3 就不捆运行时；PyPI 有 qiling/frida 就不打包依赖；serde 类型能定义格式就不放 schema 文件；单文件装得下的判断就不拆目录。任何新结构元素（文件/目录/发行物）需要"同一需要出现过三次"的实证，不接受"将来可能有用"。
 
-### 3.1 三轨道
+### 3.1 三轨道（2026-10 桌面化修订：真机/模拟器全面摒弃）
 
 ```
 轨道A 静态分析   —— 解包、指纹、so 切片、解密例程定位与离线复现
-轨道B 模拟执行   —— qiling/Unicorn 离线跑 so 里的解密函数（用户侧按需安装）
-轨道C 定点动态   —— 仅对指定方法注入调用/trace（VMP 类的最后手段）
+轨道B 模拟执行   —— qiling/Unicorn 离线跑 so 里的解密函数（桌面级，trackb/ 工具）
+轨道C 定点动态   —— 桌面级 mini-loader：Unicorn 模拟 linker + JNIEnv 桩跑 JNI_OnLoad，
+                    截获 RegisterNatives 注册表（替代真机 hook 的运行时事实获取）
 ```
 
-优先级永远 A > B > C。**新代壳战略下，轨道 B/C 是主路径而非推迟项**（roadmap 期工程化），L2/L3 从"可选层"升格为主交付物。轨道 B/C 的重依赖（qiling、unicorn、frida）不进发行物，用户侧安装，缺席 = `unavailable`（功能级语义，与 jadx/ghidra 同类）；**核心闸门依赖的系统 python3 缺失 = `installation-broken`（拒绝运行）**。
+优先级永远 A > B > C。**新代壳战略下，轨道 B/C 是主路径而非推迟项**（roadmap 期工程化），L2/L3 从"可选层"升格为主交付物。轨道 B/C 的重依赖（qiling、unicorn、capstone）不进发行物，用户侧安装，缺席 = `unavailable`（功能级语义，与 jadx/ghidra 同类）；**核心闸门依赖的系统 python3 缺失 = `installation-broken`（拒绝运行）**。
+
+**轨道 C 桌面化的第一级已内置**：`exuvia hunt`（L2 参数空间搜索器）——算法与 key 已知时（facts / LLM 复现），密文段起点/长度是机械可搜的有限空间（keystream 从零对齐模型 × 全空间 offset × 判据链自决长度：zlib 流边界 / DEX file_size）。真机 frida hook 从主路径移除；**fence 族知识里的 hook 剧本重定义为桌面 Unicorn 桩剧本**（同一份截获逻辑，两种执行环境——真机执行不再是非它不可）。
 
 **轨道 B 工具已落地（`trackb/`，用户侧 Python 工具——第一战实战催生）**：`so_emulator.py`（so 黑盒执行器：ELF64 映射 + RELATIVE/GOT 重定位 + bionic libc 语义层 + zlib 跨模拟器桥 + 文件系统桥 --fs + JNI 假世界（ExceptionCheck/数组语义/SDK 喂值/RegisterNatives 捕获）+ --poke/--load 跨文件黑盒，零样本参数全 CLI 化）、`crypto_recon.py`（容器熵定位 / ECB 指纹 / AES 指令扫描 / **hash-scan 指令级哈希 IV 扫描** / RC4 变体族双过滤扫描 / **dxor Dalvik 字符串解密**）、`disasm.py`（**L2 evidence：符号/偏移→汇编流**——PT_DYNAMIC 运行时视角符号解析，evidence 附件标准生产器，capstone 用户侧）、`repack.py`（终点合成段 v0：恢复 DEX + 原 Manifest + 基准资源 → 未签名 APK；zipalign/apksigner 按零发行纪律留用户侧 SDK；整块加密族豁免 DEX writer）、`selftest.py`（合成 fixture 自检，零样本纪律）。工具本体是产品的一部分随仓库分发；unicorn/capstone 由使用侧安装（缺席 = unavailable 语义）。
 
@@ -241,6 +250,8 @@ OS 沙箱按平台分文件实现（单一接口 `run_sandboxed(code, args)`）�
 | `--resume` | 幂等、可断点续跑 |
 | `exuvia next --goal <file>` | 打包当前最值得外包的卡点工作包（按 goal 相关性建议排序，工具不做终审） |
 | `exuvia schema --dump <name>` | 按需派生机器可读格式（handoff/goal/proposal；无静态 schema 文件） |
+| `exuvia analyze --dex <file>` | 洋葱二次分析：解卡产物回注 → 下一层欠账地图（与 first_pass 协议同构） |
+| `exuvia hunt --carrier <file> --rc4 <hex> [--xor <hex>]` | L2 参数空间搜索：已知算法族 × 未知密文段参数 → 机械命中（hunt.json + hits/；负事实诚实） |
 | `unpack validate <dir>` | 下游自检 handoff |
 | `unpack merge <dir>` | proposal 回流（四层闸门） |
 
@@ -320,6 +331,8 @@ OS 沙箱按平台分文件实现（单一接口 `run_sandboxed(code, args)`）�
 | 签名自校验恒真 patch（候选立场之一） | 忠实还原原则（恒真永久排除） | Exuvia 是恢复器不是 patcher；恒真是使用者的篡改行为，不属于工具功能；此线同时是"研究恢复"与"破解"的法律分界 |
 | 目标壳从一代壳起步 = 产品定位 | 一代壳 = 协议自检脚手架 | **主攻方向（新代企业壳）与工程第一步（便宜壳打通协议）是两件事**；验收语料直接用真实"原包+加固包"对 |
 | 终点 = 字节级一致（隐含理解） | 行为一致的可运行 APK（§2.1） | 字节只是手段，行为才是验收；recover 是最可靠手段，equivalent 是直接实现；原包字节对账降为 ci/verify 内部指标 |
+| 真机/模拟器为轨道 C 运行时事实的主路径 | 桌面化：L2 参数搜索内置（`exuvia hunt`）+ L3 桌面 mini-loader 候选 | 真机成本高且企业壳反检测使其在主战场不可行；算法与 key 已知时密文段参数是机械可搜的有限空间（判据链自决长度，零猜测） |
+| 装机运行对比为验收线 | 桌面三重验收（结构对账 + DEX 全量可解析 + 语义复原判定） | 摆脱真机依赖；沙箱双锚哲学不变；装机降为用户自愿的可选增强档 |
 
 **语义等效还原（通用恢复策略，非四代壳专属）**：每个方法有两条产出路径——`recovered`（还原原始字节）与 `equivalent`（读 L2 反编译的机器码，写出功能等效实现）。路径选择按**成本比较**，判断者是下游 LLM（工具只给难度事实，不做终审）；goal 的 `accepts_equivalent` 字段声明目标是否接受等效销账，proposal 的 `claims[].kind` 路由闸门验证（recovered → 结构断言×字节测试；equivalent → 行为差分）。**差分证明的是覆盖行为上的等价，不是全面等价**——audit trail 只记事实。
 
@@ -340,8 +353,9 @@ OS 沙箱按平台分文件实现（单一接口 `run_sandboxed(code, args)`）�
 ## 10. Roadmap（工程顺序）
 
 - **v0.1**：一代壳脚手架打通全协议（next / merge / resume / validate）+ 闸门沙箱（双平台）+ `ci/verify` 原包对账 + 语料生成脚本
-- **其后**：轨道 B 工程化（qiling 适配 JNI 环境）、轨道 C、L2/L3 主交付物化、多 Android 版本适配、evasion、指纹 diff 工具化
-- **永久不做**：MCP（社区 contrib）、经验传递机制（哲学级取消）、指纹库自动增长（显式配置 only）、`--baseline` 产品接口
+- **已落地（v0.1 内追加）**：洋葱二次分析（`analyze --dex`）、轨道 C 桌面化第一级（`hunt` L2 参数空间搜索器）
+- **其后**：轨道 B 工程化（qiling 适配 JNI 环境）、轨道 C 桌面化第二级（L3 桌面 mini-loader：Unicorn 模拟 linker + JNIEnv 桩）、L2/L3 主交付物化、多 Android 版本适配、evasion、指纹 diff 工具化
+- **永久不做**：MCP（社区 contrib）、经验传递机制（哲学级取消）、指纹库自动增长（显式配置 only）、`--baseline` 产品接口、真机/模拟器依赖（桌面化拍板，2026-10）
 
 ---
 
@@ -361,7 +375,8 @@ OS 沙箱按平台分文件实现（单一接口 `run_sandboxed(code, args)`）�
 | installation-broken / unavailable | 自身组件损坏（拒绝运行）/ 外部能力缺席（降级标注）——严格二分 |
 | 卡点外包 | 把智能缺口压缩成工作包交给外部 LLM 的循环模式；全流程唯一烧 token 处 |
 | 语义等效还原 | 产出路径 `equivalent`：读机器码写功能等效实现，按成本比较选择；差分验证覆盖行为等价 |
-| 行为一致 | 终点标准：装机运行、可感知行为与原包一致；字节一致仅是 recover 的副产品 |
+| 行为一致 | 旧终点标准（装机运行对比）→ 2026-10 桌面化修订为桌面三重验收（§2.1）；装机降为可选增强档 |
+| hunt / L2 参数空间搜索 | `exuvia hunt`：已知算法族（rc4/xor）+ key × 未知密文段参数 → 全空间机械搜索；判据链（zlib magic → inflate → DEX magic → 全表 parse）自决段长；命中 = 机械事实（不销账），负事实按谓词诚实落盘 |
 | repack | 终点合成阶段：方法体 → DEX → 重组 → 自签 → 可运行 APK；四组件按三次法则生长 |
 | 零学习曲线 | 不依赖历史积累，性能从第一次即峰值 |
 | 结构三次法则 | 新文件/目录/发行物需"同一需要出现三次"的实证 |

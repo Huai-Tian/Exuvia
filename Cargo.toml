@@ -23,6 +23,8 @@ schemars = "0.8"
 zip = "9.0.5"
 sha2 = "0.11.1"
 libc = "0.2.191"
+# hunt 判据链的 zlib 环节（L2 参数空间搜索器；rust_backend = miniz_oxide 纯 Rust，musl 静态友好）
+flate2 = "1"
 
 [profile.release]
 lto = true

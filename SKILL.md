@@ -81,7 +81,12 @@ Work packages may inject family guidance — follow it first; it outranks genera
   "handoff_version": 1,
   "accepts_equivalent": true,
   "tracks": ["A", "B"],
-  "guidance": [],
+  "guidance": [
+    "RAW: work on the original objects themselves (apk entries, native libraries — paths appear in facts and evidence references). Slices are coordinates, not the working set.",
+    "TOOLKIT: trackb/ ships with the product — disasm.py (full-arch disassembly streams, PT_DYNAMIC view survives stripped section headers), so_emulator.py (black-box execution with JNI/world semantics and --fs file bridge), crypto_recon.py (entropy / ecb / aes / rc4 / hash / dxor recon); the binary itself carries `exuvia hunt` (L2 parameter-space search: when facts establish the cipher family + key, it mechanically recovers the ciphertext segment coordinates — a hit hands you the decrypt inputs, a negative fact rules out the standard zero-aligned model). Tools answer your NEXT question; static artifacts only answer the designer's questions.",
+    "COORDINATES: evidence slices are entry coordinates. Deep work = tools over raw objects, starting from those coordinates.",
+    "RE-ANALYZE LOOP: when a claim settles and a recovered DEX lands (workspace/<debt_id>/recovered.dex), run `exuvia analyze --dex` over it — packers layer their defenses (shell → strings → methods → VMP); each settled debt reveals the next layer's debt map. The handoff map is a per-layer sequence, not a one-shot census."
+  ],
   "allowed_debt": ["debt-0001"],
   "entries": [
     {
@@ -101,7 +106,7 @@ Work packages may inject family guidance — follow it first; it outranks genera
 ```
 
 - `allowed_debt` is the scope-gate source: your proposal may only claim these debt ids.
-- `guidance` empty = family knowledge not matched/absent in the fence; when present it outranks general intuition.
+- `guidance` has a fixed four-entry toolkit form (RAW / TOOLKIT / COORDINATES / RE-ANALYZE LOOP — the product's role: pre-analyzer + analyzer + toolkit), followed by fence family knowledge when matched. Family entries outrank general intuition; the fixed four describe HOW to work, not WHAT to conclude.
 
 `evidence/<debt_id>/` (sliced bytes per debt entry; CI fixture):
 
@@ -130,7 +135,8 @@ Work packages may inject family guidance — follow it first; it outranks genera
 - `dex[].magic_ok` false or `parse_ok` false → encrypted/corrupt DEX (hostile-input normal): no method facts from that file; it becomes an `encrypted-payload` debt entry automatically, so the decrypt work enters the outsourcing loop; a high-entropy asset beside it is the classic packer shape.
 - `assets[].entropy` = Shannon bits/byte (0..8), a raw measurement — no thresholds applied, interpretation is yours.
 - `unavailable[]` → absent external capabilities; related levels annotated, nothing fails.
-- `workspace/` L1 skeleton is jadx-compatible — if structure/navigation alone answers the task, read it and stop. A `recovered` claim whose output has DEX shape is archived as `workspace/<debt_id>/recovered.dex` on merge (open it in jadx directly).
+- `workspace/` L1 skeleton is jadx-compatible — if structure/navigation alone answers the task, read it and stop. A `recovered` claim whose output has DEX shape is archived as `workspace/<debt_id>/recovered.dex` on merge (open it in jadx directly). Onion loop: re-run `exuvia analyze --dex workspace/<debt_id>/recovered.dex` over it — packers layer their defenses; the next layer's debt map is a new handoff, and its debts go through this same loop.
+- `exuvia hunt` (L2 parameter-space search; desktop-only runtime-fact acquisition — no device/emulator anywhere in the loop): when your facts establish the cipher family AND the key (e.g. an RC4 key confirmed in read-only data), run `exuvia hunt --carrier <slice or raw object> --rc4 <hex> [--xor <hex>]`. It scans the full offset space under a keystream-zero-aligned model; segment length is self-decided by the mechanical chain (RFC 1950 zlib header check → inflate → DEX magic → full-table parse). A hit gives you exact ciphertext coordinates (`hunt/hits/<n>.dex` is the recovered payload) — your proposal then TRANSCRIBES the decrypt (algorithm + key + segment coordinates), no exploration left. A negative fact is honest: it rules out the standard-family zero-aligned model and points at variant algorithms (your arena — reproduce the variant in the proposal, or black-box the routine via trackb/so_emulator.py). hunt never settles debt itself; the merge gate stays the sole judge.
 - debt entry = facts + difficulty signals, no cost estimates (you price tokens):
   - `status = blocked-solvable` → your arena; `out-of-scope` → spend nothing;
   - `jni_calls` high → JNI idiom lens; `vm_handlers` high → VMP, weigh out-of-scope (§6 step 2) first; `opcode_entropy` high without vm_handlers → control-flow obfuscation, tractable;
@@ -251,17 +257,18 @@ Documented error codes (this set is authoritative; do not rely on others):
 # (human confirmation). current state: first family entry earned from
 # Battle 1 (maintainer-confirmed 2026-10-20).
 
-# 族知识 1：整块加密-压缩载体族（第一战实测毕业，维护者确认入档）。
+# 族知识 1：整块加密-压缩载体族（第一战实测毕业，维护者确认入档；
+# 2026-10 桌面化修订：维护者拍板摒弃真机/模拟器，剧本改写为桌面三步）。
 # 形态：密文载体（dex 尾部 / so 内嵌段）经壳自有流密码解密器解出
 # zlib 压缩流，inflate 后为完整原始 DEX（非方法抽取——repack 无需 DEX writer）。
-# 卡点：解密调用现场（真实密文指针/长度）为纯运行时事实，轨道 A 与
-# 函数级轨道 B 结构性到界。
+# 卡点重判：原判定"调用现场（真实密文指针/长度）为纯运行时事实"——算法与
+# key 已知时实为机械可搜的有限空间（exuvia hunt）；变体算法仍归外循环。
 [families.wholefile-encrypt]
-description = "whole-file encrypt+compress carrier: ciphertext container -> shell stream-cipher decrypt -> zlib inflate -> intact original DEX; decrypt call-site is a runtime-only fact"
+description = "whole-file encrypt+compress carrier: ciphertext container -> shell stream-cipher decrypt -> zlib inflate -> intact original DEX; call-site parameters are a mechanically searchable space once algorithm+key are known (desktop re-verdict 2026-10, maintainer-approved)"
 guidance = [
-    "static recovery fully solves algorithm/key/containers but the call-site binding needs Track C runtime facts — this is the expected wall, not a failure",
-    "Track C user-side recipe (analyst with a device/emulator): hook the inflate boundary (inflateInit_/inflate from libz.so, confirmed via DT_NEEDED) — one interception yields both artifacts: the decryptor output stream and the original DEX",
-    "return flow: ciphertext-vs-plaintext pair distills a pure-function decrypt; recovered claims verify via structural assertions (DEX parse) x byte tests; the repacked APK then needs only the assembler + user-side zipalign/apksigner (no DEX writer for this family)",
+    "static recovery fully solves algorithm/key/containers; the call-site binding was long deemed runtime-only — desktop re-verdict: with algorithm+key known, segment parameters are a mechanically searchable finite space, not a device-only fact",
+    "desktop recipe, in order: (1) `exuvia hunt --carrier <container> --rc4 <key>` — keystream-zero-aligned full-space scan, the chain self-decides length (zlib stream boundary / DEX file_size); a hit hands you exact segment coordinates; (2) no hit = honest negative ruling out the standard zero-aligned model — variant ahead: reproduce it in the proposal, or black-box the routine via trackb/so_emulator.py; (3) unicorn-stub interception of the inflate boundary (inflateInit_/inflate via DT_NEEDED) stays the fallback yielding both artifacts (ciphertext stream + original DEX) — same interception logic, desktop execution, no device/emulator anywhere",
+    "return flow: a hunt hit (or interception pair) transcribes into a pure-function decrypt proposal — no exploration left; recovered claims verify via structural assertions (DEX parse) x byte tests; the repacked APK then needs only the assembler + user-side zipalign/apksigner (no DEX writer for this family)",
     "L2 evidence: attach disassembly streams next to the byte slices (trackb/disasm.py --symbol, capstone user-side) — Battle-1 proved expectation-chasing and routine-reading need instruction streams as first-class artifacts; PT_DYNAMIC runtime view resolves shell symbols that static views miss",
 ]
 ```
@@ -269,7 +276,7 @@ guidance = [
 ## 8. Version anchors
 
 ```text
-SKILL_VERSION: 1.1.0
+SKILL_VERSION: 1.2.0
 handoff_version: 1    goal_version: 1    proposal_version: 1
 ```
 
