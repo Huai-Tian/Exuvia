@@ -46,7 +46,8 @@ pub fn first_pass(apk_path: &Path) -> Result<(Report, DebtFile, Vec<EvidenceGrou
     // (so 名, 字节, 导出符号)——bytes 供 debt 阶段切片；MB 级 so 内存可承受
     let mut so_cache: Vec<(String, Vec<u8>, Vec<crate::track_a::elf::ExportedSymbol>)> = Vec::new();
     // 坏 DEX 字节（encrypted-payload 卡点切片来源；同样在内存可承受范围）
-    let mut bad_dex: Vec<(String, Vec<u8>, bool, bool)> = Vec::new(); // (name, bytes, magic_ok, parse_ok)
+    // parse 失败原因一并保留——事实不吞错，外部 LLM 诊断需要
+    let mut bad_dex: Vec<(String, Vec<u8>, bool, Option<String>)> = Vec::new(); // (name, bytes, magic_ok, parse_err)
     let mut assets = Vec::new();
     let mut manifest_present = false;
     let mut other: u64 = 0;
@@ -75,18 +76,19 @@ pub fn first_pass(apk_path: &Path) -> Result<(Report, DebtFile, Vec<EvidenceGrou
             e.read_to_end(&mut bytes).map_err(|x| format!("dex read {name}: {x}"))?;
             let magic_ok = bytes.starts_with(b"dex\n") && bytes.get(7) == Some(&0);
             let mut parse_ok = false;
+            let mut parse_err: Option<String> = None;
             if magic_ok {
-                // 表结构损坏 = 敌意输入常态：事实标注，不让单个 dex 失败拖垮整次剖析
+                // 表结构损坏 = 敌意输入常态：事实标注（含失败原因），不让单个 dex 失败拖垮整次剖析
                 match crate::track_a::dex::parse(&bytes) {
                     Ok(methods) => {
                         native_methods.extend(methods.into_iter().filter(|m| m.is_native));
                         parse_ok = true;
                     }
-                    Err(_) => {}
+                    Err(e) => parse_err = Some(e),
                 }
             }
             if !magic_ok || !parse_ok {
-                bad_dex.push((name.clone(), bytes, magic_ok, parse_ok));
+                bad_dex.push((name.clone(), bytes, magic_ok, parse_err.clone()));
             }
             dex.push(DexEntry { name, size_bytes: size, magic_ok, parse_ok });
         } else if let Some(rest) = name.strip_prefix("lib/") {
@@ -221,13 +223,16 @@ pub fn first_pass(apk_path: &Path) -> Result<(Report, DebtFile, Vec<EvidenceGrou
     {
         let mut sorted = bad_dex.clone();
         sorted.sort_by(|a, b| a.0.cmp(&b.0));
-        for (name, bytes, magic_ok, _parse_ok) in &sorted {
+        for (name, bytes, magic_ok, parse_err) in &sorted {
             let debt_id = format!("debt-{next_id:04}");
             next_id += 1;
             let mut facts = vec![if !*magic_ok {
                 format!("claimed-DEX file {name} with non-DEX magic (encrypted or renamed payload — mechanical fact)")
             } else {
-                format!("claimed-DEX file {name} with valid magic but broken tables (parse failed — mechanical fact)")
+                format!(
+                    "claimed-DEX file {name} with valid magic but broken tables (parse failed{} — mechanical fact)",
+                    parse_err.as_deref().map(|e| format!(": {e}")).unwrap_or_default()
+                )
             }];
             // 邻近 asset 的原始熵清单（数据非判断：分档阈值属 fence，未挣得即不存在）
             for a in &assets {

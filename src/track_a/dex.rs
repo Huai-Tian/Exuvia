@@ -25,6 +25,11 @@ fn u32_at(data: &[u8], off: usize) -> Result<u32, String> {
     Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
 }
 
+fn u16_at(data: &[u8], off: usize) -> Result<u16, String> {
+    let b = data.get(off..off + 2).ok_or("u16 out of bounds")?;
+    Ok(u16::from_le_bytes([b[0], b[1]]))
+}
+
 /// DEX 方法清点结果（格式事实）。
 #[derive(Debug, Clone)]
 pub struct MethodInfo {
@@ -67,7 +72,8 @@ impl<'a> Dex<'a> {
         self.string_by_idx(sidx, string_ids_off)
     }
 
-    /// proto → "(p1p2)ret" 形式 descriptor
+    /// proto → "(p1p2)ret" 形式 descriptor。
+    /// type_list 条目按 spec 为 u16（实战修正：合成 fixture 单参数未暴露的读法错误）。
     fn proto_descriptor(&self, idx: u32, string_ids_off: usize, type_ids_off: usize, proto_ids_off: usize) -> Result<String, String> {
         let base = proto_ids_off + (idx as usize) * 12;
         let return_idx = self.u32(base + 4)?;
@@ -77,8 +83,8 @@ impl<'a> Dex<'a> {
         if params_off > 0 {
             let n = self.u32(params_off as usize)? as usize;
             for i in 0..n {
-                let tidx = self.u32(params_off as usize + 4 + i * 4)?;
-                params.push_str(&self.type_descriptor(tidx, string_ids_off, type_ids_off)?);
+                let tidx = u16_at(self.data, params_off as usize + 4 + i * 2)?;
+                params.push_str(&self.type_descriptor(tidx as u32, string_ids_off, type_ids_off)?);
             }
         }
         params.push(')');
@@ -120,7 +126,7 @@ pub fn parse(data: &[u8]) -> Result<Vec<MethodInfo>, String> {
     check_table(data, string_ids_off, string_ids_size, 4, "string_ids")?;
     check_table(data, type_ids_off, type_ids_size, 4, "type_ids")?;
     check_table(data, proto_ids_off, proto_ids_size, 12, "proto_ids")?;
-    check_table(data, method_ids_off, method_ids_size, 12, "method_ids")?;
+    check_table(data, method_ids_off, method_ids_size, 8, "method_ids")?;
     check_table(data, class_defs_off, class_defs_size, 32, "class_defs")?;
 
     let string_ids_off = string_ids_off as usize;
@@ -129,14 +135,15 @@ pub fn parse(data: &[u8]) -> Result<Vec<MethodInfo>, String> {
     let class_defs_off = class_defs_off as usize;
     let method_ids_off = method_ids_off as usize;
 
-    // method_ids 全量解引用（class / name / descriptor）
-    let method_ids_off = method_ids_off as usize;
+    // method_ids 全量解引用（class / name / descriptor）。
+    // method_id_item 按 spec：u16 class_idx / u16 proto_idx / u32 name_idx = 8 字节
+    // （实战修正：原按 12 字节 u32 读，与真实 DEX 错位即越界——合成 fixture 同错咬合未暴露）
     let mut methods: Vec<(String, String, String)> = Vec::with_capacity(method_ids_size as usize);
     for i in 0..method_ids_size as usize {
-        let base = method_ids_off + i * 12;
-        let class_idx = dex.u32(base)?;
-        let proto_idx = dex.u32(base + 4)?;
-        let name_idx = dex.u32(base + 8)?;
+        let base = method_ids_off + i * 8;
+        let class_idx = u16_at(data, base)? as u32;
+        let proto_idx = u16_at(data, base + 2)? as u32;
+        let name_idx = dex.u32(base + 4)?;
         let class = dex.type_descriptor(class_idx, string_ids_off, type_ids_off)?;
         let name = dex.string_by_idx(name_idx, string_ids_off)?;
         let descriptor = dex.proto_descriptor(proto_idx, string_ids_off, type_ids_off, proto_ids_off)?;

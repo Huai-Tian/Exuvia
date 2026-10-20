@@ -63,8 +63,8 @@ pub fn build_minimal_dex() -> Vec<u8> {
     let type_ids_off = string_ids_off + 4 * strings.len();
     let proto_ids_off = type_ids_off + 3 * 4;
     let type_list_off = proto_ids_off + 12;
-    let method_ids_off = type_list_off + 8;
-    let class_defs_off = method_ids_off + 2 * 12;
+    let method_ids_off = type_list_off + 6; // type_list = size u32 + 1×u16 条目（spec）
+    let class_defs_off = method_ids_off + 2 * 8; // method_id_item = 8 字节（spec）
     let class_data_off = class_defs_off + 32;
 
     let mut out = vec![0u8; 112];
@@ -99,13 +99,14 @@ pub fn build_minimal_dex() -> Vec<u8> {
     out.extend_from_slice(&3u32.to_le_bytes());
     out.extend_from_slice(&2u32.to_le_bytes());
     out.extend_from_slice(&(type_list_off as u32).to_le_bytes());
-    // type_list: size=1 → [Context(1)]
+    // type_list: size=1 → [Context(1)]，条目 u16（spec）
     out.extend_from_slice(&1u32.to_le_bytes());
-    out.extend_from_slice(&1u32.to_le_bytes());
-    // method_ids: nativeFoo(class 0,proto 0,name 4) / plainFoo(class 0,proto 0,name 5)
+    out.extend_from_slice(&1u16.to_le_bytes());
+    // method_ids: method_id_item = u16 class_idx / u16 proto_idx / u32 name_idx（spec，8 字节）
+    // nativeFoo(class 0, proto 0, name 4) / plainFoo(class 0, proto 0, name 5)
     for (_, _, n) in [(0u32, 0u32, 4u32), (0, 0, 5)] {
-        out.extend_from_slice(&0u32.to_le_bytes());
-        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
         out.extend_from_slice(&n.to_le_bytes());
     }
     // class_def: class_idx 0, access 0, super none, interfaces 0, source 6, annot 0, class_data_off, static 0
