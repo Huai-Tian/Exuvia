@@ -125,6 +125,89 @@ def cmd_rc4_scan(path, keyhex, stride, seed_i, seed_j, lo_hi, magic, skip, j_add
         print(f'  file-offset 0x{off:x} declared-length {d4}')
 
 
+def mat_parity_key(buf, m, keylen_max):
+    """14B-header material lattice -> (eff_keylen, key) or None.
+
+    Battle-1 cryptor-family key-material semantics (r16/r17 distilled):
+      keylen = s16 @mat+6, flags = u16 @mat+8, payload = mat+0xe
+      eff_keylen = flags==0 ? keylen : keylen-1
+      shift = s16 @payload+0xe; off = (shift > 8) ? 0 : u32 @payload+0x20 (0x18 when 0)
+      keysrc = payload + off*16 + 0x28
+      key[i] = sum_k even-bit-parity(keysrc[i*8+k]) << (7-k)
+    (parity(b) = b ^ b>>2 ^ b>>4 ^ b>>6 & 1 — one bit per payload byte)
+    """
+    if m + 0x30 > len(buf):
+        return None
+    keylen = struct.unpack_from('<h', buf, m + 6)[0]
+    if keylen <= 0 or keylen > keylen_max:
+        return None
+    flags = struct.unpack_from('<H', buf, m + 8)[0]
+    eff = keylen if flags == 0 else keylen - 1
+    if eff <= 0 or eff > keylen_max:
+        return None
+    if m + 0x20 > len(buf):
+        return None
+    shift = struct.unpack_from('<h', buf, m + 0x1c)[0]
+    if shift > 8:
+        off = 0
+    else:
+        if m + 0x32 > len(buf):
+            return None
+        off = struct.unpack_from('<I', buf, m + 0x2e)[0]
+        if off == 0:
+            off = 0x18
+    keysrc = m + 0xe + off * 16 + 0x28
+    if keysrc + eff * 8 > len(buf):
+        return None
+    key = bytearray(eff)
+    for i in range(eff):
+        b = 0
+        for k in range(8):
+            c = buf[keysrc + i * 8 + k]
+            b |= ((c ^ (c >> 2) ^ (c >> 4) ^ (c >> 6)) & 1) << (7 - k)
+        key[i] = b
+    return eff, bytes(key)
+
+
+def cmd_rc4mat(matsrc, carrier_path, ct_off, stride, seed_i, seed_j, j_add,
+               lo_hi, magic, keylen_max, limit):
+    """Material-space scan: every offset of <matsrc> is tried as a 14B-header
+    key material; each derives a parity-key and runs the variant RC4 against
+    the carrier's [4B declared length][magic] head. A hit hands you the
+    material offset + derived key — the ciphertext coordinates were already
+    known; this hunts the KEY-MATERIAL space (hunt philosophy extension)."""
+    mat = open(matsrc, 'rb').read()
+    ct = open(carrier_path, 'rb').read()
+    head = ct[ct_off:ct_off + 6]
+    if len(head) < 6:
+        print('{"error":"E_ARGS","detail":"carrier too short at ct-off"}')
+        return
+    lo, hi = lo_hi
+    auto = magic == 'auto'
+    magic_b = None if auto else bytes.fromhex(magic)
+    hits = 0
+    for m in range(0, max(len(mat) - 0x36, 0)):
+        dk = mat_parity_key(mat, m, keylen_max)
+        if dk is None:
+            continue
+        eff, key = dk
+        ks = rc4_keystream(key, 6, stride, seed_i, seed_j, j_add)
+        d4 = struct.unpack('<I', bytes(a ^ b for a, b in zip(head[:4], ks[:4])))[0]
+        if not (lo <= d4 <= hi):
+            continue
+        m2 = bytes(a ^ b for a, b in zip(head[4:6], ks[4:6]))
+        ok = auto and (m2[0] & 0x0f) == 8 and ((m2[0] << 8) | m2[1]) % 31 == 0 and not (m2[1] & 0x20)
+        if not ok and not auto:
+            ok = m2 == magic_b
+        if ok:
+            hits += 1
+            if hits <= limit:
+                print('mat 0x%x keylen %d key %s -> declared-len 0x%x magic %s'
+                      % (m, eff, key.hex(), d4, m2.hex()))
+    print('{"rc4mat_done":"0x%x","carrier":"%s@0x%x","hits":%d}'
+          % (len(mat), carrier_path, ct_off, hits))
+
+
 
 HASH_IVS = {
     0x2301: 'MD5/SHA1 IV[0] low (0x67452301)', 0xab89: 'IV[1] low (0xefcdab89)',
@@ -212,6 +295,21 @@ def main():
     p.add_argument('--magic', default='789c', help='expected magic right after the length header (hex)')
     p.add_argument('--skip', type=int, default=0)
 
+    p = sub.add_parser('rc4mat',
+                       help='material-space scan: every offset of matsrc as a 14B-header key material '
+                            '(parity-key derivation, cryptor family) -> variant RC4 -> [4B len][magic] judge')
+    p.add_argument('matsrc', help='material source file (where the material may live)')
+    p.add_argument('--carrier', required=True, help='ciphertext file')
+    p.add_argument('--ct-off', default='0', help='ciphertext start offset in carrier (hex/dec)')
+    p.add_argument('--stride', type=int, default=1, help='PRGA i stride per byte (variant family)')
+    p.add_argument('--j-add', type=int, default=0, help='PRGA j increment offset (variant family)')
+    p.add_argument('--seed-i', type=int, default=0)
+    p.add_argument('--seed-j', type=int, default=0)
+    p.add_argument('--range', default='1000:100000000', help='accepted declared-length range lo:hi')
+    p.add_argument('--magic', default='auto', help="'auto' = RFC1950 CMF/FLG lattice, or exact hex (e.g. 789c)")
+    p.add_argument('--keylen-max', type=int, default=64, help='material keylen lattice upper bound')
+    p.add_argument('--limit', type=int, default=10)
+
     args = ap.parse_args()
     if args.cmd == 'entropy':
         cmd_entropy(args.file, args.block)
@@ -226,6 +324,11 @@ def main():
     elif args.cmd == 'rc4-scan':
         lo, hi = map(int, args.range.split(':'))
         cmd_rc4_scan(args.file, args.key, args.stride, args.seed_i, args.seed_j, (lo, hi), args.magic, args.skip, args.j_add)
+    elif args.cmd == 'rc4mat':
+        lo, hi = map(int, args.range.split(':'))
+        cmd_rc4mat(args.matsrc, args.carrier, int(args.ct_off, 0), args.stride,
+                   args.seed_i, args.seed_j, args.j_add, (lo, hi),
+                   args.magic, args.keylen_max, args.limit)
 
 
 if __name__ == '__main__':

@@ -136,13 +136,15 @@ def is_zlib(a, b):
 
 
 def is_keymaterial(p):
-    """14-byte-header key-material lattice (Battle-1 r10 fact, 0x7184 semantics)."""
+    """14B-header key-material lattice (0x7184 semantics; r16/r17 corrected: keylen
+    is a SIGNED u16 at [6..8) — live value 10; r10's 16/24/32/48/64 whitelist and
+    the shift@[0xe] read were both wrong; eff = flags==0 ? keylen : keylen-1)."""
     if len(p) < 16:
         return False
     keylen = struct.unpack_from('<h', p, 6)[0]
-    flag = struct.unpack_from('<H', p, 8)[0]
-    shift = p[0xe]
-    return keylen in (16, 24, 32, 48, 64) and flag <= 0x100 and shift <= 31
+    flags = struct.unpack_from('<H', p, 8)[0]
+    eff = keylen if flags == 0 else keylen - 1
+    return 1 <= eff <= 1024
 
 
 def main():

@@ -259,9 +259,11 @@ def test_sm4recon():
         rkf = os.path.join(td, 'rk.bin')
         open(rkf, 'wb').write(struct.pack('<32I', *rk))
         r = subprocess.run([sys.executable, os.path.join(HERE, 'sm4recon.py'), 'scan', f,
-                            '--rk', rkf, '--form', 'material', '--limit', '5'],
+                            '--rk', rkf, '--form', 'material', '--limit', '50'],
                            capture_output=True, text=True, timeout=60)
         assert r.returncode == 0, f'sm4recon scan exit {r.returncode}: {r.stderr}'
+        # r17: corrected s16-keylen lattice is weaker (honest semantics) -> more FPs;
+        # the planted offset must still be among the printed hits.
         assert 'material' in r.stdout and '0x309' in r.stdout, r.stdout  # 777 = 0x309
         print('sm4recon OK: material-form scan hits the planted offset')
         # scan --iv：block-1 常量 = E(IV)（r15：IV 是调用现场事实，扫描器必须参数化）
@@ -270,11 +272,63 @@ def test_sm4recon():
         f_iv = os.path.join(td, 'carrier_iv.bin')
         open(f_iv, 'wb').write(bytes(carrier_iv))
         r = subprocess.run([sys.executable, os.path.join(HERE, 'sm4recon.py'), 'scan', f_iv,
-                            '--rk', rkf, '--iv', iv.hex(), '--form', 'material', '--limit', '5'],
+                            '--rk', rkf, '--iv', iv.hex(), '--form', 'material', '--limit', '50'],
                            capture_output=True, text=True, timeout=60)
         assert r.returncode == 0, f'sm4recon scan --iv exit {r.returncode}: {r.stderr}'
         assert 'material' in r.stdout and '0x309' in r.stdout, r.stdout
         print('sm4recon OK: --iv scan hits the planted offset with E(IV) block-1')
+
+
+def test_rc4mat():
+    """rc4mat (r17 tool): material-space scan — synthetic 14B-header material ->
+    parity-key derivation round-trip + planted scan hit via the CLI."""
+    sys.path.insert(0, HERE)
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('crypto_recon', os.path.join(HERE, 'crypto_recon.py'))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    # synthetic material whose even-bit-parity keysrc yields the planted key
+    key = bytes.fromhex('a5c39f1b7d2e')  # 6 bytes
+    keysrc = bytearray()
+    for kb in key:
+        for k in range(8):
+            keysrc.append(0x01 if (kb >> (7 - k)) & 1 else 0x00)
+    mat = bytearray(0xe)
+    struct.pack_into('<h', mat, 6, len(key))   # keylen
+    struct.pack_into('<H', mat, 8, 0)          # flags = 0
+    mat += bytearray(0x1e - 0xe)
+    struct.pack_into('<h', mat, 0x1c, 24)     # shift > 8 -> off = 0 path
+    mat += bytearray(0x36 - 0x1e)
+    mat += keysrc                              # keysrc = payload + 0x28
+    eff, got = mod.mat_parity_key(bytes(mat), 0, 64)
+    assert got == key and eff == len(key), f'parity-key round-trip failed: {got and got.hex()}'
+    print('crypto_recon rc4mat OK: synthetic material -> parity-key round-trip')
+    # planted scan: carrier head = [4B declared length][zlib magic] XOR keystream(derived key)
+    ks = mod.rc4_keystream(key, 6, 2, 3, 5, 1)   # battle variant params on the CLI
+    head = bytearray(struct.pack('<I', 4096) + b'\x78\x9c')
+    carrier = bytes(a ^ b for a, b in zip(head, ks))
+    # hide the material in a PRNG ocean at a known offset
+    ocean = bytearray()
+    s = 0xfeed
+    for _ in range(4096):
+        s ^= (s << 13) & 0xFFFFFFFFFFFFFFFF
+        s ^= s >> 7
+        s ^= (s << 17) & 0xFFFFFFFFFFFFFFFF
+        ocean.append((s * 0x2545F4914F6CDD1D >> 56) & 0xFF)
+    off = 777
+    matsrc = bytes(ocean[:off]) + bytes(mat) + bytes(ocean[off:])
+    with tempfile.TemporaryDirectory() as td:
+        mf = os.path.join(td, 'matsrc.bin')
+        cf = os.path.join(td, 'carrier.bin')
+        open(mf, 'wb').write(matsrc)
+        open(cf, 'wb').write(carrier)
+        r = subprocess.run([sys.executable, os.path.join(HERE, 'crypto_recon.py'), 'rc4mat', mf,
+                            '--carrier', cf, '--ct-off', '0',
+                            '--stride', '2', '--seed-i', '3', '--seed-j', '5', '--j-add', '1'],
+                           capture_output=True, text=True, timeout=120)
+        assert r.returncode == 0, f'rc4mat exit {r.returncode}: {r.stderr}'
+        assert 'mat 0x309' in r.stdout and '"hits":1' in r.stdout, r.stdout  # 777 = 0x309
+        print('crypto_recon rc4mat OK: planted material found by the material-space scan')
 
 
 if __name__ == '__main__':
@@ -284,4 +338,5 @@ if __name__ == '__main__':
     test_disasm()
     test_sigx()
     test_sm4recon()
+    test_rc4mat()
     print('trackb selftest: ALL GREEN')
