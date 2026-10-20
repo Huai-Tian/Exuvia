@@ -71,6 +71,65 @@ def test_so_emulator():
         got = int(out['return'], 16)
         assert got == 0x1234, f'expected return 0x1234, got 0x{got:x}'
         print(f'so_emulator OK: synthetic fn returned 0x{got:x}')
+    # raw-syscall bridge (r27): synthetic fn does openat(path)+read(fd,buf,16)
+    # through 'mov x8,#N; svc #0' stubs — the --fs world must serve the file and
+    # the fd table must carry fd/lseek state across BOTH svc calls.
+    with tempfile.TemporaryDirectory() as td:
+        realfile = os.path.join(td, 'svc.bin')
+        content = b'SYSCALL_BRIDGE_OK'
+        open(realfile, 'wb').write(content)
+        so = os.path.join(td, 'syscall.so')
+        eh = bytearray(64)
+        eh[0:4] = b'\x7fELF'
+        eh[4] = 2
+        eh[5] = 1
+        eh[6] = 1
+        eh[16:18] = struct.pack('<H', 3)
+        eh[18:20] = struct.pack('<H', 183)
+        struct.pack_into('<Q', eh, 0x20, 64)
+        struct.pack_into('<H', eh, 0x36, 64)
+        struct.pack_into('<H', eh, 0x38, 56)
+        struct.pack_into('<H', eh, 0x3A, 1)
+        ph = bytearray(56)
+        struct.pack_into('<I', ph, 0, 1)
+        struct.pack_into('<Q', ph, 8, 0x1000)
+        struct.pack_into('<Q', ph, 16, 0x1000)
+        struct.pack_into('<Q', ph, 32, 0x1000)
+        struct.pack_into('<Q', ph, 40, 0x1000)
+        code = b''.join(struct.pack('<I', w) for w in (
+            0x92800C60,  # movn x0, #0x63     -> AT_FDCWD (-100)
+            0xD2822001,  # movz x1, #0x1100   -> pathname vaddr
+            0xD2800002,  # movz x2, #0        -> O_RDONLY
+            0xD2800003,  # movz x3, #0        -> mode
+            0xD2800708,  # movz x8, #56       -> NR openat
+            0xD4000001,  # svc #0             -> x0 = fd
+            0xD2824001,  # movz x1, #0x1200   -> buf vaddr
+            0xD2800222,  # movz x2, #17       -> count
+            0xD28007E8,  # movz x8, #63       -> NR read
+            0xD4000001,  # svc #0             -> x0 = nread
+            0xD65F03C0,  # ret
+        ))
+        img = bytes(eh) + bytes(ph)
+        img += b'\0' * (0x1000 - len(img))
+        img += code + b'\0' * (0x100 - len(code))
+        img += b'\0' * (0x1100 - len(img))
+        img += b'/data/local/tmp/svc_test.bin\0'
+        img += b'\0' * (0x1200 - len(img))
+        img += b'\0' * (0x1000 - (len(img) - 0x1000))
+        open(so, 'wb').write(img)
+        dumpf = os.path.join(td, 'buf.bin')
+        r = subprocess.run(
+            [sys.executable, os.path.join(HERE, 'so_emulator.py'), so, '--fn', '0x1000',
+             '--fs', '/data/local/tmp/svc_test.bin:' + realfile,
+             '--dump-mem', '0x1200:17:' + dumpf],
+            capture_output=True, text=True, timeout=60)
+        assert r.returncode == 0, f'so_emulator svc exit {r.returncode}: {r.stderr}\n{r.stdout}'
+        out = json.loads(r.stdout)
+        assert int(out['return'], 16) == 17, f'expected read()=17, got {out["return"]}'
+        assert open(dumpf, 'rb').read() == content, 'read() buffer mismatch'
+        ev = {e.get('svc'): e for e in out.get('svc_events', [])}
+        assert 'openat' in ev and ev['openat'].get('fd', 0) >= 0x100, out.get('svc_events')
+        print('so_emulator svc OK: raw openat/read syscalls served from the --fs world')
 
 
 def test_rc4_vector():

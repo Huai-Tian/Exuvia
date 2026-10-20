@@ -36,10 +36,11 @@ import sys
 import json
 
 try:
-    from unicorn import Uc, UC_ARCH_ARM64, UC_MODE_LITTLE_ENDIAN, UC_HOOK_CODE
+    from unicorn import Uc, UC_ARCH_ARM64, UC_MODE_LITTLE_ENDIAN, UC_HOOK_CODE, UC_HOOK_INTR
     from unicorn.arm64_const import (
         UC_ARM64_REG_X0, UC_ARM64_REG_X1, UC_ARM64_REG_X2, UC_ARM64_REG_X3,
         UC_ARM64_REG_X4, UC_ARM64_REG_X5, UC_ARM64_REG_X6, UC_ARM64_REG_X7,
+        UC_ARM64_REG_X8,
         UC_ARM64_REG_LR, UC_ARM64_REG_SP, UC_ARM64_REG_PC,
         UC_ARM64_REG_TPIDR_EL0,
     )
@@ -366,6 +367,90 @@ def make_libc(uc, elf):
             mmap_regions.append({'addr': addr, 'len': length, 'source': 'anon'})
         return addr
 
+    # Raw-syscall bridge (r27, Battle-1 r26 discovery): modern shells carry their
+    # own syscall stubs ('mov x8,#N; svc #0') to bypass libc hooks entirely —
+    # PLT/GOT bridging never sees these calls. SVC raises UC_HOOK_INTR (intno=2);
+    # the handler shares the --fs file table and fd counter with the fopen bridge,
+    # so paths served to fopen() and openat() stay one world. Unknown numbers are
+    # logged (forensics: which kernel surface the shell touches) and return 0.
+    svc_events = []
+
+    def _ret_errno(uc_, n):
+        uc_.reg_write(UC_ARM64_REG_X0, (1 << 64) - n & 0xFFFFFFFFFFFFFFFF)
+
+    def hook_svc(uc_, intno, ud):
+        if intno != 2:
+            return
+        x8 = uc_.reg_read(UC_ARM64_REG_X8)
+        x0, x1, x2 = (uc_.reg_read(r) for r in (UC_ARM64_REG_X0, UC_ARM64_REG_X1, UC_ARM64_REG_X2))
+        if x8 == 56:  # openat(dirfd, pathname, flags, mode) — fs_map prefix semantics as fopen
+            path = cstr(x1).decode(errors='replace')
+            real = fs_map.get(path)
+            if real is None:
+                for k, v in fs_map.items():
+                    if path.startswith(k):
+                        real = v
+                        break
+            if real is None:
+                svc_events.append({'svc': 'openat', 'path': path, 'ret': -2})
+                _ret_errno(uc_, 2)  # -ENOENT
+                return
+            fd = FD[0]
+            FD[0] += 1
+            files[fd] = open(real, 'rb')
+            svc_events.append({'svc': 'openat', 'path': path, 'fd': fd})
+            uc_.reg_write(UC_ARM64_REG_X0, fd)
+            return
+        if x8 == 57:  # close(fd)
+            f = files.pop(x0, None)
+            if f:
+                f.close()
+            uc_.reg_write(UC_ARM64_REG_X0, 0)
+            return
+        if x8 == 62:  # lseek(fd, offset, whence) — signed offset, valid whence only
+            f = files.get(x0)
+            if not f:
+                _ret_errno(uc_, 9)  # -EBADF
+                return
+            off = x1 - (1 << 64) if x1 >= (1 << 63) else x1
+            try:
+                f.seek(off, x2 if x2 in (0, 1, 2) else 0)
+            except (ValueError, OSError):
+                _ret_errno(uc_, 22)  # -EINVAL
+                return
+            uc_.reg_write(UC_ARM64_REG_X0, f.tell() & 0xFFFFFFFFFFFFFFFF)
+            return
+        if x8 == 63:  # read(fd, buf, count)
+            f = files.get(x0)
+            if not f:
+                _ret_errno(uc_, 9)
+                return
+            blob = f.read(x2)
+            wr(x1, blob)
+            uc_.reg_write(UC_ARM64_REG_X0, len(blob))
+            return
+        if x8 == 64:  # write(fd, buf, count) — pretend success (no sink)
+            uc_.reg_write(UC_ARM64_REG_X0, x2)
+            return
+        if x8 == 222:  # mmap(addr,len,prot,flags,fd,off) — f_mmap reads x1/x4/x5, same slots
+            r = f_mmap(x0, uc_.reg_read(UC_ARM64_REG_X1), uc_.reg_read(UC_ARM64_REG_X2),
+                       uc_.reg_read(UC_ARM64_REG_X3), uc_.reg_read(UC_ARM64_REG_X4),
+                       uc_.reg_read(UC_ARM64_REG_X5))
+            uc_.reg_write(UC_ARM64_REG_X0, r & 0xFFFFFFFFFFFFFFFF)
+            return
+        if x8 in (93, 94):  # exit / exit_group — stop; x0 already holds the code
+            svc_events.append({'svc': 'exit', 'code': x0})
+            uc_.emu_stop()
+            return
+        # benign-noise surface (threads/time/robust/prctl/kill/…): succeed quietly
+        if x8 == 96:  # set_tid_address returns a tid
+            uc_.reg_write(UC_ARM64_REG_X0, 1234)
+            return
+        if x8 not in (57, 98, 99, 129, 135, 167, 215, 124, 172, 173, 174, 175, 178, 233):
+            svc_events.append({'svc': 'unknown', 'nr': x8, 'x0': '0x%x' % x0,
+                               'x1': '0x%x' % x1, 'x2': '0x%x' % x2})
+        uc_.reg_write(UC_ARM64_REG_X0, 0)
+
     table = {
         'malloc': f_malloc, '_Znwm': f_malloc, '_Znam': f_malloc, 'calloc': f_calloc,
         'free': f_free, '_ZdlPv': f_free, '_ZdaPv': f_free,
@@ -387,6 +472,8 @@ def make_libc(uc, elf):
     }
     table['_mmap_regions'] = mmap_regions  # main 侧 CLI 输出（非符号名，绑定循环不触碰）
     table['_threads_spawned'] = threads_spawned
+    table['_svc_hook'] = hook_svc            # raw-syscall bridge (SVC → UC_HOOK_INTR)
+    table['_svc_events'] = svc_events
     return table
 
 
@@ -621,6 +708,12 @@ def main():
         uc_.reg_write(UC_ARM64_REG_PC, uc_.reg_read(UC_ARM64_REG_LR))
 
     uc.hook_add(UC_HOOK_CODE, hook_stub, begin=STUB, end=STUB + STUBSZ)
+    # raw-syscall bridge: shells bypass libc with 'mov x8,#N; svc #0' stubs —
+    # SVC raises UC_HOOK_INTR; serve openat/read/lseek/mmap/… from the --fs world
+    svc_hook = libc.pop('_svc_hook', None)
+    if svc_hook:
+        uc.hook_add(UC_HOOK_INTR, svc_hook)
+    svc_events = libc.pop('_svc_events', [])
 
     watch_events = []
 
@@ -722,6 +815,7 @@ def main():
         dump_fixed_regions()
         print(f'{{"error":"E_EMU","detail":"{e}","pc":"0x{uc.reg_read(UC_ARM64_REG_PC):x}",'
               f'"regs":{json.dumps(regs)},'
+              f'"svc_events":{json.dumps(svc_events)},'
               f'"watch":{json.dumps(watch_events)}}}')
         sys.exit(1)
 
@@ -741,6 +835,8 @@ def main():
     threads = libc.pop('_threads_spawned', [])
     if threads:
         out['threads_spawned'] = [{'start': '0x%x' % t['start'], 'arg': '0x%x' % t['arg']} for t in threads]
+    if svc_events:
+        out['svc_events'] = svc_events
     if args.java:
         out['registered_natives'] = {f'{k[0]}{k[1]}': f'0x{v:x}' for k, v in regs.items()}
     print(json.dumps(out, indent=2))
