@@ -19,6 +19,12 @@ Subcommands:
          string literal (recovered verbatim from dex bytecode via any dex
          reader). Battle-1 finding: shell Java layers are plaintext and carry
          the call-site structure — this decoder is the key that opened them.
+  hash-scan <so> [--find-callers]
+         instruction-level hash-constant scan: shells load MD5/SHA1/SHA256
+         IVs via movz/movk immediates (never contiguous bytes), so byte scans
+         miss them. Decodes every aligned word, reports movz/movk carrying
+         known IV fragments. Battle-1: located the shell's private MD5 engine
+         this way (four IVs in four adjacent movz, file 0xf5ee8).
 
 Exit codes: 0 ok; 2 dependency missing (capstone needed for aes-scan only).
 """
@@ -119,6 +125,37 @@ def cmd_rc4_scan(path, keyhex, stride, seed_i, seed_j, lo_hi, magic, skip, j_add
         print(f'  file-offset 0x{off:x} declared-length {d4}')
 
 
+
+HASH_IVS = {
+    0x2301: 'MD5/SHA1 IV[0] low (0x67452301)', 0xab89: 'IV[1] low (0xefcdab89)',
+    0xdcfe: 'IV[2] low (0x98badcfe)', 0x5476: 'IV[3] low (0x10325476)',
+    0x6745: 'IV[0] high', 0xefcd: 'IV[1] high', 0x98ba: 'IV[2] high', 0x1032: 'IV[3] high',
+    0x9e66: 'SHA256 IV[0] low (0x6a09e667)', 0x7ae8: 'SHA256 IV[1] low (0xbb67ae85)',
+    0x2f98: 'SHA256 K[0] low (0x428a2f98)', 0x2799: 'SHA1 K1 (0x5a827999)',
+    0xc3d2: 'SHA1 E low (0xc3d2e1f0)', 0xe1f0: 'SHA1 E high',
+}
+
+
+def cmd_hash_scan(path):
+    import struct as st
+    data = open(path, 'rb').read()
+    hits = []
+    for off in range(0, len(data) - 4, 4):
+        w = st.unpack_from('<I', data, off)[0]
+        op = w & 0xFFE00000
+        imm16 = (w >> 5) & 0xFFFF
+        if op in (0x52800000, 0x72A80000, 0xD2800000, 0xF2A80000) and imm16 in HASH_IVS:
+            kind = {0x52800000: 'movz.w', 0x72A80000: 'movk.w lsl16',
+                    0xD2800000: 'movz.x', 0xF2A80000: 'movk.x lsl16'}[op]
+            hits.append((off, kind, imm16))
+    print(f'hash-constant movz/movk hits: {len(hits)}')
+    for off, kind, imm in hits[:40]:
+        print(f'  0x{off:06x}  {kind:14s} #0x{imm:04x}  {HASH_IVS[imm]}')
+    # 相邻聚集 → 引擎定位
+    if hits:
+        print(f'engine zone: file 0x{hits[0][0]:x} .. 0x{hits[-1][0]:x}')
+
+
 def cmd_dxor(s, key, as_hex, strings_file):
     def dec(t):
         if as_hex:
@@ -149,6 +186,9 @@ def main():
     p = sub.add_parser('aes-scan')
     p.add_argument('so')
 
+    p = sub.add_parser('hash-scan')
+    p.add_argument('so')
+
     p = sub.add_parser('dxor')
     p.add_argument('str', nargs='?')
     p.add_argument('--key', type=lambda x: int(x, 0), default=0x10, help='per-char XOR key')
@@ -173,6 +213,8 @@ def main():
         cmd_ecb(args.file, args.block)
     elif args.cmd == 'aes-scan':
         cmd_aes_scan(args.so)
+    elif args.cmd == 'hash-scan':
+        cmd_hash_scan(args.so)
     elif args.cmd == 'dxor':
         cmd_dxor(args.str, args.key, args.hex, args.strings)
     elif args.cmd == 'rc4-scan':
