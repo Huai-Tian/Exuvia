@@ -418,6 +418,19 @@ def main():
                 return 0x00010006
             if idx in (21, 22, 23):  # GlobalRef/LocalRef management
                 return 0
+            # Array semantics (Battle-1 r9: array-length calls return NUMBERS, not objects —
+            # a fake object here reads as a garbage length and poisons signature checks)
+            if idx == 172:  # GetArrayLength
+                return 0
+            if idx == 171:  # GetByteArrayElements — deterministic zero region, isCopy=false
+                z = HEAP + 0x7000000
+                uc.mem_map(z & ~(PAGE - 1), 0x1000)
+                uc.mem_write(z, b'\0' * 64)
+                if x2:
+                    uc.mem_write(x2, struct.pack('<Q', 0))
+                return z
+            if idx in (184, 192):  # Release*ArrayElements
+                return 0
             # Call*/New*/Get*Object family + default: fake non-null object
             return fake_obj()
 
