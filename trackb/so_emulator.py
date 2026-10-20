@@ -319,6 +319,15 @@ def make_libc(uc, elf):
         f.seek(x1, x2)
         return 0
 
+    def f_lseek(x0, x1, x2, x3, x4=0, x5=0):
+        # r22: the FS family lacked lseek — bit-stream readers seek past their
+        # in-memory window into the source FILE (fd from the --fs bridge).
+        f = files.get(x0)
+        if not f:
+            return -1
+        f.seek(x1, x2 if x2 else 0)
+        return f.tell()
+
     def f_ftell(x0, x1, x2, x3, x4=0, x5=0):
         f = files.get(x0)
         return f.tell() if f else 0
@@ -372,7 +381,7 @@ def make_libc(uc, elf):
         'dlerror': f_noop, '__errno': f_errno, 'sysconf': lambda x0, x1, x2, x3, x4=0, x5=0: 4096,
         'inflate': f_inflate, 'inflateInit_': f_inflateInit_, 'inflateEnd': f_inflateEnd,
         'fopen': f_fopen, 'fread': f_fread, 'fclose': f_fclose,
-        'fseek': f_fseek, 'ftell': f_ftell,
+        'fseek': f_fseek, 'lseek': f_lseek, 'ftell': f_ftell,
         'mmap': f_mmap, 'munmap': f_noop,
         'pthread_create': f_pthread_create,
     }
