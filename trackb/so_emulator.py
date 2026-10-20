@@ -153,6 +153,10 @@ class Elf:
 def make_libc(uc, elf):
     heap_ptr = [HEAP]
     import zlib
+    # file-system bridge state (fed by --fs CLI)
+    global FS_MAP, FILES, FD
+    if 'FS_MAP' not in globals():
+        FS_MAP, FILES, FD = [{}], [{}], [0x100]
 
     def bump(sz):
         p = heap_ptr[0]
@@ -244,6 +248,50 @@ def make_libc(uc, elf):
     def f_errno(x0, x1, x2, x3):
         return TLS + 0x80
 
+    # File-system bridge (Battle-1 r7-8): verification chains fopen() their own APK.
+    fs_map = FS_MAP[0]
+    files = FILES[0]
+
+    def f_fopen(x0, x1, x2, x3):
+        path = cstr(x0).decode(errors='replace')
+        real = fs_map.get(path)
+        if real is None:
+            for k, v in fs_map.items():
+                if path.startswith(k):
+                    real = v
+                    break
+        if real is None:
+            return 0
+        fd = FD[0]
+        FD[0] += 1
+        files[fd] = open(real, 'rb')
+        return fd
+
+    def f_fread(x0, x1, x2, x3):
+        # fread(buf, size, n, FILE*)
+        f = files.get(x3)
+        if not f:
+            return 0
+        blob = f.read(x1 * x2)
+        wr(x0, blob)
+        return len(blob) // max(x1, 1)
+
+    def f_fclose(x0, x1, x2, x3):
+        f = files.pop(x0, None)
+        if f: f.close()
+        return 0
+
+    def f_fseek(x0, x1, x2, x3):
+        f = files.get(x0)
+        if not f:
+            return -1
+        f.seek(x1, x2)
+        return 0
+
+    def f_ftell(x0, x1, x2, x3):
+        f = files.get(x0)
+        return f.tell() if f else 0
+
     table = {
         'malloc': f_malloc, '_Znwm': f_malloc, 'calloc': f_calloc,
         'free': f_free, '_ZdlPv': f_free, '_ZdaPv': f_free,
@@ -258,6 +306,8 @@ def make_libc(uc, elf):
         'dladdr': lambda x0, x1, x2, x3: (wr(x1, struct.pack('<QQQQ', 0, 0, 0, 0)), 0)[1],
         'dlerror': f_noop, '__errno': f_errno, 'sysconf': lambda x0, x1, x2, x3: 4096,
         'inflate': f_inflate, 'inflateInit_': f_inflateInit_, 'inflateEnd': f_inflateEnd,
+        'fopen': f_fopen, 'fread': f_fread, 'fclose': f_fclose,
+        'fseek': f_fseek, 'ftell': f_ftell,
     }
     return table
 
@@ -276,6 +326,8 @@ def main():
                     help='addr:hex — write bytes into emulated memory before run (e.g. this-struct setup)')
     ap.add_argument('--load', action='append', default=[],
                     help='file:va — map an external file into emulated memory (cross-file black-box, e.g. a ciphertext container living in another file)')
+    ap.add_argument('--fs', action='append', default=[],
+                    help='path:realfile — bridge fopen()/fread()/lseek() to a real file (shell verification chains read their own APK; Battle-1 rounds 7-8)')
     ap.add_argument('--timeout', type=int, default=60, help='emulation timeout seconds')
     args = ap.parse_args()
 
@@ -296,6 +348,10 @@ def main():
         uc.mem_map(base, end - base)
 
     libc = make_libc(uc, elf)
+    # feed --fs map into the bridge before stub binding
+    for spec in args.fs:
+        p, real = spec.split(':', 1) if ':' in spec else (spec, spec)
+        FS_MAP[0][p] = real
     stub_addr = {}
     # bind GOT slots: JMPREL/GLOB_DAT symbols, then RELATIVE relocations
     symtab_off = elf.va2off(elf.dynamic_tags().get(DT_SYMTAB, 0))
