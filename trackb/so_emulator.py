@@ -28,6 +28,7 @@ Exit codes: 0 = emulated return captured; 2 = unicorn missing; 3 = ELF parse err
 import argparse
 import struct
 import sys
+import json
 
 try:
     from unicorn import Uc, UC_ARCH_ARM64, UC_MODE_LITTLE_ENDIAN, UC_HOOK_CODE
@@ -319,6 +320,9 @@ def main():
     ap.add_argument('--arg', action='append', default=[], help='xN=VAL (register setup, hex)')
     ap.add_argument('--watch', action='append', default=[], help='VA to snapshot x0/buffer at (hex)')
     ap.add_argument('--dump', action='append', default=[], help='x0:LEN:FILE — dump buffer on return')
+    ap.add_argument('--dump-mem', action='append', default=[],
+                    help='VA:LEN:FILE — dump a fixed memory region after the run (before-registered maps only; '
+                         'materialization diagnostics: run twice, diff against the so file)')
     ap.add_argument('--got', action='append', default=[],
                     help='slot:name — override a GOT slot semantics (hex slot, libc name)')
     ap.add_argument('--java', action='store_true', help='stub JavaVM/JNIEnv (fake tables, RegisterNatives capture)')
@@ -328,6 +332,17 @@ def main():
                     help='file:va — map an external file into emulated memory (cross-file black-box, e.g. a ciphertext container living in another file)')
     ap.add_argument('--fs', action='append', default=[],
                     help='path:realfile — bridge fopen()/fread()/lseek() to a real file (shell verification chains read their own APK; Battle-1 rounds 7-8)')
+    ap.add_argument('--sig-file', action='append', default=[],
+                    help='file — feed real signature bytes into the byte-array JNI semantics '
+                         '(GetArrayLength/GetByteArrayElements serve this buffer instead of the zero region; '
+                         'Battle-1 r10: runtime-derived keys read the signing chain — unsigned-corpus '
+                         'faithfulness stops exactly at that wall; honest approximation: EVERY byte-array '
+                         'call sees this buffer, function-level JNI cannot tell arrays apart)')
+    ap.add_argument('--utf8-file', action='append', default=[],
+                    help='file — feed real UTF-8 bytes into the string JNI semantics '
+                         '(GetStringUTFChars/GetStringUTFLength serve this buffer; Battle-1 r10: '
+                         'signature-key derivation mixes packageName+signature hashes — the string '
+                         'side needs real bytes; same honest approximation as --sig-file)')
     ap.add_argument('--timeout', type=int, default=60, help='emulation timeout seconds')
     args = ap.parse_args()
 
@@ -386,6 +401,31 @@ def main():
             uc.mem_write(JNIF + 8 * slot, struct.pack('<Q', JNIF + 0x800 + 8 * slot))
         regs = {}
         fake_heap = [JNIF + 0x3000]
+        # --sig-file: map real signature bytes (Battle-1 r10 — signing-chain key derivation)
+        SIGBASE = JNIF + 0x10000
+        sig_regions = []
+        for k, sf in enumerate(args.sig_file):
+            b = open(sf, 'rb').read()
+            base = (SIGBASE + k * 0x10000) & ~(PAGE - 1)
+            uc.mem_map(base, ((len(b) + PAGE - 1) & ~(PAGE - 1)) + PAGE)
+            uc.mem_write(base, b)
+            sig_regions.append((base, len(b)))
+        # --utf8-file: map real UTF-8 bytes (packageName side of the derivation mix)
+        utf8_regions = []
+        for k, uf in enumerate(args.utf8_file):
+            b = open(uf, 'rb').read()
+            base = (JNIF + 0x20000 + k * 0x10000) & ~(PAGE - 1)
+            uc.mem_map(base, ((len(b) + PAGE - 1) & ~(PAGE - 1)) + PAGE)
+            uc.mem_write(base, b)
+            utf8_regions.append((base, len(b)))
+        # JavaVM fake world (InvokeJNI standard layout): feed --arg x0=<VM>.
+        # JNI_OnLoad prologues do vm->GetEnv(vm, &env, ver) via table slot +0x30 (Battle-1 r10:
+        # shells reached GetEnv before the JNIEnv world existed — productize the ladder).
+        VM = JNIF + 0x30000
+        GETENV_STUB = JNIF + 0x800 + 8 * 258  # idx 258: inside hook span, unused by JNIEnv semantics
+        uc.mem_map(VM & ~(PAGE - 1), 0x4000)
+        uc.mem_write(VM, struct.pack('<Q', VM + 0x1000))                  # [vm] = vmtable
+        uc.mem_write(VM + 0x1000 + 0x30, struct.pack('<Q', GETENV_STUB))  # [vmtable+0x30] = GetEnv
 
         def fake_obj():
             p = fake_heap[0]
@@ -398,6 +438,10 @@ def main():
         #  - GetStaticIntField(150) feeds a modern SDK_INT
         #  - default for unnamed slots: non-null fake object (Battle-1: null stubs caused the wall)
         def jni_ret(idx, x0, x1, x2, x3):
+            if idx == 258:  # JavaVM GetEnv (vm-table slot +0x30) — *env = JNIEnv, JNI_OK
+                if x1:
+                    uc.mem_write(x1, struct.pack('<Q', env))
+                return 0
             if idx == 228:  # ExceptionCheck
                 return 0
             if idx == 215:  # RegisterNatives — capture verbatim
@@ -418,18 +462,38 @@ def main():
                 return 0x00010006
             if idx in (21, 22, 23):  # GlobalRef/LocalRef management
                 return 0
-            # Array semantics (Battle-1 r9: array-length calls return NUMBERS, not objects —
-            # a fake object here reads as a garbage length and poisons signature checks)
-            if idx == 172:  # GetArrayLength
+            # Array semantics — STANDARD JNI table indexes, anchored by three Battle-1-verified
+            # slots (150 GetStaticIntField / 215 RegisterNatives / 228 ExceptionCheck):
+            #   168 GetStringUTFLength, 169 GetStringUTFChars,
+            #   171 GetArrayLength, 172 NewObjectArray, 176 NewByteArray,
+            #   184 GetByteArrayElements, 191-198 Release*ArrayElements (192 = ReleaseByteArray)
+            # (r9's note "172/171" was an index mislabel — numbers-not-objects insight stands, slots corrected r10)
+            if idx == 168:  # GetStringUTFLength — NUMBER
+                if utf8_regions:
+                    return utf8_regions[0][1]
                 return 0
-            if idx == 171:  # GetByteArrayElements — deterministic zero region, isCopy=false
+            if idx == 169:  # GetStringUTFChars — utf8-file injection > null
+                if utf8_regions:
+                    if x2:
+                        uc.mem_write(x2, struct.pack('<Q', 0))
+                    return utf8_regions[0][0]
+                return 0
+            if idx == 171:  # GetArrayLength — NUMBER, not object (r9 insight)
+                if sig_regions:
+                    return sig_regions[0][1]
+                return 0
+            if idx == 184:  # GetByteArrayElements — sig-file injection > deterministic zero region
+                if sig_regions:
+                    if x2:
+                        uc.mem_write(x2, struct.pack('<Q', 0))
+                    return sig_regions[0][0]
                 z = HEAP + 0x7000000
                 uc.mem_map(z & ~(PAGE - 1), 0x1000)
                 uc.mem_write(z, b'\0' * 64)
                 if x2:
                     uc.mem_write(x2, struct.pack('<Q', 0))
                 return z
-            if idx in (184, 192):  # Release*ArrayElements
+            if idx in (191, 192, 193, 194, 195, 196, 197, 198):  # Release*ArrayElements
                 return 0
             # Call*/New*/Get*Object family + default: fake non-null object
             return fake_obj()
@@ -491,13 +555,25 @@ def main():
     uc.reg_write(UC_ARM64_REG_LR, SENTINEL)
 
     fn_va = int(args.fn, 0)
+
+    def dump_fixed_regions():
+        # --dump-mem：跑完（无论成败）dump 固定区——物化诊断（数据段运行时解密/派生 key 落点）
+        for spec in args.dump_mem:
+            va_s, ln_s, path = spec.split(':')
+            blob = bytes(uc.mem_read(int(va_s, 0), int(ln_s, 0)))
+            open(path, 'wb').write(blob)
+
     try:
         uc.emu_start(fn_va, SENTINEL, timeout=args.timeout * 1000 * 1000)
     except Exception as e:
-        print(f'{{"error":"E_EMU","detail":"{e}","pc":"0x{uc.reg_read(UC_ARM64_REG_PC):x}"}}')
+        # 错误路径也带上已观察到的 watch 事件——黑盒失败的现场属于证据（r10 诊断改进）
+        dump_fixed_regions()
+        print(f'{{"error":"E_EMU","detail":"{e}","pc":"0x{uc.reg_read(UC_ARM64_REG_PC):x}",'
+              f'"watch":{json.dumps(watch_events)}}}')
         sys.exit(1)
 
     ret = uc.reg_read(UC_ARM64_REG_X0)
+    dump_fixed_regions()
     dumps = []
     for spec in args.dump:
         reg, ln, path = spec.split(':')
@@ -505,7 +581,6 @@ def main():
         blob = bytes(uc.mem_read(a, int(ln, 0)))
         open(path, 'wb').write(blob)
         dumps.append(path)
-    import json
     out = {'return': f'0x{ret:x}', 'dumps': dumps, 'watch': watch_events}
     if args.java:
         out['registered_natives'] = {f'{k[0]}{k[1]}': f'0x{v:x}' for k, v in regs.items()}
