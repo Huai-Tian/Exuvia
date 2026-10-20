@@ -21,15 +21,17 @@ Exuvia 是一个**面向 AI Agent 的 Android 通用脱壳 / 代码恢复流水�
 - **名字**：Exuvia（蝉蜕）——壳留在原地，代码恢复生命
 - **口号**：*"Separate the shell from what lives inside."*
 
-**项目当前状态：v0.1 代码面已补全（合成样本验证，36 测试 CI 全绿）；下一里程碑 = 真实一代壳样本的第一次剖析（实战测试与修正）。**
+**项目当前状态：v0.1 代码面已补全（38 测试 CI 全绿）；第一战（真实加固样本）实测进行中，已产出 4 个实战修正。**
 - 契约层：六协议物 fixture 双向锚定（goal/proposal/report/debt/workpackage/evidence）、serde 类型即格式、错误码公开表、fence 空（生长规则就位）；
-- 卡点两类：method-native-stub（ACC_NATIVE stub + JNI 符号定位 + 方法体切片）与 encrypted-payload（坏 DEX 自动卡点 + 头部切片 + 解密例程候选机械定位：JNI_OnLoad / .init_array + asset 原始熵清单）——一代壳的解密工作由此进入外包循环；
-- 外循环闭合且留痕：`exuvia packed.apk → next --goal → [LLM 解卡点] → unpack merge（四层闸门 + 沙箱双锚 + 销账）→ validate`；merge 拒绝时 attempts.log 记 merge-rejected + 被认领卡点 attempts 递增（escalation 的数据基础）；recovered DEX 形状产物归档 workspace/<debt_id>/recovered.dex（L1 骨架最小兑现）；
-- CLI 契约表全兑现：--version / --profile（fence 覆盖通道）/ --goal / --json / --resume（幂等）、next、schema --dump（handoff 四类型联合 / goal / proposal）、unpack validate / merge；
-- handoff 结构落盘完整：REPORT.json + REPORT.md、debt.json、evidence/<debt_id>/{manifest.json, <name>.bin}（多切片共存不覆盖）、attempts.log、workspace/；
-- ci/verify（cargo workspace member，不进发行物）：register 语料登记 + check 原包对账——比对逻辑公开、样本私有；CI 用合成对自测；
+- 卡点两类：method-native-stub（ACC_NATIVE stub + JNI 符号定位 + 方法体切片）与 encrypted-payload（三机械来源：坏 DEX 文件 / so 内明文 DEX 扫描命中 / assets ELF 零命中负事实）+ 解密例程候选机械定位（JNI_OnLoad / init_array 双路径：PT_DYNAMIC 运行时视角优先）；
+- 外循环闭合且留痕：`exuvia packed.apk → next --goal → [LLM 解卡点] → unpack merge（四层闸门 + 沙箱双锚 + 销账）→ validate`；merge 拒绝时 attempts.log 记 merge-rejected + 被认领卡点 attempts 递增；recovered DEX 形状产物归档 workspace/<debt_id>/recovered.dex；
+- 实战修正（真实样本驱动，全部机械规则、零厂商特判）：#1 DEX 解析器按规范对齐（method_id 8B / type_list u16）；#2 assets ELF 纳入清点与符号查表；#3 so 内明文 DEX 机械扫描；#4 PT_DYNAMIC 运行时视角双路径 + ELF64 全架构符号 + 导出符号清单进 facts；
+- 第一战已测绘（attempts.log 诚实台账）：壳形态 = dex 尾部密文载体 + so 内嵌段 + interpreter 化控制流 + RegisterNatives 动态注册；解密链已解至 RC4 变体（KSA/PRGA 全解、unicorn 与 python 复现交叉验证一致）；卡点 = 分层密钥（静态 key 属内层，外层来源待解）；两个密文容器已定位；ELF32 记为候选修正；
+- CLI 契约表全兑现：--version / --profile / --goal / --json / --resume、next、schema --dump、unpack validate / merge；
+- handoff 结构落盘完整：REPORT.json + REPORT.md、debt.json、evidence/<debt_id>/{manifest.json, <name>.bin}、attempts.log、workspace/；
+- ci/verify（cargo workspace member，不进发行物）：register 语料登记 + check 原包对账——比对逻辑公开、样本私有；
 - 终点定义已拍板：行为一致的可运行 APK（§2.1）+ 忠实还原原则；
-- **下一里程碑：真实一代壳样本的第一次剖析**（实战测试与修正）；其后 so 符号定位（capstone 测量）、repack 四组件逐件生长。
+- **下一步：解外层密钥（解压链深层 / 函数级黑盒模拟收尾）→ 纯函数 decrypt → proposal → merge → ci-verify 对账**；其后 so 符号定位（capstone 测量）、repack 四组件逐件生长。
 
 ---
 
