@@ -39,7 +39,6 @@ pub fn va_to_file_offset(data: &[u8], va: u64) -> Result<u64, String> {
     Err(format!("elf: va 0x{va:x} not in any PT_LOAD"))
 }
 
-const EM_AARCH64: u16 = 183;
 const SHT_DYNSYM: u32 = 11;
 
 fn u16_at(d: &[u8], o: usize) -> Result<u16, String> {
@@ -67,7 +66,11 @@ fn check(d: &[u8], off: u64, size: u64, what: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// 解析 ELF64 导出符号表。arm64（EM_AARCH64）；其他架构返回空表（事实如实，不猜）。
+/// 解析 ELF64 导出符号表（修正案 #3：全部 ELF64 架构——符号表是格式事实，无架构语义；
+/// 实战修正：arm64-only 限制曾使同包的 x86_64 壳 so 情报全部丢失）。
+/// ELF32 不支持（Err——调用方按空表处理，事实如实）。
+/// 双路径：PT_DYNAMIC（运行时视角，壳剥 section header 依然可见）优先；
+/// 无 PT_DYNAMIC（静态/合成 fixture）→ section header 路径（SHT_DYNSYM）。
 pub fn exported_symbols(data: &[u8]) -> Result<Vec<ExportedSymbol>, String> {
     if !data.starts_with(b"\x7fELF") {
         return Err("elf: not an ELF (magic)".into());
@@ -75,9 +78,8 @@ pub fn exported_symbols(data: &[u8]) -> Result<Vec<ExportedSymbol>, String> {
     if data.get(4) != Some(&2) {
         return Err("elf: not ELF64".into());
     }
-    let machine = u16_at(data, 0x12)?;
-    if machine != EM_AARCH64 {
-        return Ok(Vec::new()); // 非 arm64：空表（事实，不是错误）
+    if let Some(v) = dynamic_dynsym(data)? {
+        return Ok(v); // 运行时视角优先
     }
     let shoff = u64_at(data, 0x28)?;
     let shentsize = u16_at(data, 0x3a)?;
@@ -154,7 +156,187 @@ pub fn exported_symbols(data: &[u8]) -> Result<Vec<ExportedSymbol>, String> {
     Ok(out)
 }
 
+// ─── PT_DYNAMIC 运行时视角（修正案 #3）───
+// 壳可剥 section header，剥不掉动态段——系统 linker 加载 so 只读 program headers，
+// 故 DT_SYMTAB/DT_STRTAB/DT_INIT_ARRAY 永远在 PT_DYNAMIC 里（运行时事实，机械可读）。
+
+const DT_HASH: u64 = 4;
+const DT_STRTAB: u64 = 5;
+const DT_SYMTAB: u64 = 6;
+const DT_SYMENT: u64 = 11;
+const DT_INIT_ARRAY: u64 = 0x19;
+const DT_INIT_ARRAYSZ: u64 = 0x1b;
+const DT_GNU_HASH: u64 = 0x6ffffef5;
+
+/// PT_DYNAMIC 的 (p_offset, p_filesz)；无 → None。
+fn pt_dynamic(data: &[u8]) -> Result<Option<(u64, u64)>, String> {
+    let phoff = u64_at(data, 0x20)?;
+    let phentsize = u16_at(data, 0x36)? as usize;
+    let phnum = u16_at(data, 0x38)? as usize;
+    if phnum == 0 || phentsize < 56 {
+        return Ok(None);
+    }
+    check(data, phoff, phnum as u64 * phentsize as u64, "program headers")?;
+    for i in 0..phnum {
+        let base = phoff as usize + i * phentsize;
+        if u32_at(data, base)? == 2 {
+            // PT_DYNAMIC：p_offset @+8, p_filesz @+32
+            return Ok(Some((u64_at(data, base + 8)?, u64_at(data, base + 32)?)));
+        }
+    }
+    Ok(None)
+}
+
+/// PT_DYNAMIC 标签表（到 DT_NULL 止）。
+fn dynamic_tags(data: &[u8]) -> Result<Option<Vec<(u64, u64)>>, String> {
+    let Some((off, sz)) = pt_dynamic(data)? else {
+        return Ok(None);
+    };
+    check(data, off, sz, "PT_DYNAMIC")?;
+    let n = sz as usize / 16;
+    let mut tags = Vec::with_capacity(n);
+    for i in 0..n {
+        let t = u64_at(data, off as usize + i * 16)?;
+        let v = u64_at(data, off as usize + i * 16 + 8)?;
+        if t == 0 {
+            break; // DT_NULL
+        }
+        tags.push((t, v));
+    }
+    Ok(Some(tags))
+}
+
+/// 动态符号条目数（机械推导）：DT_HASH 的 nchain 直读；否则 DT_GNU_HASH 推导。
+fn dyn_symcount(tags: &[(u64, u64)], data: &[u8]) -> Result<Option<u64>, String> {
+    if let Some(&(_, hv)) = tags.iter().find(|(t, _)| *t == DT_HASH) {
+        let hoff = va_to_file_offset(data, hv)?;
+        check(data, hoff, 8, "DT_HASH header")?;
+        return Ok(Some(u32_at(data, hoff as usize + 4)? as u64)); // nchain
+    }
+    if let Some(&(_, gv)) = tags.iter().find(|(t, _)| *t == DT_GNU_HASH) {
+        let gh = va_to_file_offset(data, gv)? as usize;
+        let nbuckets = u32_at(data, gh)? as usize;
+        let symoffset = u32_at(data, gh + 4)? as usize;
+        let bloom_size = u32_at(data, gh + 8)? as usize;
+        let buckets = gh + 16 + bloom_size * 8;
+        check(data, buckets as u64, nbuckets as u64 * 4, "gnu_hash buckets")?;
+        let mut max_idx = 0usize;
+        for i in 0..nbuckets {
+            let v = u32_at(data, buckets + i * 4)? as usize;
+            if v > max_idx {
+                max_idx = v;
+            }
+        }
+        if max_idx == 0 {
+            return Ok(Some(0));
+        }
+        let chain = buckets + nbuckets * 4;
+        let mut i = max_idx;
+        loop {
+            if i >= (1 << 20) {
+                return Ok(None); // 敌意链：放弃推导，回退 section 路径
+            }
+            check(data, chain as u64 + (i - symoffset) as u64 * 4, 4, "gnu_hash chain")?;
+            if u32_at(data, chain + (i - symoffset) * 4)? & 1 == 1 {
+                break;
+            }
+            i += 1;
+        }
+        return Ok(Some(i as u64 + 1));
+    }
+    Ok(None)
+}
+
+/// PT_DYNAMIC 路径的动态符号表（运行时视角——修正案 #3）。
+/// 无 PT_DYNAMIC / 缺关键标签 → None（调用方回退 section header 路径）。
+pub fn dynamic_dynsym(data: &[u8]) -> Result<Option<Vec<ExportedSymbol>>, String> {
+    let Some(tags) = dynamic_tags(data)? else {
+        return Ok(None);
+    };
+    let Some(&(_, sv)) = tags.iter().find(|(t, _)| *t == DT_SYMTAB) else {
+        return Ok(None);
+    };
+    let Some(&(_, tv)) = tags.iter().find(|(t, _)| *t == DT_STRTAB) else {
+        return Ok(None);
+    };
+    let Some(n) = dyn_symcount(&tags, data)? else {
+        return Ok(None);
+    };
+    let syment = tags.iter().find(|(t, _)| *t == DT_SYMENT).map(|&(_, v)| v as usize).unwrap_or(24);
+    if syment < 24 {
+        return Ok(None);
+    }
+    let symtab = va_to_file_offset(data, sv)?;
+    let strtab = va_to_file_offset(data, tv)?;
+    check(data, symtab, n * syment as u64, "DT_SYMTAB")?;
+    // DT_STRSZ(0xa) 在则校验 strtab 边界；缺席时名字读取以文件尾兜底 + 越界跳过
+    if let Some(&(_, sz)) = tags.iter().find(|(t, _)| *t == 10) {
+        check(data, strtab, sz, "DT_STRTAB")?;
+    }
+    let mut out = Vec::with_capacity((n as usize).min(1 << 16));
+    let base_str = strtab as usize;
+    for i in 0..n as usize {
+        let base = symtab as usize + i * syment;
+        if base + 24 > data.len() {
+            return Err("elf: DT_SYMTAB entry out of bounds".into());
+        }
+        let st_name = u32_at(data, base)? as usize;
+        let st_shndx = u16_at(data, base + 6)?;
+        if st_shndx == 0 {
+            continue; // SHN_UNDEF
+        }
+        let start = base_str + st_name;
+        if start >= data.len() {
+            continue; // 敌意名偏移：跳过（事实层不炸）
+        }
+        let end = data[start..].iter().position(|&b| b == 0).map(|p| start + p).unwrap_or(data.len());
+        out.push(ExportedSymbol {
+            name: String::from_utf8_lossy(&data[start..end]).into_owned(),
+            st_value: u64_at(data, base + 8)?,
+            st_size: u64_at(data, base + 16)?,
+        });
+    }
+    Ok(Some(out))
+}
+
+/// PT_DYNAMIC 路径的 init_array（linker 真正执行的初始化器清单——修正案 #3）。
+pub fn dynamic_init_array(data: &[u8]) -> Result<Option<InitArrayInfo>, String> {
+    let Some(tags) = dynamic_tags(data)? else {
+        return Ok(None);
+    };
+    let (Some(&(_, iva)), Some(&(_, isz))) = (
+        tags.iter().find(|(t, _)| *t == DT_INIT_ARRAY),
+        tags.iter().find(|(t, _)| *t == DT_INIT_ARRAYSZ),
+    ) else {
+        return Ok(None);
+    };
+    let off = va_to_file_offset(data, iva)?;
+    check(data, off, isz, "DT_INIT_ARRAY")?;
+    Ok(Some(InitArrayInfo {
+        file_offset: off,
+        size: isz,
+        entry_count: isz / 8,
+    }))
+}
+
 // ─── .init_array 解析（解密例程候选定位的机械来源；只报位置与条目数，零语义）───
+
+/// e_machine → Android ABI 名（格式事实映射，非猜测）。
+/// ELF32/64 的 e_machine 同在 0x12。未知机器 → None。
+pub fn machine_abi(data: &[u8]) -> Option<String> {
+    if !data.starts_with(b"\x7fELF") {
+        return None;
+    }
+    let m = u16_at(data, 0x12).ok()?;
+    Some(match m {
+        183 => "arm64-v8a",  // EM_AARCH64
+        40 => "armeabi-v7a", // EM_ARM
+        62 => "x86_64",      // EM_X86_64
+        3 => "x86",           // EM_386
+        _ => return None,
+    }
+    .to_string())
+}
 
 /// .init_array 段的格式事实（不含条目内容——指针指向的函数体无边界，不切片不猜测）。
 #[derive(Debug, Clone, PartialEq)]
@@ -165,13 +347,14 @@ pub struct InitArrayInfo {
     pub entry_count: u64,
 }
 
-/// 按段名找 .init_array（需要 shstrtab）。非 arm64 或无此段 → None（事实，不是错误）。
+/// 按段名找 .init_array。无此段 → None（事实，不是错误）。ELF64 全架构（格式事实）。
+/// 修正案 #3 双路径：DT_INIT_ARRAY（linker 真正执行的清单）优先，section 名路径后备。
 pub fn init_array(data: &[u8]) -> Result<Option<InitArrayInfo>, String> {
     if !data.starts_with(b"\x7fELF") || data.get(4) != Some(&2) {
         return Ok(None);
     }
-    if u16_at(data, 0x12)? != EM_AARCH64 {
-        return Ok(None);
+    if let Some(x) = dynamic_init_array(data)? {
+        return Ok(Some(x)); // 运行时视角优先
     }
     let shoff = u64_at(data, 0x28)?;
     let shentsize = u16_at(data, 0x3a)? as usize;

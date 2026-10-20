@@ -69,7 +69,7 @@ Work packages may inject family guidance — follow it first; it outranks genera
 }
 ```
 
-- `kind` routes the entry shape: `method-native-stub` (method facts + so symbol slices) vs `encrypted-payload` (a claimed-DEX file whose bytes are not DEX — mechanical fact only, no entropy thresholds; nearby asset entropies are listed as raw facts). Auto-generated for every DEX with `magic_ok=false` or `parse_ok=false`.
+- `kind` routes the entry shape: `method-native-stub` (method facts + so symbol slices) vs `encrypted-payload` (hidden original-code container; three mechanical sources — a claimed-DEX file whose bytes are not DEX, auto-generated for every DEX with `magic_ok=false` or `parse_ok=false`; a plaintext DEX found inside any ELF by magic scan, sliced whole as evidence; an assets-resident ELF where the scan found nothing — the shell-engine form, negative fact from absence). ELFs under `assets/` are inventoried as `so` too (ABI from e_machine), so stub symbols may hit shell libraries there. dynsym and init_array are read from PT_DYNAMIC first (the runtime view — a shell can strip the section-header table, not the dynamic segment the linker needs), with the section-header path as fallback; every ELF64 exports its defined symbol names as raw facts (no architecture filter — symbol tables are format facts). No entropy thresholds anywhere; nearby asset entropies are raw facts.
 - `attempts` counts rejected proposals for this entry (merge gate increments on rejection; read it before retrying).
 
 `workpackage.json` (output of `exuvia next --goal`; scope-gate source; CI fixture):

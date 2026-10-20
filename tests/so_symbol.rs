@@ -36,11 +36,14 @@ fn elf_exported_symbols_reads_dynsym() {
 }
 
 #[test]
-fn elf_non_arm64_returns_empty_not_error() {
-    // 非 arm64：空表（事实，不是错误——多 ABI 清点场景的诚实输出）
-    let mut elf_bytes = common::build_minimal_elf(&[("Java_x_y_z", 0, 8)]);
-    elf_bytes[18..20].copy_from_slice(&40u16.to_le_bytes()); // e_machine = EM_ARM
-    assert_eq!(elf::exported_symbols(&elf_bytes).unwrap(), Vec::new());
+fn elf_symbols_parse_across_el64_architectures() {
+    // 修正案 #3 实战修正：符号表是格式事实无架构语义——非 arm64 的 ELF64 照常全解析
+    // （曾因 arm64-only 限制丢失同包 x86_64 壳 so 的全部符号情报）
+    let mut elf_bytes = common::build_minimal_elf(&[("Java_x_y_z", 0x204, 8)]);
+    elf_bytes[18..20].copy_from_slice(&62u16.to_le_bytes()); // e_machine = EM_X86_64
+    let syms = elf::exported_symbols(&elf_bytes).expect("parse");
+    assert_eq!(syms.len(), 1, "x86_64 ELF64 符号照常读出");
+    assert_eq!(syms[0].name, "Java_x_y_z");
 }
 
 #[test]
@@ -121,4 +124,33 @@ fn elf_init_array_located_by_section_name() {
     // 无 .init_array 的 so：None（事实，不是错误）
     let plain = common::build_minimal_elf(&[("a", 0x10, 8)]);
     assert!(elf::init_array(&plain).expect("parse").is_none());
+}
+
+#[test]
+fn elf_dynamic_path_survives_stripped_sections() {
+    // 修正案 #3：壳 so 剥 section header（e_shnum=0）——PT_DYNAMIC 运行时视角独立可解析
+    let elf_bytes = common::build_minimal_elf_v3(
+        &[
+            ("Java_com_example_NativeProbe_nativeFoo", 0x1204, 64), // identity 映射：VA == 文件偏移
+            ("DynCryptor_like", 0x1280, 32),
+            ("JNI_OnLoad", 0x1300, 32),
+        ],
+        &[0x1100, 0x1110, 0x1120],
+    );
+    // 双路径取动态侧：符号全出（含 st_value/st_size）
+    let syms = elf::exported_symbols(&elf_bytes).expect("parse");
+    assert_eq!(syms.len(), 3, "{:?}", syms.iter().map(|s| &s.name).collect::<Vec<_>>());
+    assert_eq!(syms[0].name, "Java_com_example_NativeProbe_nativeFoo");
+    assert_eq!(syms[2].name, "JNI_OnLoad");
+    assert_eq!(syms[2].st_value, 0x1300);
+    assert_eq!(syms[2].st_size, 32);
+    // init_array 走 DT_INIT_ARRAY（linker 真正执行的清单）
+    let ia = elf::init_array(&elf_bytes).expect("parse").expect("DT_INIT_ARRAY");
+    assert_eq!(ia.entry_count, 3);
+    assert_eq!(ia.size, 24);
+    // 剥壳后切片映射仍可用（identity：st_value → 文件偏移）
+    assert_eq!(
+        elf::va_to_file_offset(&elf_bytes, 0x1300).expect("map"),
+        0x1300
+    );
 }

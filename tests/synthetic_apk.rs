@@ -102,6 +102,52 @@ fn dex_parser_rejects_hostile_table_sizes() {
 }
 
 #[test]
+fn first_pass_handles_shell_style_assets_elf() {
+    // 修正案 #1/#2：壳 so 藏 assets——ELF magic 纳入清点与符号查表；so 内明文 DEX 机械扫描
+    let dir = std::env::temp_dir().join("exuvia_test_shell_style");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let apk = dir.join("shell.apk");
+    common::build_shell_style_apk(&apk);
+
+    let (report, debt, groups) = first_pass(&apk).expect("first pass");
+
+    // 修正案 #1：assets ELF 进 so 清点（ABI 由 e_machine 映射）
+    let shell_so: Vec<_> = report.inventory.so.iter().filter(|s| s.name.starts_with("assets/")).collect();
+    assert_eq!(shell_so.len(), 2, "{:?}", report.inventory.so);
+    let a64 = shell_so.iter().find(|s| s.name == "assets/libshell_a64.so").unwrap();
+    assert_eq!(a64.abi, "arm64-v8a", "e_machine=EM_AARCH64 的机械映射");
+
+    // 修正案 #1：stub 符号查表现在覆盖 assets so → 命中 + 切片
+    let stub = debt.entries.iter().find(|e| e.kind == exuvia::report::DebtKind::MethodNativeStub).unwrap();
+    assert!(
+        stub.facts.iter().any(|f| f.contains("Java_com_example_NativeProbe_nativeFoo") && f.contains("assets/libshell_a64.so")),
+        "stub 符号必须命中 assets 壳 so：{:?}",
+        stub.facts
+    );
+    assert_eq!(stub.evidence.len(), 1);
+    let stub_g = groups.iter().find(|g| g.debt_id == stub.debt_id).unwrap();
+    assert_eq!(stub_g.slices[0].source, "assets/libshell_a64.so");
+
+    // 修正案 #2：payload 卡点三态——命中（明文 DEX 提取）+ 零命中（负事实）
+    let payloads: Vec<_> = debt.entries.iter().filter(|e| e.kind == exuvia::report::DebtKind::EncryptedPayload).collect();
+    assert_eq!(payloads.len(), 2, "命中卡点 + 零命中卡点：{:?}", payloads.len());
+    // 排序：a64 命中在前
+    assert_eq!(payloads[0].evidence, vec!["evidence/debt-0002/".to_string()]);
+    assert!(payloads[0].facts[0].contains("plaintext DEX found in assets/libshell_a64.so at offset"), "{}", payloads[0].facts[0]);
+    assert!(payloads[1].facts[0].contains("assets ELF assets/libshell_plain.so: no plaintext DEX magic found"), "{}", payloads[1].facts[0]);
+
+    // 命中切片：字节精确 = 尾部追加的 minimal dex；候选只挂自身 so
+    let hit_g = groups.iter().find(|g| g.debt_id == payloads[0].debt_id).unwrap();
+    let emb = hit_g.slices.iter().find(|s| s.name.contains("embedded")).expect("embedded slice");
+    assert_eq!(emb.bytes, common::build_minimal_dex(), "提取字节 = 嵌入的 DEX 全量");
+    assert!(hit_g.slices.iter().any(|s| s.name.ends_with("JNI_OnLoad")), "命中卡点挂该 so 的 JNI_OnLoad 候选切片");
+    // 零命中卡点无切片
+    let miss_g = groups.iter().find(|g| g.debt_id == payloads[1].debt_id).unwrap();
+    assert!(miss_g.slices.iter().all(|s| s.name.contains("JNI_OnLoad") == false || s.source == "assets/libshell_plain.so"));
+}
+
+#[test]
 fn first_pass_rejects_non_zip() {
     let dir = std::env::temp_dir().join("exuvia_test_apk");
     std::fs::create_dir_all(&dir).unwrap();
@@ -134,7 +180,7 @@ fn first_pass_generates_encrypted_payload_debt() {
     // facts：坏 DEX 机械事实 + asset 原始熵清单（无阈值判断）+ 解密例程候选（机械定位器）
     assert!(pl.facts[0].contains("claimed-DEX file classes2.dex with non-DEX magic"), "{:?}", pl.facts[0]);
     assert!(pl.facts.iter().any(|f| f.starts_with("asset assets/payload.bin: 4096 bytes, entropy")), "{:?}", pl.facts);
-    let onload = pl.facts.iter().find(|f| f.contains("JNI_OnLoad")).expect("JNI_OnLoad candidate fact");
+    let onload = pl.facts.iter().find(|f| f.starts_with("decrypt-routine candidate JNI_OnLoad")).expect("JNI_OnLoad candidate fact");
     assert!(onload.contains("st_value=0x300") && onload.contains("lib/arm64-v8a/libtest.so"), "{onload}");
     assert!(
         pl.facts.iter().any(|f| f.starts_with("init_array: 2 entries") && f.contains("lib/arm64-v8a/libtest.so")),

@@ -18,6 +18,87 @@ const BUF: usize = 64 * 1024;
 /// encrypted-payload 卡点的头部切片上限（机械常量；总大小在 facts 里如实标注）
 const PAYLOAD_HEAD: usize = 64 * 1024;
 
+/// so 内明文 DEX 机械扫描（修正案 #2）：`dex\n` + magic[7]==\0 命中即提取。
+/// 提取按 DEX header 的 file_size，越界截到 so 尾（截断如实返回，由调用方进 facts）。
+/// 返回 (so 内偏移, 声明 file_size, 提取字节)。
+fn scan_embedded_dex(so_bytes: &[u8]) -> Vec<(u64, u32, Vec<u8>)> {
+    let mut hits = Vec::new();
+    let mut i = 0usize;
+    while i + 0x24 <= so_bytes.len() {
+        if &so_bytes[i..i + 4] == b"dex\n" && so_bytes.get(i + 7) == Some(&0) {
+            let fsize = u32::from_le_bytes([
+                so_bytes[i + 0x20],
+                so_bytes[i + 0x21],
+                so_bytes[i + 0x22],
+                so_bytes[i + 0x23],
+            ]);
+            let end = ((i as u64) + (fsize as u64)).min(so_bytes.len() as u64) as usize;
+            hits.push((i as u64, fsize, so_bytes[i..end].to_vec()));
+            i = end.max(i + 1); // 跳过已提取段继续扫
+        } else {
+            i += 1;
+        }
+    }
+    hits
+}
+
+/// asset 熵清单事实（数据非判断：分档阈值属 fence，未挣得即不存在）。
+fn asset_entropy_facts(assets: &[AssetEntry]) -> Vec<String> {
+    assets
+        .iter()
+        .map(|a| format!("asset {}: {} bytes, entropy {} bits/byte", a.name, a.size_bytes, a.entropy))
+        .collect()
+}
+
+/// 单个 so 的解密例程候选（机械定位器：JNI_OnLoad 精确查表 + .init_array 段事实）。
+/// 返回 (facts, JNI_OnLoad 方法体切片——有边界才切，越界如实记 facts)。
+fn onload_candidates(
+    so_name: &str,
+    so_bytes: &[u8],
+    syms: &[crate::track_a::elf::ExportedSymbol],
+) -> (Vec<String>, Vec<SliceBytes>) {
+    let mut facts = Vec::new();
+    let mut slices = Vec::new();
+    // 导出符号清单（修正案 #3：壳 so 的真名——LLVM 混淆常剥不干净；机械列出，价值判断在下游）
+    if !syms.is_empty() {
+        let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
+        facts.push(format!(
+            "{so_name} exports {} defined dynsym symbols: {}",
+            syms.len(),
+            names.join(", ")
+        ));
+    }
+    for sym in syms {
+        if sym.name == "JNI_OnLoad" {
+            facts.push(format!(
+                "decrypt-routine candidate JNI_OnLoad → {so_name} (dynsym, st_value=0x{:x}, st_size={}) — mechanical locator",
+                sym.st_value, sym.st_size
+            ));
+            match crate::track_a::elf::va_to_file_offset(so_bytes, sym.st_value) {
+                Ok(off) if (off as usize) + (sym.st_size as usize) <= so_bytes.len() => {
+                    slices.push(SliceBytes {
+                        name: format!("{}--JNI_OnLoad", so_name.replace('/', "-")),
+                        source: so_name.to_string(),
+                        symbol: Some(sym.name.clone()),
+                        st_value: Some(sym.st_value),
+                        st_size: Some(sym.st_size),
+                        file_offset: off,
+                        bytes: so_bytes[off as usize..off as usize + sym.st_size as usize].to_vec(),
+                    });
+                }
+                _ => facts.push(format!("JNI_OnLoad in {so_name} not sliced (out of bounds)")),
+            }
+        }
+    }
+    if let Some(ia) = crate::track_a::elf::init_array(so_bytes).unwrap_or(None) {
+        facts.push(format!(
+            "init_array: {} entries at file_offset 0x{:x} in {so_name} — decrypt-routine candidates, mechanical locator (function bodies have no symbol bounds, not sliced)",
+            ia.entry_count, ia.file_offset
+        ));
+    }
+    (facts, slices)
+}
+
 /// 第一遍竖切：解包 + 清点 + 熵测量 + DEX 方法清点 + 符号定位切片 → (REPORT, debt, evidence 组)。
 /// 指纹判定不在此处——fence 未配置指纹字段，一切样本按未知族主线输出（matched=false）。
 /// 加密 DEX（magic 不符/表损坏）自动成为 encrypted-payload 卡点（机械事实，无熵阈值）：
@@ -112,22 +193,25 @@ pub fn first_pass(apk_path: &Path) -> Result<(Report, DebtFile, Vec<EvidenceGrou
                 other += 1;
                 continue;
             }
-            // 流式读：熵计数器全程更新，不落内存
-            let mut ent = EntropyCounter::new();
+            // 读全字节（熵计数 + ELF magic 检测双用；与 classes.dex 同等内存纪律）
+            let mut bytes = Vec::new();
             let e: &mut dyn std::io::Read = entry.by_ref();
-            let mut buf = vec![0u8; BUF];
-            loop {
-                let n = e.read(&mut buf).map_err(|x| format!("asset read {name}: {x}"))?;
-                if n == 0 {
-                    break;
-                }
-                ent.update(&buf[..n]);
-            }
+            e.read_to_end(&mut bytes).map_err(|x| format!("asset read {name}: {x}"))?;
+            let mut ent = EntropyCounter::new();
+            ent.update(&bytes);
             assets.push(AssetEntry {
-                name,
+                name: name.clone(),
                 size_bytes: size,
                 entropy: ent.bits_per_byte(),
             });
+            // 修正案 #1：assets 下的 ELF（壳引擎藏匿形态——magic 纯格式事实）
+            // 纳入 so 清点与符号查表；ABI 由 e_machine 映射（assets 无 ABI 目录）
+            if bytes.starts_with(b"\x7fELF") {
+                let syms = crate::track_a::elf::exported_symbols(&bytes).unwrap_or_default();
+                let abi = crate::track_a::elf::machine_abi(&bytes).unwrap_or_default();
+                so_cache.push((name.clone(), bytes, syms));
+                so.push(SoEntry { name, abi, size_bytes: size });
+            }
         } else {
             other += 1;
         }
@@ -219,29 +303,26 @@ pub fn first_pass(apk_path: &Path) -> Result<(Report, DebtFile, Vec<EvidenceGrou
         }
     }
 
-    // 2) encrypted-payload（坏 DEX：声称是 DEX 但字节不是——机械事实，无熵阈值）
+    // 2) encrypted-payload（来源三型，全机械事实：坏 DEX 文件 / so 内明文 DEX / assets ELF 零命中）
     {
-        let mut sorted = bad_dex.clone();
-        sorted.sort_by(|a, b| a.0.cmp(&b.0));
-        for (name, bytes, magic_ok, parse_err) in &sorted {
-            let debt_id = format!("debt-{next_id:04}");
-            next_id += 1;
-            let mut facts = vec![if !*magic_ok {
+        // 2a) 预扫全部 so 的明文 DEX（修正案 #2；与 so_cache 同序）
+        let so_hits: Vec<Vec<(u64, u32, Vec<u8>)>> =
+            so_cache.iter().map(|(_, b, _)| scan_embedded_dex(b)).collect();
+
+        // 卡点候选：(排序键, 首条事实, 头切片+total, 额外切片, 自身 so)——统一排序后编号（产物字节确定性）
+        let mut cands: Vec<(String, String, Option<(SliceBytes, u64)>, Vec<SliceBytes>, Option<String>)> = Vec::new();
+
+        // 2b) 坏 DEX 文件（声称是 DEX 但字节不是 / 表损坏）——头切片 + 全部 so 的解密例程候选
+        for (name, bytes, magic_ok, parse_err) in &bad_dex {
+            let headline = if !*magic_ok {
                 format!("claimed-DEX file {name} with non-DEX magic (encrypted or renamed payload — mechanical fact)")
             } else {
                 format!(
                     "claimed-DEX file {name} with valid magic but broken tables (parse failed{} — mechanical fact)",
                     parse_err.as_deref().map(|e| format!(": {e}")).unwrap_or_default()
                 )
-            }];
-            // 邻近 asset 的原始熵清单（数据非判断：分档阈值属 fence，未挣得即不存在）
-            for a in &assets {
-                facts.push(format!(
-                    "asset {}: {} bytes, entropy {} bits/byte",
-                    a.name, a.size_bytes, a.entropy
-                ));
-            }
-            let mut slices: Vec<SliceBytes> = vec![SliceBytes {
+            };
+            let head = SliceBytes {
                 name: name.replace('/', "-"),
                 source: name.clone(),
                 symbol: None,
@@ -249,43 +330,70 @@ pub fn first_pass(apk_path: &Path) -> Result<(Report, DebtFile, Vec<EvidenceGrou
                 st_size: None,
                 file_offset: 0,
                 bytes: bytes.iter().copied().take(PAYLOAD_HEAD).collect(),
-            }];
-            facts.push(format!(
-                "sliced first {} bytes of {name} (total {} bytes)",
-                slices[0].bytes.len(),
-                bytes.len()
-            ));
-            // 解密例程候选（机械定位器：JNI_OnLoad 精确查表 + .init_array 段事实；无语义断言）
-            for (so_name, so_bytes, syms) in &so_cache {
-                for sym in syms {
-                    if sym.name == "JNI_OnLoad" {
-                        facts.push(format!(
-                            "decrypt-routine candidate JNI_OnLoad → {} (dynsym, st_value=0x{:x}, st_size={}) — mechanical locator",
-                            so_name, sym.st_value, sym.st_size
-                        ));
-                        match crate::track_a::elf::va_to_file_offset(so_bytes, sym.st_value) {
-                            Ok(off) if (off as usize) + (sym.st_size as usize) <= so_bytes.len() => {
-                                slices.push(SliceBytes {
-                                    name: format!("{}--JNI_OnLoad", so_name.replace('/', "-")),
-                                    source: so_name.clone(),
-                                    symbol: Some(sym.name.clone()),
-                                    st_value: Some(sym.st_value),
-                                    st_size: Some(sym.st_size),
-                                    file_offset: off,
-                                    bytes: so_bytes[off as usize..off as usize + sym.st_size as usize].to_vec(),
-                                });
-                            }
-                            _ => facts.push(format!("JNI_OnLoad in {so_name} not sliced (out of bounds)")),
-                        }
+            };
+            cands.push((name.clone(), headline, Some((head, bytes.len() as u64)), Vec::new(), None));
+        }
+
+        // 2c) so 内明文 DEX 命中（修正案 #2 正事实：机械扫描命中即提取，卡点即成果）
+        for (i, (so_name, so_bytes, _)) in so_cache.iter().enumerate() {
+            for (k, (off, fsize, dex_bytes)) in so_hits[i].iter().enumerate() {
+                let headline = format!(
+                    "plaintext DEX found in {so_name} at offset 0x{off:x} (declared file_size {fsize}, sliced {} bytes) — mechanical scan hit",
+                    dex_bytes.len()
+                );
+                let slice = SliceBytes {
+                    name: format!("{}--embedded-{k}", so_name.replace('/', "-")),
+                    source: so_name.clone(),
+                    symbol: None,
+                    st_value: None,
+                    st_size: None,
+                    file_offset: *off,
+                    bytes: dex_bytes.clone(),
+                };
+                cands.push((format!("{so_name}-{k}"), headline, None, vec![slice], Some(so_name.clone())));
+            }
+        }
+
+        // 2d) assets ELF 零命中（壳引擎藏匿形态的负事实——"若藏有 payload 则已加密"由缺席机械暗示）
+        for (i, (so_name, _, _)) in so_cache.iter().enumerate() {
+            if so_name.starts_with("assets/") && so_hits[i].is_empty() {
+                let headline = format!(
+                    "assets ELF {so_name}: no plaintext DEX magic found in ELF scan (payload, if any, is encrypted/compressed — mechanical fact from absence)"
+                );
+                cands.push((so_name.clone(), headline, None, Vec::new(), Some(so_name.clone())));
+            }
+        }
+
+        // 统一排序 + 编号 + facts 附加
+        cands.sort_by(|a, b| a.0.cmp(&b.0));
+        for (_key, headline, head, extra_slices, self_so) in cands {
+            let debt_id = format!("debt-{next_id:04}");
+            next_id += 1;
+            let mut facts = vec![headline];
+            facts.extend(asset_entropy_facts(&assets));
+            if let Some((s, total)) = &head {
+                facts.push(format!("sliced first {} bytes of {} (total {total} bytes)", s.bytes.len(), s.source));
+            }
+            let mut slices = Vec::new();
+            if let Some((s, _)) = head {
+                slices.push(s);
+            }
+            // 解密例程候选：坏 DEX 来源挂全部 so；so 命中/零命中卡点只挂自身 so（对象即该 so）
+            match self_so.as_deref().and_then(|src| so_cache.iter().find(|(n, _, _)| n == src)) {
+                Some((n, b, s)) => {
+                    let (f, sl) = onload_candidates(n, b, s);
+                    facts.extend(f);
+                    slices.extend(sl);
+                }
+                None => {
+                    for (n, b, s) in &so_cache {
+                        let (f, sl) = onload_candidates(n, b, s);
+                        facts.extend(f);
+                        slices.extend(sl);
                     }
                 }
-                if let Some(ia) = crate::track_a::elf::init_array(so_bytes).unwrap_or(None) {
-                    facts.push(format!(
-                        "init_array: {} entries at file_offset 0x{:x} in {} — decrypt-routine candidates, mechanical locator (function bodies have no symbol bounds, not sliced)",
-                        ia.entry_count, ia.file_offset, so_name
-                    ));
-                }
             }
+            slices.extend(extra_slices);
             entries.push(DebtEntry {
                 debt_id: debt_id.clone(),
                 kind: DebtKind::EncryptedPayload,

@@ -340,6 +340,146 @@ pub fn build_minimal_elf_v2(symbols: &[(&str, u64, u64)], init_entries: &[u64]) 
     out
 }
 
+/// 壳形态合成 APK（修正案 #1/#2 的 fixture）：业务 stub DEX + 壳 so 藏 assets。
+/// assets/libshell_a64.so：带 stub 符号 + JNI_OnLoad，尾部追加明文 DEX（机械扫描命中）
+/// assets/libshell_plain.so：无 DEX（零命中负事实卡点）
+pub fn build_shell_style_apk(path: &std::path::Path) {
+    let file = std::fs::File::create(path).expect("create apk");
+    let mut w = zip::ZipWriter::new(file);
+    let opts = zip::write::SimpleFileOptions::default();
+
+    w.start_file("AndroidManifest.xml", opts).unwrap();
+    w.write_all(&[0x03, 0x00, 0x08, 0x00, 0xff, 0xff]).unwrap();
+
+    w.start_file("classes.dex", opts).unwrap();
+    w.write_all(&build_minimal_dex()).unwrap();
+
+    // 壳 so（arm64，符号齐备）+ 尾部明文 DEX
+    let mut shell = build_minimal_elf_v2(
+        &[
+            ("Java_com_example_NativeProbe_nativeFoo", 0x204, 64),
+            ("JNI_OnLoad", 0x300, 32),
+        ],
+        &[0x200],
+    );
+    shell.extend_from_slice(&build_minimal_dex()); // 明文嵌入（扫描应命中尾部）
+    w.start_file("assets/libshell_a64.so", opts).unwrap();
+    w.write_all(&shell).unwrap();
+
+    // 零命中壳 so
+    w.start_file("assets/libshell_plain.so", opts).unwrap();
+    w.write_all(&build_minimal_elf_v2(&[("_x", 0x10, 8)], &[])).unwrap();
+
+    w.start_file("assets/payload.bin", opts).unwrap();
+    w.write_all(&prng_bytes(42, 4096)).unwrap();
+
+    w.finish().unwrap();
+}
+
+/// PT_DYNAMIC 壳形态 ELF64（修正案 #3 fixture）：section headers 剥除（e_shnum=0），
+/// 只有 program headers——动态路径必须独立可解析。PT_LOAD identity 映射
+///（p_offset == p_vaddr == 0x1000）→ DT_ 值即文件偏移；符号 st_value 即文件偏移。
+/// 布局：header(64) + phdr(PT_LOAD+PT_DYNAMIC) + pad→0x1000 + 数据区 0x400
+/// + init_array + dynsym + dynstr + DT_HASH + .dynamic。
+pub fn build_minimal_elf_v3(symbols: &[(&str, u64, u64)], init_entries: &[u64]) -> Vec<u8> {
+    let mut out = vec![0u8; 64];
+    out[0..4].copy_from_slice(b"\x7fELF");
+    out[4] = 2;
+    out[5] = 1;
+    out[6] = 1;
+    out[16..18].copy_from_slice(&3u16.to_le_bytes()); // DYN
+    out[18..20].copy_from_slice(&183u16.to_le_bytes()); // AArch64
+    out[20..24].copy_from_slice(&1u32.to_le_bytes());
+    out[0x20..0x28].copy_from_slice(&64u64.to_le_bytes()); // e_phoff
+    out[52..54].copy_from_slice(&64u16.to_le_bytes()); // e_ehsize
+    out[54..56].copy_from_slice(&56u16.to_le_bytes()); // e_phentsize
+    out[56..58].copy_from_slice(&2u16.to_le_bytes()); // e_phnum = 2
+    out[58..60].copy_from_slice(&64u16.to_le_bytes()); // e_shentsize
+    out[60..62].copy_from_slice(&0u16.to_le_bytes()); // e_shnum = 0（壳剥除形态）
+    out[62..64].copy_from_slice(&0u16.to_le_bytes()); // e_shstrndx = 0
+
+    let ph_base = out.len();
+    out.extend_from_slice(&[0u8; 112]); // 两个 phdr 占位
+    while out.len() < 0x1000 {
+        out.push(0);
+    }
+    out.extend_from_slice(&prng_bytes(7, 0x400)); // 数据区 [0x1000, 0x1400)
+
+    // init_array（DT_INIT_ARRAY 指向；内容是 VA 条目）
+    let init_off = out.len() as u64;
+    for v in init_entries {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    let init_sz = (init_entries.len() * 8) as u64;
+
+    // dynsym（null 条目 + 符号）+ dynstr
+    let sym_off = out.len() as u64;
+    let mut dynsym = vec![0u8; 24];
+    let mut dynstr = vec![0u8];
+    let mut name_offs = Vec::new();
+    for (n, _, _) in symbols {
+        name_offs.push(dynstr.len());
+        dynstr.extend_from_slice(n.as_bytes());
+        dynstr.push(0);
+    }
+    for (i, (_, v, s)) in symbols.iter().enumerate() {
+        dynsym.extend_from_slice(&(name_offs[i] as u32).to_le_bytes());
+        dynsym.push(0x12); // GLOBAL|FUNC
+        dynsym.push(0);
+        dynsym.extend_from_slice(&1u16.to_le_bytes());
+        dynsym.extend_from_slice(&v.to_le_bytes());
+        dynsym.extend_from_slice(&s.to_le_bytes());
+    }
+    out.extend_from_slice(&dynsym);
+    let str_off = out.len() as u64;
+    let str_sz = dynstr.len() as u64;
+    out.extend_from_slice(&dynstr);
+
+    // DT_HASH（System V）：nbucket=1, nchain=n+1, buckets=[1], chain（内容任意——解析器只读 nchain）
+    let hash_off = out.len() as u64;
+    out.extend_from_slice(&1u32.to_le_bytes());
+    out.extend_from_slice(&((symbols.len() as u32) + 1).to_le_bytes()); // nchain
+    out.extend_from_slice(&1u32.to_le_bytes());
+    for _ in 0..(symbols.len() + 1) {
+        out.extend_from_slice(&0x8000_0001u32.to_le_bytes());
+    }
+
+    // .dynamic
+    while out.len() % 8 != 0 {
+        out.push(0);
+    }
+    let dyn_off = out.len() as u64;
+    for (t, v) in [
+        (0x19u64, init_off), // DT_INIT_ARRAY（identity：VA == off）
+        (0x1b, init_sz),      // DT_INIT_ARRAYSZ
+        (4, hash_off),        // DT_HASH
+        (6, sym_off),         // DT_SYMTAB
+        (5, str_off),         // DT_STRTAB
+        (10, str_sz),         // DT_STRSZ
+        (11, 24),             // DT_SYMENT
+    ] {
+        out.extend_from_slice(&t.to_le_bytes());
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    out.extend_from_slice(&0u64.to_le_bytes()); // DT_NULL tag
+    out.extend_from_slice(&0u64.to_le_bytes()); // value
+    let dyn_sz = (out.len() as u64) - dyn_off;
+
+    // 回填 phdr：[0] PT_LOAD（identity），[1] PT_DYNAMIC
+    let put_ph = |out: &mut Vec<u8>, i: usize, ty: u32, off: u64, vaddr: u64, filesz: u64| {
+        let b = ph_base + i * 56;
+        out[b..b + 4].copy_from_slice(&ty.to_le_bytes());
+        out[b + 8..b + 16].copy_from_slice(&off.to_le_bytes());
+        out[b + 16..b + 24].copy_from_slice(&vaddr.to_le_bytes());
+        out[b + 32..b + 40].copy_from_slice(&filesz.to_le_bytes());
+        out[b + 40..b + 48].copy_from_slice(&filesz.to_le_bytes());
+    };
+    let filesz = (out.len() as u64) - 0x1000;
+    put_ph(&mut out, 0, 1, 0x1000, 0x1000, filesz);
+    put_ph(&mut out, 1, 2, dyn_off, dyn_off, dyn_sz);
+    out
+}
+
 /// 完整合成 APK：manifest + 真 DEX（1 native stub）+ 高/低熵 asset + **带 dynsym 的 so** + res 条目。
 pub fn build_synthetic_apk(path: &std::path::Path) {
     let file = std::fs::File::create(path).expect("create apk");
