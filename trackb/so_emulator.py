@@ -184,15 +184,15 @@ def make_libc(uc, elf):
     # decompression state machine lives here — keyed by the stream pointer.
     zlib_objs = {}
 
-    def f_inflateInit_(x0, x1, x2, x3):
+    def f_inflateInit_(x0, x1, x2, x3, x4=0, x5=0):
         zlib_objs[x0] = {'d': zlib.decompressobj(), 'pending': b''}
         return 0  # Z_OK
 
-    def f_inflateEnd(x0, x1, x2, x3):
+    def f_inflateEnd(x0, x1, x2, x3, x4=0, x5=0):
         zlib_objs.pop(x0, None)
         return 0
 
-    def f_inflate(x0, x1, x2, x3):
+    def f_inflate(x0, x1, x2, x3, x4=0, x5=0):
         s = x0
         st = zlib_objs.setdefault(s, {'d': zlib.decompressobj(), 'pending': b''})
         next_in = struct.unpack_from('<Q', rd(s, 8))[0]
@@ -215,46 +215,54 @@ def make_libc(uc, elf):
         wr(s + 0x28, struct.pack('<Q', total_out + len(out)))
         return 1 if st['d'].eof else 0  # Z_STREAM_END / Z_OK
 
-    def f_malloc(x0, x1, x2, x3):
+    def f_malloc(x0, x1, x2, x3, x4=0, x5=0):
         return bump(max(x0, 1))
 
-    def f_calloc(x0, x1, x2, x3):
+    def f_calloc(x0, x1, x2, x3, x4=0, x5=0):
         p = bump(x0 * x1)
         wr(p, b'\0' * (x0 * x1))
         return p
 
-    def f_free(x0, x1, x2, x3):
+    def f_free(x0, x1, x2, x3, x4=0, x5=0):
         return 0
 
-    def f_memcpy(x0, x1, x2, x3):
+    def f_memcpy(x0, x1, x2, x3, x4=0, x5=0):
         wr(x0, rd(x1, x2))
         return x0
 
-    def f_memset(x0, x1, x2, x3):
+    def f_memset(x0, x1, x2, x3, x4=0, x5=0):
         wr(x0, bytes([x2 & 0xFF]) * x1)
         return x0
 
-    def f_memcmp(x0, x1, x2, x3):
+    def f_memcmp(x0, x1, x2, x3, x4=0, x5=0):
         a, b = rd(x0, x2), rd(x1, x2)
         return 0 if a == b else 1
 
-    def f_strlen(x0, x1, x2, x3):
+    def f_strlen(x0, x1, x2, x3, x4=0, x5=0):
         return len(cstr(x0))
 
-    def f_strcmp(x0, x1, x2, x3):
+    def f_strcmp(x0, x1, x2, x3, x4=0, x5=0):
         return 0 if cstr(x0) == cstr(x1) else 1
 
-    def f_noop(x0, x1, x2, x3):
+    def f_noop(x0, x1, x2, x3, x4=0, x5=0):
         return 0
 
-    def f_errno(x0, x1, x2, x3):
+    threads_spawned = []
+
+    def f_pthread_create(x0, x1, x2, x3, x4=0, x5=0):
+        # 单线程模拟（r13）：线程入口是黑盒目标——记录 start_routine/arg，
+        # 调用者随后 --fn 直入（unicorn 单线程不能并发，但入口语义完整保留）
+        threads_spawned.append({'start': x2, 'arg': x3})
+        return 0
+
+    def f_errno(x0, x1, x2, x3, x4=0, x5=0):
         return TLS + 0x80
 
     # File-system bridge (Battle-1 r7-8): verification chains fopen() their own APK.
     fs_map = FS_MAP[0]
     files = FILES[0]
 
-    def f_fopen(x0, x1, x2, x3):
+    def f_fopen(x0, x1, x2, x3, x4=0, x5=0):
         path = cstr(x0).decode(errors='replace')
         real = fs_map.get(path)
         if real is None:
@@ -269,7 +277,7 @@ def make_libc(uc, elf):
         files[fd] = open(real, 'rb')
         return fd
 
-    def f_fread(x0, x1, x2, x3):
+    def f_fread(x0, x1, x2, x3, x4=0, x5=0):
         # fread(buf, size, n, FILE*)
         f = files.get(x3)
         if not f:
@@ -278,39 +286,66 @@ def make_libc(uc, elf):
         wr(x0, blob)
         return len(blob) // max(x1, 1)
 
-    def f_fclose(x0, x1, x2, x3):
+    def f_fclose(x0, x1, x2, x3, x4=0, x5=0):
         f = files.pop(x0, None)
         if f: f.close()
         return 0
 
-    def f_fseek(x0, x1, x2, x3):
+    def f_fseek(x0, x1, x2, x3, x4=0, x5=0):
         f = files.get(x0)
         if not f:
             return -1
         f.seek(x1, x2)
         return 0
 
-    def f_ftell(x0, x1, x2, x3):
+    def f_ftell(x0, x1, x2, x3, x4=0, x5=0):
         f = files.get(x0)
         return f.tell() if f else 0
+
+    # mmap bridge (Battle-1 r13): shells mmap a runtime file (their own APK /
+    # released blob) — [0x2e40d0] composes an mmap-base pointer, and the SM4
+    # engine (r12) consumes that region. fd from the --fs fopen bridge =>
+    # file content is materialized into the mapping; anonymous => zero region.
+    mmap_cursor = [HEAP + 0x6000000]
+    mmap_regions = []
+
+    def f_mmap(x0, x1, x2, x3, x4=0, x5=0):
+        length = x1 if x1 else 0x1000
+        addr = (mmap_cursor[0] + PAGE - 1) & ~(PAGE - 1)
+        mmap_cursor[0] = addr + ((length + PAGE - 1) & ~(PAGE - 1))
+        f = files.get(x4)
+        if f:
+            f.seek(x5)
+            blob = f.read(length)
+            uc.mem_write(addr, blob)
+            mmap_regions.append({'addr': addr, 'len': len(blob), 'source': 'fd:%s' % f.name})
+        else:
+            zero = b'\0' * min(length, 0x400000)
+            uc.mem_write(addr, zero)
+            mmap_regions.append({'addr': addr, 'len': length, 'source': 'anon'})
+        return addr
 
     table = {
         'malloc': f_malloc, '_Znwm': f_malloc, 'calloc': f_calloc,
         'free': f_free, '_ZdlPv': f_free, '_ZdaPv': f_free,
         'memcpy': f_memcpy, 'memmove': f_memcpy, 'memset': f_memset,
         'memcmp': f_memcmp, 'strlen': f_strlen, '__strlen_chk': f_strlen,
-        'strcmp': f_strcmp, 'strcpy': lambda x0, x1, x2, x3: (wr(x0, cstr(x1) + b'\0'), x0)[1],
+        'strcmp': f_strcmp, 'strcpy': lambda x0, x1, x2, x3, x4=0, x5=0: (wr(x0, cstr(x1) + b'\0'), x0)[1],
         '__aarch64_sync_cache_range': f_noop, 'pthread_mutex_init': f_noop,
         'pthread_mutex_lock': f_noop, 'pthread_mutex_unlock': f_noop,
         'pthread_detach': f_noop, '__cxa_atexit': f_noop, '__cxa_finalize': f_noop,
-        'time': lambda x0, x1, x2, x3: 1234, 'getpid': lambda x0, x1, x2, x3: 1234,
-        'srand': f_noop, 'rand': lambda x0, x1, x2, x3: 42,
-        'dladdr': lambda x0, x1, x2, x3: (wr(x1, struct.pack('<QQQQ', 0, 0, 0, 0)), 0)[1],
-        'dlerror': f_noop, '__errno': f_errno, 'sysconf': lambda x0, x1, x2, x3: 4096,
+        'time': lambda x0, x1, x2, x3, x4=0, x5=0: 1234, 'getpid': lambda x0, x1, x2, x3, x4=0, x5=0: 1234,
+        'srand': f_noop, 'rand': lambda x0, x1, x2, x3, x4=0, x5=0: 42,
+        'dladdr': lambda x0, x1, x2, x3, x4=0, x5=0: (wr(x1, struct.pack('<QQQQ', 0, 0, 0, 0)), 0)[1],
+        'dlerror': f_noop, '__errno': f_errno, 'sysconf': lambda x0, x1, x2, x3, x4=0, x5=0: 4096,
         'inflate': f_inflate, 'inflateInit_': f_inflateInit_, 'inflateEnd': f_inflateEnd,
         'fopen': f_fopen, 'fread': f_fread, 'fclose': f_fclose,
         'fseek': f_fseek, 'ftell': f_ftell,
+        'mmap': f_mmap, 'munmap': f_noop,
+        'pthread_create': f_pthread_create,
     }
+    table['_mmap_regions'] = mmap_regions  # main 侧 CLI 输出（非符号名，绑定循环不触碰）
+    table['_threads_spawned'] = threads_spawned
     return table
 
 
@@ -319,7 +354,9 @@ def main():
     ap.add_argument('so')
     ap.add_argument('--fn', required=True, help='target function VA (hex)')
     ap.add_argument('--arg', action='append', default=[], help='xN=VAL (register setup, hex)')
-    ap.add_argument('--watch', action='append', default=[], help='VA to snapshot x0/buffer at (hex)')
+    ap.add_argument('--watch', action='append', default=[], help='VA to snapshot x0-x7/buffer at (hex)')
+    ap.add_argument('--watch-write', action='append', default=[],
+                    help='VA to trap memory WRITES at (hex) — records writer PC + value (materialization forensics)')
     ap.add_argument('--dump', action='append', default=[], help='x0:LEN:FILE — dump buffer on return')
     ap.add_argument('--dump-mem', action='append', default=[],
                     help='VA:LEN:FILE — dump a fixed memory region after the run (before-registered maps only; '
@@ -378,7 +415,7 @@ def main():
             name = elf.str_at(strtab_off, struct.unpack_from('<I', data, symtab_off + symidx * 24)[0])
             sa = STUB + 8 * i
             i += 1
-            stub_addr[sa] = libc.get(name, lambda x0, x1, x2, x3: 0)
+            stub_addr[sa] = libc.get(name, lambda x0, x1, x2, x3, x4=0, x5=0: 0)
             stub_addr[sa + 1] = name  # type tag for logging
             uc.mem_write(r_offset, struct.pack('<Q', sa))
     for r_offset, rtype, symidx, addend in elf.relocations():
@@ -387,7 +424,7 @@ def main():
     # unbound-slot defaults (shell runtime-patched slots → malloc/memcpy semantics)
     for slot, name in (map(lambda p: (int(p[0], 16), p[1]), (kv.split(':', 1) for kv in args.got))):
         sa = STUB + 0x8000
-        stub_addr[sa] = libc.get(name, lambda x0, x1, x2, x3: 0)
+        stub_addr[sa] = libc.get(name, lambda x0, x1, x2, x3, x4=0, x5=0: 0)
         uc.mem_write(slot, struct.pack('<Q', sa))
     sa = STUB + 0x8008
     stub_addr[sa] = libc['malloc']
@@ -510,7 +547,7 @@ def main():
     def hook_stub(uc_, addr, size, user):
         fn = stub_addr.get(addr)
         if callable(fn):
-            x = [uc_.reg_read(r) for r in (UC_ARM64_REG_X0, UC_ARM64_REG_X1, UC_ARM64_REG_X2, UC_ARM64_REG_X3)]
+            x = [uc_.reg_read(r) for r in (UC_ARM64_REG_X0, UC_ARM64_REG_X1, UC_ARM64_REG_X2, UC_ARM64_REG_X3, UC_ARM64_REG_X4, UC_ARM64_REG_X5)]
             r = fn(*x)
             if r is not None:
                 uc_.reg_write(UC_ARM64_REG_X0, r & 0xFFFFFFFFFFFFFFFF)
@@ -542,6 +579,19 @@ def main():
 
     for w in args.watch:
         uc.hook_add(UC_HOOK_CODE, hook_watch, begin=int(w, 16), end=int(w, 16))
+
+    def hook_write(uc_, access, address, size, value, user):
+        pc = uc_.reg_read(UC_ARM64_REG_PC)
+        watch_events.append(json.dumps({'write': '0x%x' % address, 'pc': '0x%x' % pc,
+                                        'size': size, 'value': '0x%x' % (value & 0xFFFFFFFFFFFFFFFF)}))
+    from unicorn import UC_HOOK_MEM_WRITE
+    for w in args.watch_write:
+        if ':' in w:
+            wa_s, wlen_s = w.split(':')
+            wa, wlen = int(wa_s, 16), int(wlen_s, 0)
+        else:
+            wa, wlen = int(w, 16), 8
+        uc.hook_add(UC_HOOK_MEM_WRITE, hook_write, begin=wa, end=wa + wlen)
 
     uc.mem_write(TLS + 0x28, b'\xDE\xAD\xBE\xEF\xCA\xFE\x00\x01')
     uc.reg_write(UC_ARM64_REG_TPIDR_EL0, TLS)
@@ -596,6 +646,12 @@ def main():
         open(path, 'wb').write(blob)
         dumps.append(path)
     out = {'return': f'0x{ret:x}', 'dumps': dumps, 'watch': watch_events}
+    mmaps = libc.pop('_mmap_regions', [])
+    if mmaps:
+        out['mmap_regions'] = [{'addr': '0x%x' % m['addr'], 'len': m['len'], 'source': m['source']} for m in mmaps]
+    threads = libc.pop('_threads_spawned', [])
+    if threads:
+        out['threads_spawned'] = [{'start': '0x%x' % t['start'], 'arg': '0x%x' % t['arg']} for t in threads]
     if args.java:
         out['registered_natives'] = {f'{k[0]}{k[1]}': f'0x{v:x}' for k, v in regs.items()}
     print(json.dumps(out, indent=2))
