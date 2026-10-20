@@ -159,6 +159,7 @@ class Elf:
 # bionic libc semantics (format-level behavior only; failures return 0 like stubs)
 def make_libc(uc, elf):
     heap_ptr = [HEAP]
+    heap_end = [HEAP + HEAPSZ]
     import zlib
     # file-system bridge state (fed by --fs CLI)
     global FS_MAP, FILES, FD
@@ -166,8 +167,21 @@ def make_libc(uc, elf):
         FS_MAP, FILES, FD = [{}], [{}], [0x100]
 
     def bump(sz):
+        # r18: auto-extend the heap (real loaders parse big blobs; the initial
+        # 128MB window is not a ceiling). Sane-capped: a request beyond the cap
+        # fails as NULL like real malloc — callers check.
+        HEAP_CAP = 0x40000000  # 1GB total
+        if sz > HEAP_CAP or heap_ptr[0] + sz > HEAP + HEAP_CAP:
+            return 0
         p = heap_ptr[0]
         heap_ptr[0] = (p + sz + 0x1F) & ~0xF
+        if heap_ptr[0] > heap_end[0]:
+            extra = (heap_ptr[0] - heap_end[0] + PAGE - 1) & ~(PAGE - 1)
+            try:
+                uc.mem_map(heap_end[0], extra)
+            except Exception:
+                pass  # already mapped by an earlier extension
+            heap_end[0] += extra
         return p
 
     def rd(a, n):
@@ -225,6 +239,8 @@ def make_libc(uc, elf):
 
     def f_calloc(x0, x1, x2, x3, x4=0, x5=0):
         p = bump(x0 * x1)
+        if not p:
+            return 0
         wr(p, b'\0' * (x0 * x1))
         return p
 
@@ -315,9 +331,20 @@ def make_libc(uc, elf):
     mmap_regions = []
 
     def f_mmap(x0, x1, x2, x3, x4=0, x5=0):
+        # r18: the mapping must be SELF-SUFFICIENT — the old stub relied on the
+        # initial heap window covering the cursor, so a cursor past HEAPSZ wrote
+        # to unmapped memory (mini-linker loads crash there). Absurd lengths now
+        # fail as 0 (callers check), sane ones map their own region.
         length = x1 if x1 else 0x1000
+        if length > 0x40000000:
+            mmap_regions.append({'addr': 0, 'len': length, 'source': 'refused'})
+            return 0
         addr = (mmap_cursor[0] + PAGE - 1) & ~(PAGE - 1)
         mmap_cursor[0] = addr + ((length + PAGE - 1) & ~(PAGE - 1))
+        try:
+            uc.mem_map(addr, (length + PAGE - 1) & ~(PAGE - 1))
+        except Exception:
+            pass  # already mapped (e.g. inside the initial heap window)
         f = files.get(x4)
         if f:
             f.seek(x5)
