@@ -8,3 +8,6 @@
 # 系统
 .DS_Store
 Thumbs.db
+# Python 字节码缓存（trackb 工具运行产物）
+__pycache__/
+*.pyc

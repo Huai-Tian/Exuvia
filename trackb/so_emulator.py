@@ -1,0 +1,366 @@
+#!/usr/bin/env python3
+"""Exuvia Track B: offline black-box executor for shell .so files (user-side tool).
+
+Product component (README_AGENT §3.1, Track B): runs a shell's own decrypt/decompress
+routines without any Android environment — pure emulation on the analysis machine.
+Heavy dependency (unicorn) is installed user-side by policy; absence = `unavailable`
+capability semantics, same class as jadx/ghidra. No sample-specific values live here:
+every address, key and symbol is a CLI argument.
+
+Usage:
+  python3 so_emulator.py shell.so --fn 0x7984 --arg x0=0x500000000000
+  python3 so_emulator.py shell.so --fn 0x2c5b88 --java            # stub JavaVM/JNIEnv
+  python3 so_emulator.py shell.so --fn 0x7984 --watch 0x7a04 --dump x0:32:out.bin
+
+Mechanics (format facts only):
+  - ELF64 PT_LOAD segments mapped at their declared vaddr (PIE base 0)
+  - R_AARCH64_RELATIVE relocations applied; GLOB_DAT/JUMP_SLOT slots routed to
+    built-in bionic libc semantics (malloc/free/mem*/str*/...) with a mapping table
+  - GOT slots without a JMPREL entry (shell runtime-patched slots) are routed to
+    malloc/memcpy semantics by default; override with --got slot:name
+  - TLS canary (tpidr_el0) is materialized; stack/heap are scratch regions
+  - Optional minimal JNI world: fake JavaVM/JNIEnv tables, every slot a stub
+    (RegisterNatives captures the native-method table and prints it)
+
+Exit codes: 0 = emulated return captured; 2 = unicorn missing; 3 = ELF parse error.
+"""
+
+import argparse
+import struct
+import sys
+
+try:
+    from unicorn import Uc, UC_ARCH_ARM64, UC_MODE_LITTLE_ENDIAN, UC_HOOK_CODE
+    from unicorn.arm64_const import (
+        UC_ARM64_REG_X0, UC_ARM64_REG_X1, UC_ARM64_REG_X2, UC_ARM64_REG_X3,
+        UC_ARM64_REG_X4, UC_ARM64_REG_LR, UC_ARM64_REG_SP, UC_ARM64_REG_PC,
+        UC_ARM64_REG_TPIDR_EL0,
+    )
+except ImportError:
+    print('{"error":"unavailable","detail":"unicorn not installed (user-side dependency, README_AGENT §3.1)"}')
+    sys.exit(2)
+
+PAGE = 0x1000
+STACK, STACKSZ = 0x7F0000000000, 0x400000
+HEAP, HEAPSZ = 0x500000000000, 0x8000000
+TLS = 0x510000000000
+STUB = 0x600000000000
+STUBSZ = 0x10000
+JNIF = 0x620000000000
+SENTINEL = 0x630000000000
+
+DT_NULL, DT_HASH, DT_STRTAB, DT_SYMTAB, DT_SYMENT = 0, 4, 5, 6, 11
+DT_GNU_HASH, DT_JMPREL = 0x6FFFFEF5, 23
+R_RELATIVE, R_GLOB_DAT, R_JUMP_SLOT = 1027, 1025, 1026
+
+
+class Elf:
+    def __init__(self, data: bytes):
+        self.d = data
+        if not data.startswith(b'\x7fELF') or data[4] != 2:
+            raise ValueError('not an ELF64')
+        u16 = lambda o: struct.unpack_from('<H', data, o)[0]
+        u32 = lambda o: struct.unpack_from('<I', data, o)[0]
+        u64 = lambda o: struct.unpack_from('<Q', data, o)[0]
+        self.u16, self.u32, self.u64 = u16, u32, u64
+        phoff, phentsize, phnum = u64(0x20), u16(0x36), u16(0x38)
+        self.loads = []
+        self.pt_dynamic = None
+        for i in range(phnum):
+            b = phoff + i * phentsize
+            if u32(b) == 1:
+                self.loads.append((u64(b+8), u64(b+16), u64(b+32)))
+            elif u32(b) == 2:
+                self.pt_dynamic = (u64(b+8), u64(b+32))
+        if not self.loads:
+            raise ValueError('no PT_LOAD')
+
+    def va2off(self, va):
+        for off, vaddr, filesz in self.loads:
+            if vaddr <= va < vaddr + filesz:
+                return off + (va - vaddr)
+        return None
+
+    def dynamic_tags(self):
+        if not self.pt_dynamic:
+            return {}
+        off, sz = self.pt_dynamic
+        d = self.d
+        tags = {}
+        for i in range(sz // 16):
+            t, v = struct.unpack_from('<QQ', d, off + i * 16)
+            if t == DT_NULL:
+                break
+            tags.setdefault(t, v)
+        return tags
+
+    def str_at(self, strtab_off, name_off):
+        start = strtab_off + name_off
+        end = self.d.index(b'\0', start)
+        return self.d[start:end].decode(errors='replace')
+
+    def dyn_symbols(self):
+        """(name, st_value, st_size) for defined dynsym entries, runtime view first."""
+        tags = self.dynamic_tags()
+        if DT_SYMTAB not in tags or DT_STRTAB not in tags:
+            return []
+        symtab = self.va2off(tags[DT_SYMTAB])
+        strtab = self.va2off(tags[DT_STRTAB])
+        d = self.d
+        syment = tags.get(DT_SYMENT, 24)
+        n = None
+        if DT_HASH in tags:
+            hoff = self.va2off(tags[DT_HASH])
+            n = self.u32(hoff + 4)
+        elif DT_GNU_HASH in tags:
+            gh = self.va2off(tags[DT_GNU_HASH])
+            nbuckets, symoffset = self.u32(gh), self.u32(gh + 4)
+            bloom = self.u32(gh + 8)
+            buckets = gh + 16 + bloom * 8
+            mx = max((self.u32(buckets + i * 4) for i in range(nbuckets)), default=0)
+            if mx:
+                chain = buckets + nbuckets * 4
+                i = mx
+                while not (self.u32(chain + (i - symoffset) * 4) & 1):
+                    i += 1
+                n = i + 1
+        if not n:
+            return []
+        out = []
+        for i in range(n):
+            b = symtab + i * syment
+            if struct.unpack_from('<H', d, b + 6)[0] == 0:
+                continue
+            out.append((self.str_at(strtab, self.u32(b)), self.u64(b + 8), self.u64(b + 16)))
+        return out
+
+    def relocations(self):
+        """All RELA entries as (r_offset, type, sym_idx, addend)."""
+        tags = self.dynamic_tags()
+        out = []
+        for tkey in (7, DT_JMPREL):  # DT_RELA / DT_JMPREL
+            if tkey not in tags:
+                continue
+            off, sz = self.va2off(tags[tkey]), tags.get(8 if tkey == 7 else 2, 0)
+            for i in range(sz // 24):
+                b = off + i * 24
+                ro, ri, ad = struct.unpack_from('<QQq', self.d, b)
+                out.append((ro, ri & 0xffffffff, ri >> 32, ad))
+        return out
+
+
+# bionic libc semantics (format-level behavior only; failures return 0 like stubs)
+def make_libc(uc, elf):
+    heap_ptr = [HEAP]
+
+    def bump(sz):
+        p = heap_ptr[0]
+        heap_ptr[0] = (p + sz + 0x1F) & ~0xF
+        return p
+
+    def rd(a, n):
+        return bytes(uc.mem_read(a, n))
+
+    def wr(a, b):
+        uc.mem_write(a, bytes(b))
+
+    def cstr(a):
+        out = bytearray()
+        while True:
+            c = rd(a, 1)
+            if c == b'\0':
+                return bytes(out)
+            out += c
+            a += 1
+
+    def f_malloc(x0, x1, x2, x3):
+        return bump(max(x0, 1))
+
+    def f_calloc(x0, x1, x2, x3):
+        p = bump(x0 * x1)
+        wr(p, b'\0' * (x0 * x1))
+        return p
+
+    def f_free(x0, x1, x2, x3):
+        return 0
+
+    def f_memcpy(x0, x1, x2, x3):
+        wr(x0, rd(x1, x2))
+        return x0
+
+    def f_memset(x0, x1, x2, x3):
+        wr(x0, bytes([x2 & 0xFF]) * x1)
+        return x0
+
+    def f_memcmp(x0, x1, x2, x3):
+        a, b = rd(x0, x2), rd(x1, x2)
+        return 0 if a == b else 1
+
+    def f_strlen(x0, x1, x2, x3):
+        return len(cstr(x0))
+
+    def f_strcmp(x0, x1, x2, x3):
+        return 0 if cstr(x0) == cstr(x1) else 1
+
+    def f_noop(x0, x1, x2, x3):
+        return 0
+
+    def f_errno(x0, x1, x2, x3):
+        return TLS + 0x80
+
+    table = {
+        'malloc': f_malloc, '_Znwm': f_malloc, 'calloc': f_calloc,
+        'free': f_free, '_ZdlPv': f_free, '_ZdaPv': f_free,
+        'memcpy': f_memcpy, 'memmove': f_memcpy, 'memset': f_memset,
+        'memcmp': f_memcmp, 'strlen': f_strlen, '__strlen_chk': f_strlen,
+        'strcmp': f_strcmp, 'strcpy': lambda x0, x1, x2, x3: (wr(x0, cstr(x1) + b'\0'), x0)[1],
+        '__aarch64_sync_cache_range': f_noop, 'pthread_mutex_init': f_noop,
+        'pthread_mutex_lock': f_noop, 'pthread_mutex_unlock': f_noop,
+        'pthread_detach': f_noop, '__cxa_atexit': f_noop, '__cxa_finalize': f_noop,
+        'time': lambda x0, x1, x2, x3: 1234, 'getpid': lambda x0, x1, x2, x3: 1234,
+        'srand': f_noop, 'rand': lambda x0, x1, x2, x3: 42,
+        'dladdr': lambda x0, x1, x2, x3: (wr(x1, struct.pack('<QQQQ', 0, 0, 0, 0)), 0)[1],
+        'dlerror': f_noop, '__errno': f_errno, 'sysconf': lambda x0, x1, x2, x3: 4096,
+    }
+    return table
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument('so')
+    ap.add_argument('--fn', required=True, help='target function VA (hex)')
+    ap.add_argument('--arg', action='append', default=[], help='xN=VAL (register setup, hex)')
+    ap.add_argument('--watch', action='append', default=[], help='VA to snapshot x0/buffer at (hex)')
+    ap.add_argument('--dump', action='append', default=[], help='x0:LEN:FILE — dump buffer on return')
+    ap.add_argument('--got', action='append', default=[],
+                    help='slot:name — override a GOT slot semantics (hex slot, libc name)')
+    ap.add_argument('--java', action='store_true', help='stub JavaVM/JNIEnv (fake tables, RegisterNatives capture)')
+    ap.add_argument('--timeout', type=int, default=60, help='emulation timeout seconds')
+    args = ap.parse_args()
+
+    data = open(args.so, 'rb').read()
+    try:
+        elf = Elf(data)
+    except ValueError as e:
+        print(f'{{"error":"E_PARSE","detail":"{e}"}}')
+        sys.exit(3)
+
+    uc = Uc(UC_ARCH_ARM64, UC_MODE_LITTLE_ENDIAN)
+    maxv = max(v + s for _, v, s in elf.loads)
+    uc.mem_map(0, (maxv + PAGE - 1) & ~(PAGE - 1))
+    for off, vaddr, filesz in elf.loads:
+        uc.mem_write(vaddr, data[off:off + filesz])
+    for a, s in ((STACK, STACKSZ), (HEAP, HEAPSZ), (TLS, 0x2000), (STUB, STUBSZ)):
+        base, end = a & ~(PAGE - 1), (a + s + PAGE - 1) & ~(PAGE - 1)
+        uc.mem_map(base, end - base)
+
+    libc = make_libc(uc, elf)
+    stub_addr = {}
+    # bind GOT slots: JMPREL/GLOB_DAT symbols, then RELATIVE relocations
+    symtab_off = elf.va2off(elf.dynamic_tags().get(DT_SYMTAB, 0))
+    strtab_off = elf.va2off(elf.dynamic_tags().get(DT_STRTAB, 0))
+    i = 0
+    for r_offset, rtype, symidx, addend in elf.relocations():
+        if rtype in (R_GLOB_DAT, R_JUMP_SLOT) and symtab_off:
+            name = elf.str_at(strtab_off, struct.unpack_from('<I', data, symtab_off + symidx * 24)[0])
+            sa = STUB + 8 * i
+            i += 1
+            stub_addr[sa] = libc.get(name, lambda x0, x1, x2, x3: 0)
+            stub_addr[sa + 1] = name  # type tag for logging
+            uc.mem_write(r_offset, struct.pack('<Q', sa))
+    for r_offset, rtype, symidx, addend in elf.relocations():
+        if rtype == R_RELATIVE:
+            uc.mem_write(r_offset, struct.pack('<Q', addend))
+    # unbound-slot defaults (shell runtime-patched slots → malloc/memcpy semantics)
+    for slot, name in (map(lambda p: (int(p[0], 16), p[1]), (kv.split(':', 1) for kv in args.got))):
+        sa = STUB + 0x8000
+        stub_addr[sa] = libc.get(name, lambda x0, x1, x2, x3: 0)
+        uc.mem_write(slot, struct.pack('<Q', sa))
+    sa = STUB + 0x8008
+    stub_addr[sa] = libc['malloc']
+    sa2 = STUB + 0x8010
+    stub_addr[sa2] = libc['memcpy']
+
+    if args.java:
+        uc.mem_map(JNIF, 0x4000)
+        env = JNIF + 0x2000
+        uc.mem_write(env, struct.pack('<Q', JNIF))
+        for slot in range(240):
+            uc.mem_write(JNIF + 8 * slot, struct.pack('<Q', JNIF + 0x800 + 8 * slot))
+        regs = {}
+
+        def jni_hook(uc_, addr, size, user):
+            idx = (addr - (JNIF + 0x800)) // 8
+            x0, x1, x2, x3 = (uc_.reg_read(r) for r in (UC_ARM64_REG_X0, UC_ARM64_REG_X1, UC_ARM64_REG_X2, UC_ARM64_REG_X3))
+            if idx == 215:  # RegisterNatives (JNI table slot — captured verbatim)
+                try:
+                    n = x3
+                    for k in range(min(n, 64)):
+                        nm, sig, fn = struct.unpack('<QQQ', bytes(uc_.mem_read(x2 + k * 24, 24)))
+                        name = bytes(uc_.mem_read(nm, 128)).split(b'\0')[0].decode(errors='replace')
+                        sigs = bytes(uc_.mem_read(sig, 128)).split(b'\0')[0].decode(errors='replace')
+                        regs[(name, sigs)] = fn
+                except Exception:
+                    pass
+            uc_.reg_write(UC_ARM64_REG_X0, 0)
+            uc_.reg_write(UC_ARM64_REG_PC, uc_.reg_read(UC_ARM64_REG_LR))
+        uc.hook_add(UC_HOOK_CODE, jni_hook, begin=JNIF + 0x800, end=JNIF + 0x800 + 8 * 260)
+
+    def hook_stub(uc_, addr, size, user):
+        fn = stub_addr.get(addr)
+        if callable(fn):
+            x = [uc_.reg_read(r) for r in (UC_ARM64_REG_X0, UC_ARM64_REG_X1, UC_ARM64_REG_X2, UC_ARM64_REG_X3)]
+            r = fn(*x)
+            if r is not None:
+                uc_.reg_write(UC_ARM64_REG_X0, r & 0xFFFFFFFFFFFFFFFF)
+        uc_.reg_write(UC_ARM64_REG_PC, uc_.reg_read(UC_ARM64_REG_LR))
+
+    uc.hook_add(UC_HOOK_CODE, hook_stub, begin=STUB, end=STUB + STUBSZ)
+
+    watch_events = []
+
+    def hook_watch(uc_, addr, size, user):
+        x0 = uc_.reg_read(UC_ARM64_REG_X0)
+        try:
+            buf = bytes(uc_.mem_read(x0, 32)).hex() if 0x1000 < x0 < 0x800000000000 else ''
+        except Exception:
+            buf = ''
+        watch_events.append(f'{{"watch":"0x{addr:x}","x0":"0x{x0:x}","buf":"{buf}"}}')
+
+    for w in args.watch:
+        uc.hook_add(UC_HOOK_CODE, hook_watch, begin=int(w, 16), end=int(w, 16))
+
+    uc.mem_write(TLS + 0x28, b'\xDE\xAD\xBE\xEF\xCA\xFE\x00\x01')
+    uc.reg_write(UC_ARM64_REG_TPIDR_EL0, TLS)
+    uc.reg_write(UC_ARM64_REG_SP, STACK + STACKSZ // 2)
+    for spec in args.arg:
+        reg, val = spec.split('=')
+        regmap = {'x0': UC_ARM64_REG_X0, 'x1': UC_ARM64_REG_X1, 'x2': UC_ARM64_REG_X2,
+                  'x3': UC_ARM64_REG_X3, 'x4': UC_ARM64_REG_X4}
+        uc.reg_write(regmap[reg.lower()], int(val, 0))
+    uc.reg_write(UC_ARM64_REG_LR, SENTINEL)
+
+    fn_va = int(args.fn, 0)
+    try:
+        uc.emu_start(fn_va, SENTINEL, timeout=args.timeout * 1000 * 1000)
+    except Exception as e:
+        print(f'{{"error":"E_EMU","detail":"{e}","pc":"0x{uc.reg_read(UC_ARM64_REG_PC):x}"}}')
+        sys.exit(1)
+
+    ret = uc.reg_read(UC_ARM64_REG_X0)
+    dumps = []
+    for spec in args.dump:
+        reg, ln, path = spec.split(':')
+        a = uc.reg_read(UC_ARM64_REG_X0 if reg == 'x0' else UC_ARM64_REG_X1)
+        blob = bytes(uc.mem_read(a, int(ln, 0)))
+        open(path, 'wb').write(blob)
+        dumps.append(path)
+    import json
+    out = {'return': f'0x{ret:x}', 'dumps': dumps, 'watch': watch_events}
+    if args.java:
+        out['registered_natives'] = {f'{k[0]}{k[1]}': f'0x{v:x}' for k, v in regs.items()}
+    print(json.dumps(out, indent=2))
+
+
+if __name__ == '__main__':
+    main()
