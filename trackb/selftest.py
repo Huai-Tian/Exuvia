@@ -105,6 +105,35 @@ def test_recon_smoke():
         print('crypto_recon ecb OK: PRNG blob fingerprinted as stream-cipher profile')
 
 
+def build_minimal_arm32_elf() -> bytes:
+    """Synthetic ELF32 little-endian ARM: header + PT_LOAD(phdr32) + code page.
+
+    Code (ARM mode): mov r0, #0x12 ; bx lr — asserts on 'mov' + 'bx'.
+    """
+    import struct as _s
+    eh = bytearray(52)
+    eh[0:4] = b'\x7fELF'
+    eh[4] = 1  # ELF32
+    eh[5] = 1  # LE
+    eh[6] = 1  # EV_CURRENT
+    _s.pack_into('<H', eh, 16, 3)    # ET_DYN
+    _s.pack_into('<H', eh, 18, 40)   # EM_ARM
+    _s.pack_into('<I', eh, 0x1C, 52)  # e_phoff
+    _s.pack_into('<H', eh, 0x2A, 32)  # e_phentsize (Elf32_Phdr)
+    _s.pack_into('<H', eh, 0x2C, 1)   # e_phnum
+    ph = bytearray(32)
+    _s.pack_into('<I', ph, 0, 1)      # PT_LOAD
+    _s.pack_into('<I', ph, 4, 0x1000)  # p_offset
+    _s.pack_into('<I', ph, 8, 0x1000)  # p_vaddr
+    _s.pack_into('<I', ph, 16, 0x100)  # p_filesz
+    _s.pack_into('<I', ph, 20, 0x100)  # p_memsz
+    code = _s.pack('<I', 0xE3A00012) + _s.pack('<I', 0xE12FFF1E)  # mov r0,#0x12 ; bx lr
+    out = bytes(eh) + bytes(ph)
+    out += b'\0' * (0x1000 - len(out))
+    out += code + b'\0' * (0x100 - len(code))
+    return out
+
+
 def test_disasm():
     try:
         import capstone  # noqa: F401
@@ -120,6 +149,15 @@ def test_disasm():
         assert r.returncode == 0, f'disasm exit {r.returncode}: {r.stderr}'
         assert 'mov' in r.stdout and 'ret' in r.stdout, r.stdout  # capstone renders movz as mov alias
         print('disasm OK: synthetic fn stream contains mov + ret')
+        # ELF32 ARM path (Battle-1: half the shell libs are 32-bit — read side must cover them)
+        so32 = os.path.join(td, 'synthetic32.so')
+        open(so32, 'wb').write(build_minimal_arm32_elf())
+        r2 = subprocess.run(
+            [sys.executable, os.path.join(HERE, 'disasm.py'), so32, '--fn', '0x1000', '--len', '0x10'],
+            capture_output=True, text=True, timeout=60)
+        assert r2.returncode == 0, f'disasm32 exit {r2.returncode}: {r2.stderr}'
+        assert 'mov' in r2.stdout and 'bx' in r2.stdout, r2.stdout
+        print('disasm OK: ELF32 ARM stream contains mov + bx lr')
 
 
 if __name__ == '__main__':
