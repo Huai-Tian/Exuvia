@@ -425,7 +425,12 @@ def main():
 
     uc = Uc(UC_ARCH_ARM64, UC_MODE_LITTLE_ENDIAN)
     maxv = max(v + s for _, v, s in elf.loads)
-    uc.mem_map(0, (maxv + PAGE - 1) & ~(PAGE - 1))
+    # r20: runtime slack past the image — shells keep runtime tables in the
+    # post-image area (Battle-1 loader zeroes a ~4MB runtime region starting at
+    # its soinfo [0x2fa00] and extending past the image end before populating);
+    # real loaders provide that brk/slack space.
+    RUNTIME_SLACK = 0x4000000
+    uc.mem_map(0, (maxv + RUNTIME_SLACK + PAGE - 1) & ~(PAGE - 1))
     for off, vaddr, filesz in elf.loads:
         uc.mem_write(vaddr, data[off:off + filesz])
     for a, s in ((STACK, STACKSZ), (HEAP, HEAPSZ), (TLS, 0x2000), (STUB, STUBSZ)):
@@ -684,8 +689,21 @@ def main():
         uc.emu_start(fn_va, SENTINEL, timeout=args.timeout * 1000 * 1000)
     except Exception as e:
         # 错误路径也带上已观察到的 watch 事件——黑盒失败的现场属于证据（r10 诊断改进）
+        # r20: 崩溃现场寄存器快照（x0-x7/sp/lr/pc）——深链故障定位刚需（装载器清零
+        # 循环越界类崩溃的写入目标只能从这里读出）
+        regs = {}
+        for name, const in (('x0', UC_ARM64_REG_X0), ('x1', UC_ARM64_REG_X1),
+                            ('x2', UC_ARM64_REG_X2), ('x3', UC_ARM64_REG_X3),
+                            ('x4', UC_ARM64_REG_X4), ('x5', UC_ARM64_REG_X5),
+                            ('x6', UC_ARM64_REG_X6), ('x7', UC_ARM64_REG_X7),
+                            ('sp', UC_ARM64_REG_SP), ('lr', UC_ARM64_REG_LR)):
+            try:
+                regs[name] = '0x%x' % uc.reg_read(const)
+            except Exception:
+                pass
         dump_fixed_regions()
         print(f'{{"error":"E_EMU","detail":"{e}","pc":"0x{uc.reg_read(UC_ARM64_REG_PC):x}",'
+              f'"regs":{json.dumps(regs)},'
               f'"watch":{json.dumps(watch_events)}}}')
         sys.exit(1)
 
