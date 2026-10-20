@@ -31,7 +31,7 @@ Exuvia 是一个**面向 AI Agent 的 Android 通用脱壳 / 代码恢复流水�
 - handoff 结构落盘完整：REPORT.json + REPORT.md、debt.json、evidence/<debt_id>/{manifest.json, <name>.bin}、attempts.log、workspace/；
 - ci/verify（cargo workspace member，不进发行物）：register 语料登记 + check 原包对账——比对逻辑公开、样本私有；
 - 终点定义已拍板：行为一致的可运行 APK（§2.1）+ 忠实还原原则；
-- **下一步：解外层密钥（解压链深层 / 函数级黑盒模拟收尾）→ 纯函数 decrypt → proposal → merge → ci-verify 对账**；其后 so 符号定位（capstone 测量）、repack 四组件逐件生长。
+- **下一步：终点闭合（用户侧两步）**：① 有真机/模拟器的分析者执行 fence 族知识里的 inflate 边界 hook 剧本（一次截获 = 密文流 + 原始 DEX 双产物）→ 密文↔明文对照蒸馏纯函数 decrypt → proposal → merge 销账；② `trackb/repack.py` 重组 + 用户侧 zipalign/apksigner + 装机运行对比——**终点链已用语料占位演练到 100% 对账**（class/method coverage 1.0，2,179 类 / 5,847 方法），工程侧全部就位；其后 so 符号定位（capstone 测量）、ELF32。
 
 ---
 
@@ -117,7 +117,7 @@ release = 两个平台二进制 + SKILL.md + checksums。**纯文件，无目录
 
 优先级永远 A > B > C。**新代壳战略下，轨道 B/C 是主路径而非推迟项**（roadmap 期工程化），L2/L3 从"可选层"升格为主交付物。轨道 B/C 的重依赖（qiling、unicorn、frida）不进发行物，用户侧安装，缺席 = `unavailable`（功能级语义，与 jadx/ghidra 同类）；**核心闸门依赖的系统 python3 缺失 = `installation-broken`（拒绝运行）**。
 
-**轨道 B 工具已落地（`trackb/`，用户侧 Python 工具——第一战实战催生）**：`so_emulator.py`（so 黑盒执行器：ELF64 映射 + RELATIVE/GOT 重定位 + bionic libc 语义层 + 可选 JNI 假表 + RegisterNatives 捕获，零样本参数全 CLI 化）、`crypto_recon.py`（容器熵定位 / ECB 指纹 / AES 指令扫描 / RC4 变体族已知明文双过滤扫描）、`selftest.py`（合成 fixture 自检，零样本纪律）。工具本体是产品的一部分随仓库分发；unicorn/capstone 由使用侧安装。
+**轨道 B 工具已落地（`trackb/`，用户侧 Python 工具——第一战实战催生）**：`so_emulator.py`（so 黑盒执行器：ELF64 映射 + RELATIVE/GOT 重定位 + bionic libc 语义层 + zlib 跨模拟器桥 + 可选 JNI 假表 + RegisterNatives 捕获 + --poke/--load 跨文件黑盒，零样本参数全 CLI 化）、`crypto_recon.py`（容器熵定位 / ECB 指纹 / AES 指令扫描 / RC4 变体族已知明文双过滤扫描）、`repack.py`（终点合成段 v0：恢复 DEX + 原 Manifest + 基准资源 → 未签名 APK；zipalign/apksigner 按零发行纪律留用户侧 SDK；整块加密族豁免 DEX writer）、`selftest.py`（合成 fixture 自检，零样本纪律）。工具本体是产品的一部分随仓库分发；unicorn/capstone 由使用侧安装。
 
 ### 3.2 分层交付（每个方法声明它到达的层级）
 

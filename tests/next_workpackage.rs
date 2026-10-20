@@ -54,8 +54,9 @@ fn next_builds_workpackage_from_method_target() {
     assert_eq!(wp.allowed_debt, vec!["debt-0001".to_string()]);
     assert_eq!(wp.entries.len(), 1);
     assert_eq!(wp.entries[0].method.as_ref().unwrap().name, "nativeFoo");
-    // 指纹未匹配（fence 无族条目）→ guidance 必空，不得编造
-    assert!(wp.guidance.is_empty());
+    // fence 首条族知识入档后：guidance 通道激活（机械全注入；匹配判断在下游）
+    assert!(!wp.guidance.is_empty(), "fence family knowledge must flow into work packages");
+    assert!(wp.guidance.iter().any(|g| g.contains("inflate")), "hook recipe is the core guidance");
 }
 
 #[test]

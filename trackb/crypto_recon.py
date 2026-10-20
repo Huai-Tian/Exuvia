@@ -14,6 +14,11 @@ Subcommands:
          [--range lo:hi] [--magic <hex>] [--skip N]
          exhaustive known-plaintext scan: bytes decrypting to a length header in
          range AND the given magic right after (dual filter — near-zero noise)
+  dxor <str> [--key 0x10] [--hex] [--strings <file>]
+         Dalvik string-obfuscation decoder: per-character XOR applied to a
+         string literal (recovered verbatim from dex bytecode via any dex
+         reader). Battle-1 finding: shell Java layers are plaintext and carry
+         the call-site structure — this decoder is the key that opened them.
 
 Exit codes: 0 ok; 2 dependency missing (capstone needed for aes-scan only).
 """
@@ -114,6 +119,21 @@ def cmd_rc4_scan(path, keyhex, stride, seed_i, seed_j, lo_hi, magic, skip, j_add
         print(f'  file-offset 0x{off:x} declared-length {d4}')
 
 
+def cmd_dxor(s, key, as_hex, strings_file):
+    def dec(t):
+        if as_hex:
+            raw = bytes.fromhex(t)
+            return bytes(b ^ key for b in raw).decode(errors='replace')
+        return ''.join(chr(ord(c) ^ key) for c in t)
+    if strings_file:
+        for line in open(strings_file, encoding='utf-8', errors='replace'):
+            t = line.rstrip('\n')
+            if t:
+                print(f'{t} -> {dec(t)}')
+    else:
+        print(dec(s))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest='cmd', required=True)
@@ -128,6 +148,12 @@ def main():
 
     p = sub.add_parser('aes-scan')
     p.add_argument('so')
+
+    p = sub.add_parser('dxor')
+    p.add_argument('str', nargs='?')
+    p.add_argument('--key', type=lambda x: int(x, 0), default=0x10, help='per-char XOR key')
+    p.add_argument('--hex', action='store_true', help='input is a hex string (bytes)')
+    p.add_argument('--strings', help='file with one literal per line')
 
     p = sub.add_parser('rc4-scan')
     p.add_argument('file')
@@ -147,6 +173,8 @@ def main():
         cmd_ecb(args.file, args.block)
     elif args.cmd == 'aes-scan':
         cmd_aes_scan(args.so)
+    elif args.cmd == 'dxor':
+        cmd_dxor(args.str, args.key, args.hex, args.strings)
     elif args.cmd == 'rc4-scan':
         lo, hi = map(int, args.range.split(':'))
         cmd_rc4_scan(args.file, args.key, args.stride, args.seed_i, args.seed_j, (lo, hi), args.magic, args.skip, args.j_add)

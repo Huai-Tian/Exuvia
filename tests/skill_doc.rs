@@ -29,11 +29,21 @@ fn json_blocks(md: &str) -> Vec<String> {
 }
 
 #[test]
-fn fence_extracts_parses_and_is_empty() {
+fn fence_extracts_parses_and_has_first_family() {
     let md = skill_md();
     let raw = exuvia::fence::extract(&md).expect("fence found");
     let val: toml::Value = toml::from_str(&raw).expect("fence parses as TOML");
-    assert!(val.as_table().map_or(true, |t| t.is_empty()), "fence must stay empty by design until fields are earned (growth rules)");
+    // fence 生长（第一战挣得、维护者确认）：首条族知识在档——结构锁定，未知字段仍拒绝
+    let fam = val
+        .get("families")
+        .and_then(|f| f.get("wholefile-encrypt"))
+        .expect("first family entry earned from Battle 1");
+    let guidance = fam
+        .get("guidance")
+        .and_then(|g| g.as_array())
+        .expect("guidance array");
+    assert!(guidance.len() >= 3, "inflate-boundary hook recipe is the family knowledge core");
+    assert!(fam.get("description").is_some(), "family description present");
 }
 
 #[test]

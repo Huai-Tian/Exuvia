@@ -248,7 +248,21 @@ Documented error codes (this set is authoritative; do not rely on others):
 # only (a need x3, including section names); family knowledge only after
 # maintainer-validated research, vendor names forbidden (technical-family
 # naming); knowledge/value additions = minor, methodology/format = major
-# (human confirmation). current state: empty by design.
+# (human confirmation). current state: first family entry earned from
+# Battle 1 (maintainer-confirmed 2026-10-20).
+
+# 族知识 1：整块加密-压缩载体族（第一战实测毕业，维护者确认入档）。
+# 形态：密文载体（dex 尾部 / so 内嵌段）经壳自有流密码解密器解出
+# zlib 压缩流，inflate 后为完整原始 DEX（非方法抽取——repack 无需 DEX writer）。
+# 卡点：解密调用现场（真实密文指针/长度）为纯运行时事实，轨道 A 与
+# 函数级轨道 B 结构性到界。
+[families.wholefile-encrypt]
+description = "whole-file encrypt+compress carrier: ciphertext container -> shell stream-cipher decrypt -> zlib inflate -> intact original DEX; decrypt call-site is a runtime-only fact"
+guidance = [
+    "static recovery fully solves algorithm/key/containers but the call-site binding needs Track C runtime facts — this is the expected wall, not a failure",
+    "Track C user-side recipe (analyst with a device/emulator): hook the inflate boundary (inflateInit_/inflate from libz.so, confirmed via DT_NEEDED) — one interception yields both artifacts: the decryptor output stream and the original DEX",
+    "return flow: ciphertext-vs-plaintext pair distills a pure-function decrypt; recovered claims verify via structural assertions (DEX parse) x byte tests; the repacked APK then needs only the assembler + user-side zipalign/apksigner (no DEX writer for this family)",
+]
 ```
 
 ## 8. Version anchors

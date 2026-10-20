@@ -76,15 +76,44 @@ pub fn build(goal_path: &Path, handoff_dir: &Path) -> Result<WorkPackage, String
     let allowed_debt: Vec<String> = picked.iter().map(|e| e.debt_id.clone()).collect();
     let entries: Vec<DebtEntry> = picked.into_iter().cloned().collect();
 
+    // guidance 注入：fence 族知识的全量注入（fence 条目按三次法则生长、天然少量；
+    // 机械侧不做族匹配判断——下游 LLM 按卡点事实自行取舍，guidance 语义 = 可选参考知识）
+    let guidance = fence_guidance();
+
     Ok(WorkPackage {
         schema: "exuvia.workpackage".to_string(),
         goal_sha256: goal_sha,
         handoff_version: crate::version::HANDOFF_VERSION,
         accepts_equivalent: goal.accepts_equivalent,
         tracks: goal.tracks.clone(),
-        // 指纹未匹配（fence 无族条目）→ 无 guidance 可注入；fence 挣得族知识后按指纹注入
-        guidance: Vec::new(),
+        guidance,
         allowed_debt,
         entries,
     })
+}
+
+/// fence 全部族条目的 guidance 清单（工具机械全注入，匹配判断在下游智能侧）。
+fn fence_guidance() -> Vec<String> {
+    let Some(path) = crate::install::find_skill_md() else {
+        return Vec::new();
+    };
+    let Ok(md) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let Ok(value) = crate::fence::parse(&md) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if let Some(families) = value.get("families").and_then(|f| f.as_table()) {
+        for (_name, fam) in families {
+            if let Some(list) = fam.get("guidance").and_then(|g| g.as_array()) {
+                for g in list {
+                    if let Some(s) = g.as_str() {
+                        out.push(s.to_string());
+                    }
+                }
+            }
+        }
+    }
+    out
 }
