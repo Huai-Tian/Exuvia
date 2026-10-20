@@ -18,6 +18,11 @@ Mechanics (format facts only):
     built-in bionic libc semantics (malloc/free/mem*/str*/...) with a mapping table
   - GOT slots without a JMPREL entry (shell runtime-patched slots) are routed to
     malloc/memcpy semantics by default; override with --got slot:name
+  - Relocations against symbols DEFINED in the so itself (st_shndx != 0) bind
+    to the so's own VA — interpreter bridges, canary guards and self-provided
+    natives must run their real code, not a return-0 stub; undefined imports
+    (st_shndx == 0, including decoy defs decorated with a data address) keep
+    bionic libc stub semantics
   - TLS canary (tpidr_el0) is materialized; stack/heap are scratch regions
   - Optional minimal JNI world: fake JavaVM/JNIEnv tables, every slot a stub
     (RegisterNatives captures the native-method table and prints it)
@@ -409,10 +414,25 @@ def main():
     # bind GOT slots: JMPREL/GLOB_DAT symbols, then RELATIVE relocations
     symtab_off = elf.va2off(elf.dynamic_tags().get(DT_SYMTAB, 0))
     strtab_off = elf.va2off(elf.dynamic_tags().get(DT_STRTAB, 0))
+
+    def sym_def(idx):
+        """(st_shndx, st_value) of a dynsym entry — defined-in-so iff shndx != 0."""
+        b = symtab_off + idx * 24
+        return struct.unpack_from('<H', data, b + 6)[0], struct.unpack_from('<Q', data, b + 8)[0]
+
     i = 0
     for r_offset, rtype, symidx, addend in elf.relocations():
         if rtype in (R_GLOB_DAT, R_JUMP_SLOT) and symtab_off:
             name = elf.str_at(strtab_off, struct.unpack_from('<I', data, symtab_off + symidx * 24)[0])
+            # r15 Battle-1 lesson: symbols the so DEFINES itself (interpreter
+            # bridges, self-natives, canary-guard objects) were previously routed
+            # to callable stubs — silently returning 0 instead of dispatching real
+            # code. Bind them to their own VA. Decoys (shndx == 0 with a data
+            # address painted on) are imports — keep libc stub semantics.
+            shndx, val = sym_def(symidx)
+            if shndx and val:
+                uc.mem_write(r_offset, struct.pack('<Q', val))
+                continue
             sa = STUB + 8 * i
             i += 1
             stub_addr[sa] = libc.get(name, lambda x0, x1, x2, x3, x4=0, x5=0: 0)

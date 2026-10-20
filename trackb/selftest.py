@@ -232,6 +232,12 @@ def test_sm4recon():
     cipher = mod.cfb_encrypt(rk, plain)
     assert mod.cfb_crypt(cipher, 0, 64, rk) == plain, 'CFB round-trip failed'
     print('sm4recon OK: CFB round-trip')
+    # r15: nonzero IV — the IV is a call-site fact, not a constant. Round-trip
+    # with an explicit IV, then scan with the matching block-1 constant E(IV).
+    iv = bytes(range(16))
+    cipher_iv = mod.cfb_encrypt(rk, plain, iv)
+    assert mod.cfb_crypt(cipher_iv, 0, 64, rk, iv) == plain, 'CFB nonzero-IV round-trip failed'
+    print('sm4recon OK: CFB round-trip with nonzero IV')
     # scan：把合成材料头藏进随机海洋 → form=material 必须命中
     import struct as _s
     mat = bytearray(16)
@@ -258,6 +264,17 @@ def test_sm4recon():
         assert r.returncode == 0, f'sm4recon scan exit {r.returncode}: {r.stderr}'
         assert 'material' in r.stdout and '0x309' in r.stdout, r.stdout  # 777 = 0x309
         print('sm4recon OK: material-form scan hits the planted offset')
+        # scan --iv：block-1 常量 = E(IV)（r15：IV 是调用现场事实，扫描器必须参数化）
+        carrier_iv = bytearray(carrier)
+        carrier_iv[off:off+16] = bytes(a ^ b for a, b in zip(mat, mod.sm4_block(rk, iv)))
+        f_iv = os.path.join(td, 'carrier_iv.bin')
+        open(f_iv, 'wb').write(bytes(carrier_iv))
+        r = subprocess.run([sys.executable, os.path.join(HERE, 'sm4recon.py'), 'scan', f_iv,
+                            '--rk', rkf, '--iv', iv.hex(), '--form', 'material', '--limit', '5'],
+                           capture_output=True, text=True, timeout=60)
+        assert r.returncode == 0, f'sm4recon scan --iv exit {r.returncode}: {r.stderr}'
+        assert 'material' in r.stdout and '0x309' in r.stdout, r.stdout
+        print('sm4recon OK: --iv scan hits the planted offset with E(IV) block-1')
 
 
 if __name__ == '__main__':

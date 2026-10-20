@@ -37,11 +37,12 @@ Exuvia 是一个**面向 AI Agent 的 Android 通用脱壳 / 代码恢复流水�
 - 终点定义已拍板（2026-10 桌面化修订）：桌面三重验收（结构对账 + DEX 全量可解析 + 语义复原判定，§2.1）+ 忠实还原原则；
 - **r13 物化取证 + 深链闭合测绘（attempts.log r13 留痕）**：so_emulator 三能力（mmap 桥/pthread_create 捕获/--watch-write）；深链 0x2c5838+ 决定性测绘——**[0x2e40d0] = interpreter 结构表指针、SM4 引擎使命 = 解密结构表**（memcpy 落点）、后置 0x2c78fc = base64 解码层、分发器 0x2c566c（[t+0x50]=count/[t+0x54+i*8]=偏移+基址）；[0x2e40d0] 写入者排除法钉死（JNI_OnLoad 链/0x2c5b34 分支/init_array 空三槽/pthread 未起皆不写）——最强候选 __arm_a_1 序列；
 - **r14 断点钉死（attempts.log r14 留痕）**：__arm_a_1 @0xa94c 黑盒推进至 0x9008 全过（0x25c0=__strncpy_chk2 PLT/0x6c40/0x7138/0x567c 逐站确认），**崩点 = 0x567c 内 dlopen/soinfo 遍历**：[0x2ff48] 静态文件值 0x2f9f0（soinfo 链根）→ +0x10 → `blr [x+0x18]`——该结构链是 **linker 运行时填充的 dlopen 语义**，静态模拟至垃圾指针（PC=0）——**需要 soinfo/link_map 最小假世界**（r15 工程，so_emulator 下一个通用能力）；至此 interface5 链使命明确：壳通过 dlopen 自解析符号完成 [0x2e40d0] 结构表物化；
-- **下一步（r15）：soinfo 假世界 → 结构表物化闭环**：① so_emulator 加 dlopen/dl 结构链假世界（[0x2ff48] 起 soinfo 链逐层 [x+0x18] 函数槽可控 hook）；② __arm_a_1 闭合 → [0x2e40d0] 物化 → 重跑 JNI_OnLoad dump 结构表（SM4 输出）→ base64 解码 → ③ 引擎链全离线闭环：SM4 材料 → __arm_c_1 变体 RC4 → 容器 [4B length][zlib] → 原始 DEX。
+- **r15 IV 真相 + 状态合成闭环（attempts.log r15 留痕；r12 "IV=0" 与接手 HANDOFF 的 "canary IV" 双证伪）**：① **IV = s1 = MD5(包名)**——`--watch-write` 对签名验证两个栈落点取证（写入者 0x2c6138-0x2c61a4 的 MD5 逐字节存储循环）：[sp+0x70]=s1、[sp+0x80]=s2；引擎 0x2c772c 从 arg x1 拷 16B IV（调用点 `mov x1,x25`=sp+0x70）、arg x2（s2）作为 RK 材料指针传 0x2c7298 的 x4——**key 侧 = MD5(证书)，IV 侧 = MD5(包名)，全静态可预测**；"canary" 是误判：序言 `ldr x3,[0x2e3fe8]; ldr x3,[x3]` 是 GLOB_DAT `__stack_chk_guard` 的标准栈保护序列（非 TLS 槽），反推值恰好是 s1 的栈落点造成的巧合；② **引擎语义修正 = 标准 CFB 解密（反馈=输入块）**：块1=E(s1)、块n=E(前输入块)，python 复现 80B 全对；r12 的 "IV=0" 是 calloc 清零区观测巧合（模拟器 canary=0 使块1=E(0) 碰巧成立）；③ **状态合成路线验证**：预锁定表 = CFB 加密(静态表头 80B, RK, IV=s1) → `--load` 映射 + [0x2e40d0] poke → 引擎解锁逐字节回写明文 ✓、消费点 0x2c58c4 通过（旧 calloc 垃圾崩溃消失）——**"离线合成运行时状态"对"深链路径模拟"的通用化替代成立**（密码学闭合时无需模拟构造路径）；④ **消费规格测绘**：运行时表 = 置换指针表（[t+0x18]=值池偏移、[t+0x20]=count、表+0x24=count 个索引字节、`pool[i]=pool[idx[i]]` 原地置换，NEON 16B 循环）；静态 0x2e8d00 区 ≠ 运行时表（[t+0x18] 静态值 0x00070012_0000042f 是模板条目——构造主 = interface5 链，r14 断点维持）；⑤ **产品修正**：sm4recon `--iv` 参数化（dec/enc/scan，块1 常量=E(IV)，默认零向后兼容；IV 是调用现场事实不是常量）；so_emulator **自定义符号绑定**（st_shndx≠0 且 st_value≠0 → 绑自身 VA；12 槽位修正含 interpreter_wrap_* bridge/__arm_a_20/21/JNI_OoLoad/__armeabi_unwind——此前路由到返回 0 的 stub 静默破坏 interpreter 分发；shndx=0 的 0x2c4000 伪壳套进口保持 libc 语义）；selftest 增非零 IV 往返 + `--iv` 植入扫描双锚；零回归验证（RK 固化/表 dump 逐字节一致、44 Rust 测试 + selftest 11 项全绿）；⑥ rkexp 0x2c677c **7 调用者普查**（0x2c697c/0x2c6a28/0x2c6b8c/0x2c6e4c/0x2c71f0/0x2c7328/0x2c7438——crypto 簇兄弟引擎，__arm_c_1 材料解密器候选）；⑦ 材料扫描负事实：`scan --iv`（块1=E(s1)）对 dex 尾容器/so/加固包/原包 material 格点 0 命中——材料非"静态存在 + s1-IV CFB"形态；
+- **下一步（r16）**：① interface5 构造链（r14 断点 0x567c dlopen/soinfo 假世界）——目标是运行时表内容（值池/索引/[t+0x18]/[t+0x20] = so 自解析符号结果），或从 7 个 rkexp 兄弟引擎反查材料解密路径（材料 14B 头 → __arm_c_1 变体 RC4 → dex 尾容器 [4B length][zlib] → 原始 DEX）；② 台账诚实重建：r1-r14 原始行随沙箱丢失（attempts.log bootstrap 条目留痕，r 轮摘要以 git 提交信息与本文档为准）。
 
-## 0.5 第一战交接视图（r14 末状态——技术事实坐标 + 分析路径，接手 Agent 从这里继续）
+## 0.5 第一战交接视图（r15 末状态——技术事实坐标 + 分析路径，接手 Agent 从这里继续）
 
-**语料**：`/workspace/corpus/`——`ssd-free-r1.orig.apk`（原包，v2 签名）、`ssd-free-r1.packed.apk`（加固包）、`extracted/`（壳 APK 解包：classes.dex + assets/libjiagu*.so 四架构）、`orig_classes.dex`、`handoff/`（debt/evidence/attempts.log r1-r14 全台账——**先读 attempts.log**）。
+**语料**：`/workspace/corpus/`——`ssd-free-r1.orig.apk`（原包，v2 签名）、`ssd-free-r1.packed.apk`（加固包）、`extracted/`（壳 APK 解包：classes.dex + assets/libjiagu*.so 四架构）、`handoff/`（attempts.log——**先读它**：r1-r14 原始行随沙箱丢失，bootstrap 条目诚实留痕，r 轮摘要以 git 提交信息与本文档为准；接手 HANDOFF 副本在 handoff/HANDOFF_r15_entry.md）。
 
 **全链技术事实表**（全部已验证；地址均为 libjiagu_a64.so VA）：
 
@@ -54,9 +55,10 @@ Exuvia 是一个**面向 AI Agent 的 Android 通用脱壳 / 代码恢复流水�
 | 变体 RC4（DynCryptor） | 0x7984（PRGA 0x6b7c，KSA 0x6a54） | i/j 种子 3/5、i+=2、j+=S[i]+1；静态 10B key `76565734239123535674`（so 偏移 0x1cc44+0x7456 锚） | **全解**（KSA 与 unicorn 快照逐字节双验证） |
 | 第二 cryptor | __arm_c_1 @0x6f90 | 同款变体 PRGA + **动态 key**：[this+0x28] 材料、[this+0x30] 长度 | 消费侧全测绘（r10） |
 | key 材料格式 | 0x7184 预处理 | 14B 头：[6..7] keylen、[8..9] 旗标、[0xe] 移位；KSA key = 载荷+0x28 | 已解码 |
-| **第二引擎** | 0x2c7298 = **国密 SM4 CFB(IV=0)** | S-box @0x2caf00（与 GB/T 32907 标准表逐字节一致）；RK 由 0x2c677c 展开（MD5(证书) 大端重组 XOR 模板 @0x2e4010） | **完全破解**（python 复现，r12） |
-| RK 固化 | attempts.log r12 条目内 hex 128B | 黑盒 --fn 0x2c677c --dump-mem 产物 | 可直接复用 |
-| 结构表落点 | [0x2e40d0] | interpreter 结构表指针；SM4 输出 memcpy 于此（0x2c584c）；后置 0x2c78fc = base64 解码 | 指针待物化 |
+| **第二引擎** | 0x2c7298 = **国密 SM4 CFB（IV=s1=MD5(包名)，key 材料=s2=MD5(证书)）** | S-box @0x2caf00（与 GB/T 32907 标准表逐字节一致）；RK 由 0x2c677c 展开（s2 XOR 模板 @0x2e4010）；**标准 CFB 解密语义（反馈=输入块）**：块1=E(s1)、块n=E(前输入块)；r12 的 "IV=0" 是 calloc 清零区观测巧合（r15 修正） | **完全破解**（r12 引擎层 + r15 IV 层；python 80B 全对） |
+| IV（r15） | s1 = MD5(包名)，经 arg x1 从调用者栈 [sp+0x70] 拷入引擎 | `--watch-write` 取证写入者 0x2c6138-0x2c61a4（MD5 存储循环）；canary 理论证伪（GLOB_DAT `__stack_chk_guard` 序列，非 TLS） | **钉死** |
+| RK 固化 | s2 材料 → `--fn 0x2c677c --dump-mem` | 黑盒产物 128B（LE u32[32]），sm4recon 消耗时 `struct.unpack('<32I')` | 可直接复用 |
+| 结构表落点 | [0x2e40d0] | interpreter 结构表指针；SM4 输出 memcpy 于此（0x2c584c）；后置 0x2c78fc = base64 解码；**运行时表 = 置换指针表**（[t+0x18]=值池偏移/[t+0x20]=count/表+0x24=索引字节/`pool[i]=pool[idx[i]]` 原地置换）；静态 0x2e8d00 区 = 模板（≠ 运行时表） | 指针待物化（构造主 = interface5 链） |
 | 分发器 | 0x2c566c | [t+0x50]=count、[t+0x54+i*8]=偏移+基址重定位 | 已测绘（r13） |
 | interface 初始化 | __arm_a_1 @0xa94c | 0x9008→0x9140→0x9284→0x9bdc→0x9f84→0x9470 序列 | **断点在此**（r14） |
 | dlopen 遍历 | 0x567c（0x9008 内） | soinfo 链 [0x2ff48]=0x2f9f0 → +0x10 → blr [x+0x18] | **静态崩点**（PC=0——需 soinfo 假世界） |
@@ -72,9 +74,12 @@ printf 'detect.screenshot\0' > pkgname.txt               # packageName（orig de
 trackb/so_emulator.py extracted/assets/libjiagu_a64.so --fn 0x2c5b88 --java \
   --arg x0=0x620000030000 --sig-file sigs/cert_1.der --utf8-file pkgname.txt
 
-# 3. SM4 材料离线解密（RK 先经黑盒固化）
+# 3. SM4 离线解密（RK 先经黑盒固化；IV=s1=MD5(包名) —— r15 钉死，`--iv` 参数化）
 trackb/so_emulator.py ... --fn 0x2c677c --arg x0=<out> --arg x1=<MD5(cert) 区> --dump-mem ...
-trackb/sm4recon.py scan <容器> --rk rk.bin --form all    # 块 1 常量全扫（material/zlib/dex 判据）
+trackb/so_emulator.py ... --fn 0x2c5b88 --java --sig-file <cert> --utf8-file <pkgname> \
+  --watch-write <调用者 sp+0x70>:0x20     # 两个哈希落点的写入者取证（s1/s2 逐字节捕获）
+trackb/sm4recon.py dec <密文> --rk rk.bin --iv <s1 hex>          # CFB 解密（反馈=输入块）
+trackb/sm4recon.py scan <容器> --rk rk.bin --iv <s1 hex> --form all   # 块 1 常量 = E(s1) 全偏移扫描
 
 # 4. 变体 RC4 参数空间搜索（第一战形态一行命令）
 cargo run -- hunt --carrier <切片> --rc4 76565734239123535674 --rc4-stride 2 --rc4-seed 3:5 --rc4-jbias 1
@@ -84,7 +89,7 @@ cargo run -- hunt --carrier <切片> --rc4 76565734239123535674 --rc4-stride 2 -
 --watch 2c5830                # x0-x7 调用现场
 ```
 
-**当前断点与 r15 路线**（下一步从这里开始）：__arm_a_1（interface5 链）在 0x567c 的 dlopen/soinfo 遍历处崩——[0x2ff48] 是 linker 运行时填充的 soinfo 结构链根（静态文件值 0x2f9f0 仅为初始骨架）。**r15**：给 so_emulator 加 soinfo/link_map 最小假世界（链上每层 [x+0x18] 函数槽可 hook、返回值可控）→ __arm_a_1 闭合 → [0x2e40d0] 结构表物化 → 重跑 JNI_OnLoad dump SM4 输出 → base64 解码 → 材料喂 __arm_c_1 → 容器 [4B length][zlib] → 原始 DEX——**全链只差这一跳**。备选路线：32 位 x86 so（ELF32 模拟 x1 余量）复核 r8 的"Y 写 so-base"事实（a64 与 32 位全局布局不同）。
+**当前断点与 r16 路线**（下一步从这里开始）：密码学层已全闭合（key=s2、IV=s1 双静态，`sm4recon --iv` 全离线可复现；r15 已证：给定正确密文形态，黑盒解锁与 python 逐字节互验）。剩余两跳：① **运行时表内容**——构造主 = interface5 链（r14 断点 0x567c dlopen/soinfo 遍历维持），运行时表是 so 自解析结果的置换指针表，静态 0x2e8d00 区只是模板；推进方式二选一：soinfo/link_map 假世界走构造路径，或反向合成（按消费规格构造满足表头/值池/索引的表 poke 进黑盒——r15 状态合成已验证此路线可行）；② **__arm_c_1 材料**——rkexp 的 7 个兄弟调用者（0x2c697c/0x2c6a28/0x2c6b8c/0x2c6e4c/0x2c71f0/0x2c7328/0x2c7438）中藏着材料解密器；`scan --iv`（E(s1)）四容器 material 格点 0 命中（负事实）→ 材料非静态 s1-CFB 形态，需解剖兄弟引擎的 IV/模式。拿到材料后收尾不变：喂 __arm_c_1 → 变体 RC4 → dex 尾容器 [4B length][zlib] → inflate → 原始 DEX → `exuvia analyze --dex` 洋葱下一层。
 
 ---
 

@@ -2,11 +2,19 @@
 """sm4recon.py — SM4 recon/decrypt tool (Battle-1 r12 productized tool).
 
 Battle-1's SECOND engine (below the variant-RC4 layer) is SM4 (GB/T 32907-2016)
-in CFB mode with a zero IV:
-  keystream block 1 = E(0);  block n = E(ciphertext block n-1)
-  plaintext = ciphertext XOR keystream        (CFB is symmetric)
-Round keys (RK, 32 x u32 = 128 bytes) are shell-derived — 0x2c677c expands a
-key-material (r11 fact: s2 = MD5(signature)) XOR a static template; the
+in CFB mode:
+  keystream block 1 = E(IV);  block n = E(previous INPUT block)
+  plaintext = ciphertext XOR keystream        (CFB decrypt semantics)
+The IV is NOT necessarily zero. r12 assumed IV=0 from calloc-cleaned buffer
+observations; r15 watch-write forensics proved the engine copies 16 bytes
+from a caller stack slot — the signature chain's SECOND hash output (IV and
+key material were the two 16-byte MD5s of the signing chain: key side =
+MD5(signature cert), IV side = MD5(package name)). Feeding the two hash
+landings is mechanical: so_emulator --sig-file/--utf8-file runs the chain,
+--watch-write on the landing slots captures both hashes, then everything
+decrypts fully offline (--iv).
+Round keys (RK, 32 x u32 = 128 bytes) are shell-derived — a custom expansion
+(r11 fact: s2 = MD5(signature)) XOR a static template; the
 vanilla textbook schedule is also provided (--rkexp) for standard-SM4 shells.
 
 Verification anchors: S-box head d6 90 e9 fe cc e1 3d b7; GB/T 32907 Appendix-A
@@ -90,9 +98,9 @@ def sm4_block(rk, block):
     return struct.pack('>4I', X[35], X[34], X[33], X[32])
 
 
-def cfb_keystream(rk, data, off, n):
-    """CFB keystream over data[off:off+n] — block1 = E(0), then E(prev cipher)."""
-    ks = sm4_block(rk, b'\0' * 16)
+def cfb_keystream(rk, data, off, n, iv=None):
+    """CFB keystream over data[off:off+n] — block1 = E(iv), then E(prev input block)."""
+    ks = sm4_block(rk, b'\0' * 16 if iv is None else iv)
     out = ks
     pos = 16
     while pos < n:
@@ -103,16 +111,16 @@ def cfb_keystream(rk, data, off, n):
     return out[:n]
 
 
-def cfb_crypt(data, off, n, rk):
+def cfb_crypt(data, off, n, rk, iv=None):
     """CFB decrypt: feedback walks the INPUT (ciphertext) — matches the shell engine."""
-    ks = cfb_keystream(rk, data, off, n)
+    ks = cfb_keystream(rk, data, off, n, iv)
     return bytes(data[off + i] ^ ks[i] for i in range(n))
 
 
-def cfb_encrypt(rk, plain):
+def cfb_encrypt(rk, plain, iv=None):
     """CFB encrypt: feedback walks the OUTPUT (ciphertext). Decrypt with cfb_crypt."""
     out = b''
-    prev = b'\0' * 16
+    prev = b'\0' * 16 if iv is None else iv
     for i in range(0, len(plain), 16):
         ks = sm4_block(rk, prev)
         block = plain[i:i + 16]
@@ -148,11 +156,15 @@ def main():
         p.add_argument('--rk', required=True, help='128-byte round-key file')
         p.add_argument('--offset', default='0')
         p.add_argument('--len', default='0x100')
+        p.add_argument('--iv', default=None,
+                       help='16-byte IV hex (default all-zero — r15: IV may be a signature-chain hash)')
         p.add_argument('--out', default=None)
 
     p_scan = sub.add_parser('scan', help='full-offset scan (block-1 keystream is constant)')
     p_scan.add_argument('file')
     p_scan.add_argument('--rk', required=True)
+    p_scan.add_argument('--iv', default=None,
+                        help='16-byte IV hex for the block-1 constant (default all-zero)')
     p_scan.add_argument('--form', default='all', choices=['material', 'zlib', 'dex', 'all'])
     p_scan.add_argument('--limit', type=int, default=20)
 
@@ -175,7 +187,9 @@ def main():
         data = open(args.file, 'rb').read()
         off = int(args.offset, 0)
         n = min(int(args.len, 0), len(data) - off)
-        out = cfb_crypt(data, off, n, rk)
+        iv = bytes.fromhex(args.iv) if args.iv else None
+        assert iv is None or len(iv) == 16, '--iv must be 16 bytes of hex'
+        out = cfb_crypt(data, off, n, rk, iv)
         if args.out:
             open(args.out, 'wb').write(out)
             print('{"wrote":"%s","offset":"0x%x","len":"0x%x"}' % (args.out, off, n))
@@ -184,7 +198,9 @@ def main():
 
     elif args.cmd == 'scan':
         data = open(args.file, 'rb').read()
-        ks1 = sm4_block(rk, b'\0' * 16)
+        iv = bytes.fromhex(args.iv) if args.iv else None
+        assert iv is None or len(iv) == 16, '--iv must be 16 bytes of hex'
+        ks1 = sm4_block(rk, b'\0' * 16 if iv is None else iv)
         forms = args.form
         hits = 0
         for o in range(len(data) - 16):
