@@ -105,8 +105,26 @@ def test_recon_smoke():
         print('crypto_recon ecb OK: PRNG blob fingerprinted as stream-cipher profile')
 
 
+def test_disasm():
+    try:
+        import capstone  # noqa: F401
+    except ImportError:
+        print('SKIP disasm (capstone not installed — unavailable semantics)')
+        return
+    with tempfile.TemporaryDirectory() as td:
+        so = os.path.join(td, 'synthetic.so')
+        open(so, 'wb').write(build_minimal_arm64_elf())
+        r = subprocess.run(
+            [sys.executable, os.path.join(HERE, 'disasm.py'), so, '--fn', '0x1000', '--len', '0x10'],
+            capture_output=True, text=True, timeout=60)
+        assert r.returncode == 0, f'disasm exit {r.returncode}: {r.stderr}'
+        assert 'mov' in r.stdout and 'ret' in r.stdout, r.stdout  # capstone renders movz as mov alias
+        print('disasm OK: synthetic fn stream contains mov + ret')
+
+
 if __name__ == '__main__':
     test_so_emulator()
     test_rc4_vector()
     test_recon_smoke()
+    test_disasm()
     print('trackb selftest: ALL GREEN')

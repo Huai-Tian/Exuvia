@@ -262,6 +262,7 @@ guidance = [
     "static recovery fully solves algorithm/key/containers but the call-site binding needs Track C runtime facts — this is the expected wall, not a failure",
     "Track C user-side recipe (analyst with a device/emulator): hook the inflate boundary (inflateInit_/inflate from libz.so, confirmed via DT_NEEDED) — one interception yields both artifacts: the decryptor output stream and the original DEX",
     "return flow: ciphertext-vs-plaintext pair distills a pure-function decrypt; recovered claims verify via structural assertions (DEX parse) x byte tests; the repacked APK then needs only the assembler + user-side zipalign/apksigner (no DEX writer for this family)",
+    "L2 evidence: attach disassembly streams next to the byte slices (trackb/disasm.py --symbol, capstone user-side) — Battle-1 proved expectation-chasing and routine-reading need instruction streams as first-class artifacts; PT_DYNAMIC runtime view resolves shell symbols that static views miss",
 ]
 ```
 

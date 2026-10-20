@@ -117,7 +117,7 @@ release = 两个平台二进制 + SKILL.md + checksums。**纯文件，无目录
 
 优先级永远 A > B > C。**新代壳战略下，轨道 B/C 是主路径而非推迟项**（roadmap 期工程化），L2/L3 从"可选层"升格为主交付物。轨道 B/C 的重依赖（qiling、unicorn、frida）不进发行物，用户侧安装，缺席 = `unavailable`（功能级语义，与 jadx/ghidra 同类）；**核心闸门依赖的系统 python3 缺失 = `installation-broken`（拒绝运行）**。
 
-**轨道 B 工具已落地（`trackb/`，用户侧 Python 工具——第一战实战催生）**：`so_emulator.py`（so 黑盒执行器：ELF64 映射 + RELATIVE/GOT 重定位 + bionic libc 语义层 + zlib 跨模拟器桥 + 可选 JNI 假表 + RegisterNatives 捕获 + --poke/--load 跨文件黑盒，零样本参数全 CLI 化）、`crypto_recon.py`（容器熵定位 / ECB 指纹 / AES 指令扫描 / RC4 变体族已知明文双过滤扫描）、`repack.py`（终点合成段 v0：恢复 DEX + 原 Manifest + 基准资源 → 未签名 APK；zipalign/apksigner 按零发行纪律留用户侧 SDK；整块加密族豁免 DEX writer）、`selftest.py`（合成 fixture 自检，零样本纪律）。工具本体是产品的一部分随仓库分发；unicorn/capstone 由使用侧安装。
+**轨道 B 工具已落地（`trackb/`，用户侧 Python 工具——第一战实战催生）**：`so_emulator.py`（so 黑盒执行器：ELF64 映射 + RELATIVE/GOT 重定位 + bionic libc 语义层 + zlib 跨模拟器桥 + 文件系统桥 --fs + JNI 假世界（ExceptionCheck/数组语义/SDK 喂值/RegisterNatives 捕获）+ --poke/--load 跨文件黑盒，零样本参数全 CLI 化）、`crypto_recon.py`（容器熵定位 / ECB 指纹 / AES 指令扫描 / **hash-scan 指令级哈希 IV 扫描** / RC4 变体族双过滤扫描 / **dxor Dalvik 字符串解密**）、`disasm.py`（**L2 evidence：符号/偏移→汇编流**——PT_DYNAMIC 运行时视角符号解析，evidence 附件标准生产器，capstone 用户侧）、`repack.py`（终点合成段 v0：恢复 DEX + 原 Manifest + 基准资源 → 未签名 APK；zipalign/apksigner 按零发行纪律留用户侧 SDK；整块加密族豁免 DEX writer）、`selftest.py`（合成 fixture 自检，零样本纪律）。工具本体是产品的一部分随仓库分发；unicorn/capstone 由使用侧安装（缺席 = unavailable 语义）。
 
 ### 3.2 分层交付（每个方法声明它到达的层级）
 
