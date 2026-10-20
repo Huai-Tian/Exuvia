@@ -75,6 +75,13 @@ enum Cmd {
         /// 标准 RC4 key（hex；可重复：多谓词并行全空间搜索）
         #[arg(long = "rc4", value_name = "HEX")]
         rc4: Vec<String>,
+        /// PRGA 变体参数（修饰所有 --rc4；Battle-1 实测变体 = 2,3:5,1）
+        #[arg(long, default_value = "1")]
+        rc4_stride: String,
+        #[arg(long, default_value = "0:0")]
+        rc4_seed: String,
+        #[arg(long, default_value = "0")]
+        rc4_jbias: String,
         /// 循环 XOR key（hex；可重复）
         #[arg(long = "xor", value_name = "HEX")]
         xor: Vec<String>,
@@ -176,13 +183,33 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Some(Cmd::Hunt { carrier, rc4, xor, out }) => {
-            use exuvia::track_a::hunt::{hex_to_bytes, run, Predicate};
+        Some(Cmd::Hunt { carrier, rc4, rc4_stride, rc4_seed, rc4_jbias, xor, out }) => {
+            use exuvia::track_a::hunt::{hex_to_bytes, run, Predicate, Rc4Params};
+            // 变体参数解析（失败 = 结构化错误；默认值 = 标准 RC4）
+            let parse_params = || -> Result<Rc4Params, String> {
+                let stride = rc4_stride.parse::<u32>().map_err(|_| format!("bad --rc4-stride {rc4_stride}"))?;
+                let jbias = rc4_jbias.parse::<u32>().map_err(|_| format!("bad --rc4-jbias {rc4_jbias}"))?;
+                let (i, j) = rc4_seed
+                    .split_once(':')
+                    .ok_or_else(|| format!("bad --rc4-seed {rc4_seed} (expect I:J)"))?;
+                let (i, j) = (
+                    i.parse::<u32>().map_err(|_| format!("bad --rc4-seed {rc4_seed}"))?,
+                    j.parse::<u32>().map_err(|_| format!("bad --rc4-seed {rc4_seed}"))?,
+                );
+                Ok(Rc4Params { stride, i_seed: i, j_seed: j, jbias })
+            };
+            let params = match parse_params() {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("{{\"error\":\"{e}\"}}");
+                    return ExitCode::FAILURE;
+                }
+            };
             let mut predicates = Vec::new();
             for (k, is_rc4) in rc4.iter().map(|k| (k, true)).chain(xor.iter().map(|k| (k, false))) {
                 match hex_to_bytes(k) {
                     Ok(key) if !key.is_empty() => {
-                        predicates.push(if is_rc4 { Predicate::Rc4 { key } } else { Predicate::Xor { key } })
+                        predicates.push(if is_rc4 { Predicate::Rc4 { key, params } } else { Predicate::Xor { key } })
                     }
                     Ok(_) => {
                         eprintln!("{{\"error\":\"key {k} is empty\"}}");

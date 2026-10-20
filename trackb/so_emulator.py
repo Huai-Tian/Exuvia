@@ -34,7 +34,8 @@ try:
     from unicorn import Uc, UC_ARCH_ARM64, UC_MODE_LITTLE_ENDIAN, UC_HOOK_CODE
     from unicorn.arm64_const import (
         UC_ARM64_REG_X0, UC_ARM64_REG_X1, UC_ARM64_REG_X2, UC_ARM64_REG_X3,
-        UC_ARM64_REG_X4, UC_ARM64_REG_LR, UC_ARM64_REG_SP, UC_ARM64_REG_PC,
+        UC_ARM64_REG_X4, UC_ARM64_REG_X5, UC_ARM64_REG_X6, UC_ARM64_REG_X7,
+        UC_ARM64_REG_LR, UC_ARM64_REG_SP, UC_ARM64_REG_PC,
         UC_ARM64_REG_TPIDR_EL0,
     )
 except ImportError:
@@ -521,11 +522,23 @@ def main():
 
     def hook_watch(uc_, addr, size, user):
         x0 = uc_.reg_read(UC_ARM64_REG_X0)
+        regs_all = {
+            'x1': uc_.reg_read(UC_ARM64_REG_X1), 'x2': uc_.reg_read(UC_ARM64_REG_X2),
+            'x3': uc_.reg_read(UC_ARM64_REG_X3), 'x4': uc_.reg_read(UC_ARM64_REG_X4),
+            'x5': uc_.reg_read(UC_ARM64_REG_X5), 'x6': uc_.reg_read(UC_ARM64_REG_X6),
+            'x7': uc_.reg_read(UC_ARM64_REG_X7),
+        }
         try:
             buf = bytes(uc_.mem_read(x0, 32)).hex() if 0x1000 < x0 < 0x800000000000 else ''
         except Exception:
             buf = ''
-        watch_events.append(f'{{"watch":"0x{addr:x}","x0":"0x{x0:x}","buf":"{buf}"}}')
+        watch_events.append(json.dumps({
+            'watch': '0x%x' % addr, 'x0': '0x%x' % x0,
+            'x1': '0x%x' % regs_all['x1'], 'x2': '0x%x' % regs_all['x2'],
+            'x3': '0x%x' % regs_all['x3'], 'x4': '0x%x' % regs_all['x4'],
+            'x5': '0x%x' % regs_all['x5'], 'x6': '0x%x' % regs_all['x6'],
+            'x7': '0x%x' % regs_all['x7'], 'buf': buf,
+        }))
 
     for w in args.watch:
         uc.hook_add(UC_HOOK_CODE, hook_watch, begin=int(w, 16), end=int(w, 16))
@@ -550,7 +563,8 @@ def main():
     for spec in args.arg:
         reg, val = spec.split('=')
         regmap = {'x0': UC_ARM64_REG_X0, 'x1': UC_ARM64_REG_X1, 'x2': UC_ARM64_REG_X2,
-                  'x3': UC_ARM64_REG_X3, 'x4': UC_ARM64_REG_X4}
+                  'x3': UC_ARM64_REG_X3, 'x4': UC_ARM64_REG_X4, 'x5': UC_ARM64_REG_X5,
+                  'x6': UC_ARM64_REG_X6, 'x7': UC_ARM64_REG_X7}
         uc.reg_write(regmap[reg.lower()], int(val, 0))
     uc.reg_write(UC_ARM64_REG_LR, SENTINEL)
 

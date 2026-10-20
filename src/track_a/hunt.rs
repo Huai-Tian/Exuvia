@@ -10,19 +10,40 @@
 //! 判据链全机械：zlib magic（RFC 1950 CMF/FLG 校验）→ inflate →
 //! DEX magic → dex::parse 全表自洽。
 //!
-//! 机械边界：谓词族 = 标准算法（rc4 标准 KSA/PRGA / xor 循环）。
-//! 变体算法不在此层——标准族落空即诚实负事实，变体复现走 proposal 外循环
-//! （LLM 写 python、沙箱双锚验证）。hunt 不做最终销账：命中的产物只是
-//! 机械事实，proposal → merge 四层闸门的判定权链条不变。
+//! 机械边界：谓词族 = rc4（标准 KSA + PRGA 参数空间）与 xor 循环。
+//! 变体参数化（r11 产品化，Battle-1 实测形态驱动）：RC4 的 stride/seed/jbias
+//! 是算法参数空间的表达（--rc4-stride/--rc4-seed/--rc4-jbias），不是样本特判——
+//! 第一战变体（stride=2, seed=3:5, jbias=1）即一行命令。超出参数空间的变体
+//! （KSA 改造、双 S-box 等）仍走 proposal 外循环。
+//! hunt 不做最终销账：命中的产物只是机械事实，proposal → merge 四层闸门的
+//! 判定权链条不变。
 
 use crate::track_a::dex;
 use serde::Serialize;
 
-/// 搜索谓词：密钥流生成算法（标准族）。
+/// RC4 参数空间（stride=1, seed=0:0, jbias=0 即标准 RC4）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rc4Params {
+    /// i 每轮步长（标准 1）
+    pub stride: u32,
+    /// PRGA i/j 种子（标准 0:0）
+    pub i_seed: u32,
+    pub j_seed: u32,
+    /// j 额外增量（标准 0；第一战变体 j = j + S[i] + 1 → jbias=1）
+    pub jbias: u32,
+}
+
+impl Default for Rc4Params {
+    fn default() -> Self {
+        Rc4Params { stride: 1, i_seed: 0, j_seed: 0, jbias: 0 }
+    }
+}
+
+/// 搜索谓词：密钥流生成算法（标准族 + 参数化变体）。
 #[derive(Debug, Clone)]
 pub enum Predicate {
-    /// 标准 RC4（KSA + PRGA），key 外部传入（来源：facts / LLM 复现）
-    Rc4 { key: Vec<u8> },
+    /// RC4（标准 KSA + 参数化 PRGA），key 外部传入（来源：facts / LLM 复现）
+    Rc4 { key: Vec<u8>, params: Rc4Params },
     /// n 字节循环 XOR
     Xor { key: Vec<u8> },
 }
@@ -31,7 +52,16 @@ impl Predicate {
     /// 报告标签（key 本体不进标签：xor 密钥短直接给，rc4 用 sha 前缀）
     pub fn label(&self) -> String {
         match self {
-            Predicate::Rc4 { key } => format!("rc4(key sha256:{}…)", short_sha(key)),
+            Predicate::Rc4 { key, params } => {
+                if *params == Rc4Params::default() {
+                    format!("rc4(key sha256:{}…)", short_sha(key))
+                } else {
+                    format!(
+                        "rc4-variant(stride={}, seed={}:{}, jbias={}, key sha256:{}…)",
+                        params.stride, params.i_seed, params.j_seed, params.jbias, short_sha(key)
+                    )
+                }
+            }
             Predicate::Xor { key } => format!("xor:{}", hex(key)),
         }
     }
@@ -40,25 +70,27 @@ impl Predicate {
     /// 流密码 keystream 只依赖 key 与位置——解密任意起点段 = 查表 XOR，搜索降为 O(n)。
     fn keystream(&self, len: usize) -> Vec<u8> {
         match self {
-            Predicate::Rc4 { key } => rc4_keystream(key, len),
+            Predicate::Rc4 { key, params } => rc4_keystream(key, *params, len),
             Predicate::Xor { key } => (0..len).map(|i| key[i % key.len()]).collect(),
         }
     }
 }
 
-/// 标准 RC4 keystream（KSA 置换 + PRGA 输出）。
-pub fn rc4_keystream(key: &[u8], len: usize) -> Vec<u8> {
+/// RC4 keystream（标准 KSA 置换 + 参数化 PRGA 输出）。
+/// KSA 固定标准（第一战实证：变体壳的 KSA 与 unicorn 快照逐字节一致——变体在 PRGA）。
+pub fn rc4_keystream(key: &[u8], params: Rc4Params, len: usize) -> Vec<u8> {
     let mut s: [u8; 256] = core::array::from_fn(|i| i as u8);
     let mut j = 0usize;
     for i in 0..256 {
         j = (j + s[i] as usize + key[i % key.len()] as usize) & 0xff;
         s.swap(i, j);
     }
-    let (mut i, mut jj) = (0usize, 0usize);
+    let (mut i, mut jj) = (params.i_seed as usize & 0xff, params.j_seed as usize & 0xff);
+    let (stride, jbias) = (params.stride.max(1) as usize, params.jbias as usize);
     (0..len)
         .map(|_| {
-            i = (i + 1) & 0xff;
-            jj = (jj + s[i] as usize) & 0xff;
+            i = (i + stride) & 0xff;
+            jj = (jj + s[i] as usize + jbias) & 0xff;
             s.swap(i, jj);
             s[(s[i] as usize + s[jj] as usize) & 0xff]
         })

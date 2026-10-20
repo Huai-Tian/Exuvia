@@ -160,9 +160,64 @@ def test_disasm():
         print('disasm OK: ELF32 ARM stream contains mov + bx lr')
 
 
+def build_synthetic_signed_apk(cert_der: bytes) -> bytes:
+    """Synthetic APK: minimal zip with a synthetic v2 APK Signing Block before the CD.
+    Layout mirrors the real block: [u64 size][pairs: [u64 len][u32 id][value]...][u64 size][16B magic],
+    with size = len(pairs) + 24 (covers the trailing size field + magic)."""
+    def u32(v): return struct.pack('<I', v)
+    def u64(v): return struct.pack('<Q', v)
+    # v2 value 三层长度前缀（corpus 原包逐字段实证 1320 = 4+1316 = 4+[4+1312]）：
+    #   val = [signers_len][ [signer_len][ [sd_len][ [digests_len][] [certs_len][certs] ] ] ]
+    #   —— 每个 _len 字段 = 其后内容净长（不含自身 4B）
+    cert_entry = u32(len(cert_der)) + cert_der
+    certs = u32(len(cert_entry)) + cert_entry
+    sd = u32(0) + certs
+    signer = u32(len(sd)) + sd
+    signer_entry = u32(len(signer)) + signer
+    val = u32(len(signer_entry)) + signer_entry
+    pair = u64(4 + len(val)) + u32(0x7109871A) + val  # ln = id(4B) + value
+    size = len(pair) + 24
+    block = u64(size) + pair + u64(size) + b'APK Sig Block 42'
+    import zipfile, io
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w') as z:
+        z.writestr('META-INF/MANIFEST.MF', 'Manifest-Version: 1.0\n')
+    zbytes = buf.getvalue()
+    cd_off = zbytes.rfind(b'PK\x01\x02')
+    assert cd_off > 0
+    out = zbytes[:cd_off] + block + zbytes[cd_off:]
+    # EOCD 的 CD offset 字段必须前移 len(block)（真实签名 APK 由工具链维护此字段）
+    eocd = out.rfind(b'PK\x05\x06')
+    assert eocd > 0
+    return out[:eocd + 16] + struct.pack('<I', cd_off + len(block)) + out[eocd + 20:]
+
+
+def test_sigx():
+    """sigx.py: synthetic APK + synthetic signing block -> DER round-trip (r11 tool)."""
+    sys.path.insert(0, HERE)
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('sigx', os.path.join(HERE, 'sigx.py'))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    # synthetic cert DER: minimal X.509-ish SEQUENCE head + deterministic payload
+    cert = bytes.fromhex('3082010a') + bytes((i * 7 + 3) & 0xFF for i in range(256))
+    apk_bytes = build_synthetic_signed_apk(cert)
+    with tempfile.TemporaryDirectory() as td:
+        apk = os.path.join(td, 'synthetic.apk')
+        open(apk, 'wb').write(apk_bytes)
+        out = os.path.join(td, 'sigs')
+        r = subprocess.run([sys.executable, os.path.join(HERE, 'sigx.py'), apk, '--out', out],
+                           capture_output=True, text=True, timeout=60)
+        assert r.returncode == 0, f'sigx exit {r.returncode}: {r.stderr}'
+        got = open(os.path.join(out, 'cert_1.der'), 'rb').read()
+        assert got == cert, f'DER round-trip mismatch: {len(got)}B vs {len(cert)}B'
+        print('sigx OK: synthetic signing block -> DER round-trip')
+
+
 if __name__ == '__main__':
     test_so_emulator()
     test_rc4_vector()
     test_recon_smoke()
     test_disasm()
+    test_sigx()
     print('trackb selftest: ALL GREEN')
