@@ -4,7 +4,8 @@
 The repair pipeline's final step: the repaired APK must be installable, which
 on API 30+ requires a v2 signature. This implements the APK Signature Scheme
 v2 wire format (the 0x7109871a block) with RSASSA-PKCS1-v1_5 + SHA2-256
-(algorithm id 0x0101) — the format every Android verifies:
+(algorithm id 0x0103 — NOT 0x0101, which declares RSASSA-PSS; a PKCS1v15
+signature under a PSS id is rejected by every real verifier):
 
   APK Signing Block: [u64 size][pairs: (u64 len, u32 id, value)...][u64 size]
                     [u64 magic "APK Sig Block 42"]
@@ -15,10 +16,11 @@ v2 wire format (the 0x7109871a block) with RSASSA-PKCS1-v1_5 + SHA2-256
   signer: [u32 sd_len][signed_data][u32 sigs_len][sigs][u32 pk_len][pk]
   signed_data: [u32 digests_len][digests][u32 certs_len][certs][u32 attrs_len][attrs]
   digest: [u32 alg_id][u32 digest_len][digest]
-  The digest covers the whole zip in 3 regions (before the block, after the
-  block to the CD, the CD + the EOCD with the block-stripped CD offset), each
-  split into 1MB chunks hashed as SHA256(0xa5 | u32le(chunk_len) | chunk),
-  top-level = SHA256(all chunk digests concatenated).
+  The digest covers the whole zip in 2 regions (entries before the block; the
+  CD + the EOCD with the block-stripped CD offset), each split into 1MB chunks
+  hashed as SHA256(0xa5 | u32le(chunk_len) | chunk); the top-level digest is
+  SHA256(0x5a | u32le(chunk_count) | all chunk digests concatenated) — the
+  0x5a count prefix is REQUIRED (a plain concatenation does not verify).
 
 Usage:
   sign2.py <in.apk> <out.apk> [--key key.der --cert cert.der]
@@ -40,7 +42,7 @@ from cryptography.x509.oid import NameOID
 import datetime
 
 V2_BLOCK_ID = 0x7109871A
-SIG_ALG_RSA_PKCS1_SHA256 = 0x0101
+SIG_ALG_RSA_PKCS1_SHA256 = 0x0103  # 0x0101 = RSASSA-PSS (wrong for PKCS1v15!)
 MAGIC = b'APK Sig Block 42'
 CHUNK = 1048576
 
@@ -53,16 +55,22 @@ def u64(b):
     return struct.pack('<Q', b)
 
 
-def chunk_digests(region: bytes) -> bytes:
-    """The per-chunk SHA-256 digests of one region (1MB chunks, each prefixed
-    0xa5 | u32le(len)). Returns the raw concatenation of chunk digests."""
-    out = b''
+def chunk_digests(region: bytes) -> list:
+    """Per-chunk SHA-256 digests of one region (1MB chunks, each hashed as
+    SHA256(0xa5 | u32le(len) | chunk)). Empty region -> one zero-length chunk."""
+    out = []
     for i in range(0, len(region), CHUNK):
         chunk = region[i:i + CHUNK]
-        out += hashlib.sha256(b'\xa5' + struct.pack('<I', len(chunk)) + chunk).digest()
+        out.append(hashlib.sha256(b'\xa5' + struct.pack('<I', len(chunk)) + chunk).digest())
     if not region:
-        out = hashlib.sha256(b'\xa5' + struct.pack('<I', 0)).digest()
+        out.append(hashlib.sha256(b'\xa5' + struct.pack('<I', 0)).digest())
     return out
+
+
+def top_digest(all_digests: list) -> bytes:
+    """The v2 top-level digest: SHA256(0x5a | u32le(count) | concatenated)."""
+    return hashlib.sha256(b'\x5a' + struct.pack('<I', len(all_digests))
+                          + b''.join(all_digests)).digest()
 
 
 def _find_cd(data: bytes):
@@ -97,13 +105,20 @@ def _lp_seq(records: list) -> bytes:
 
 def sign_v2(data: bytes, key, cert_der: bytes) -> bytes:
     cd_off, eocd_off = _find_cd(data)
-    # region 1: everything before the block; region 2: empty (the block sits
-    # immediately before the CD); region 3: the CD + the EOCD with the CD
-    # offset treated as the pre-block position (v2 digest rule).
+    # THREE sections per the v2 spec, each chunked INDEPENDENTLY:
+    #   1. ZIP entries  = [0, cd_off)
+    #   2. Central Directory = [cd_off, eocd_off)
+    #   3. EOCD, with its CD-offset field replaced by the pre-block position
+    # (chunking CD+EOCD together is a spec violation — apksigtool proved it:
+    # 3+1+1 = 5 chunks, not 4)
     region1 = data[:cd_off]
-    region3 = data[cd_off:eocd_off] + data[eocd_off:eocd_off + 16] + u32(cd_off) + data[eocd_off + 20:]
-    # ONE top-level digest over ALL chunks of ALL regions in order (v2 spec)
-    digest = hashlib.sha256(chunk_digests(region1) + chunk_digests(region3)).digest()
+    region_cd = data[cd_off:eocd_off]
+    region_eocd = data[eocd_off:eocd_off + 16] + u32(cd_off) + data[eocd_off + 20:]
+    # ONE top-level digest over ALL chunks of ALL sections in order, with the
+    # 0x5a count prefix (v2 spec — verified against apksigtool, the
+    # apksigner-derived third-party verifier)
+    digest = top_digest(chunk_digests(region1) + chunk_digests(region_cd)
+                        + chunk_digests(region_eocd))
 
     # signed_data: digests | certificates | additional attributes (empty)
     digest_record = u32(SIG_ALG_RSA_PKCS1_SHA256) + u32(len(digest)) + digest

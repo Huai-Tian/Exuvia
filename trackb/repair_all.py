@@ -28,6 +28,8 @@ wrapper patterns are generic and the definitive test is always the DEX
 cross-reference.
 """
 import argparse
+import os
+import subprocess
 import sys
 
 
@@ -39,6 +41,10 @@ def main():
     ap.add_argument('--key')
     ap.add_argument('--cert')
     ap.add_argument('--keep-shell-classes', action='store_true')
+    ap.add_argument('--reference', help='reference DEX (the unpacked original or a '
+                    'prior version) — native-stub methods frozen by the shell '
+                    '(entry lifecycle hooks) are restored from here; without it, '
+                    'the repack can only re-serialize the stub state')
     args = ap.parse_args()
 
     import os
@@ -48,6 +54,7 @@ def main():
     import repair
     import sign2
     import dexdoctor
+    import deweave
 
     # 0. triage the dump — third-party dumps arrive wounded (shell-sabotaged
     #    checksums, wiped map_off, page padding); heal before any parsing
@@ -71,6 +78,57 @@ def main():
     print('[clean] keep=%d shell=%d foreign=%d -> %s' % (len(keep), len(shell), len(foreign),
           'cleaned' if drops else 'already pure'))
 
+    # 1.5 deweave: restore the shell's woven bytecode in place (invokes the
+    # app makes to shell bridge/probe methods become the framework calls /
+    # nops they were before the packer wove them). The restored DEX must
+    # behave like the unpacked ORIGINAL — no shell classes, no shims.
+    cleaned, weave_report = deweave.deweave(cleaned)
+    if weave_report:
+        print('[deweave] %s' % '; '.join(weave_report[:2]) + (' (+%d more lines)' % (len(weave_report) - 2) if len(weave_report) > 2 else ''))
+        open(args.out + '.deweave.log', 'w').write('\n'.join(weave_report))
+    else:
+        print('[deweave] no shell weaving found')
+
+    # 1.6 repack (dexlib2): re-serialize the whole DEX into a fresh,
+    # spec-standard layout. Patching a memory-layout dump's map NEVER
+    # converges (ART's padding/overlap/walk checks each reject the next
+    # irregularity); re-serialization rebuilds every section compactly with
+    # a canonical map — the same layout the smali ecosystem has shipped for
+    # two decades. Semantics preserved (classes/methods/code/annotations).
+    # heavy toolchain jars live user-side (workspace root /tools/dexlib) —
+    # same policy as apktool.jar; the git repo ships only source
+    repack_dir = os.environ.get('EXUVIA_DEXLIB', '/workspace/tools/dexlib')
+    jars = 'dexlib2-2.5.2.jar:util-2.5.2.jar:guava-31.1-jre.jar:.'
+    if os.path.exists(os.path.join(repack_dir, 'dexlib2-2.5.2.jar')) and \
+            os.path.exists(os.path.join(repack_dir, 'Repack.class')):
+        tmp_in = args.out + '.repack_in.dex'
+        tmp_out = args.out + '.classes_repacked.dex'
+        open(tmp_in, 'wb').write(cleaned)
+        if args.reference and os.path.exists(os.path.join(repack_dir, 'Restore.class')):
+            # restore: native stubs get reference bodies + standard layout
+            r = subprocess.run(['java', '-Xmx2g', '-cp', jars,
+                                'Restore', tmp_in, args.reference, tmp_out],
+                               cwd=repack_dir, capture_output=True, text=True, timeout=600)
+            verb = 'restore'
+        else:
+            # repack: just standard layout (no reference)
+            r = subprocess.run(['java', '-Xmx2g', '-cp', jars,
+                                'Repack', tmp_in, tmp_out],
+                               cwd=repack_dir, capture_output=True, text=True, timeout=600)
+            verb = 'repack'
+        if r.returncode == 0 and os.path.exists(tmp_out):
+            cleaned = open(tmp_out, 'rb').read()
+            os.remove(tmp_in)
+            os.remove(tmp_out)
+            for line in [l for l in (r.stdout + '').strip().split('\n') if l.strip()]:
+                print('[%s] %s' % (verb, line))
+            print('[%s] dexlib2 standard layout (%d bytes)' % (verb, len(cleaned)))
+        else:
+            print('[%s] FAILED — falling back to the patched dump layout' % verb)
+            print(r.stdout + r.stderr)
+    else:
+        print('[repack] dexlib2 not available — using the patched dump layout')
+
     # 2. repair (reuse the module's main flow)
     import zipfile
     klasses = set(n for _, n, _ in keep)
@@ -86,20 +144,36 @@ def main():
     if fixes:
         print('[dex-fix] %s' % ', '.join(fixes))
     removed = []
+    # zipalign semantics (the R+ install gate): every entry's DATA section
+    # 4-byte aligned via local-header extra-field padding, resources.arsc
+    # kept STORED. Python's zipfile never aligns — an unaligned arsc is
+    # REJECTED on Android 11+ with "-124 Failed parse during installPackageLI".
     with zipfile.ZipFile(args.out, 'w') as zo:
-        for info in zipfile.ZipFile(args.packed).infolist():
+        zin = zipfile.ZipFile(args.packed)
+        for info in zin.infolist():
             name = info.filename
-            if name == 'AndroidManifest.xml':
-                zo.writestr(name, manifest)
-                continue
-            if name == 'classes.dex':
-                zo.writestr(name, dex_fixed)
-                continue
             if any(p in name for p in repair.SHELL_ASSET_PATTERNS) and name.startswith('assets/'):
                 removed.append(name)
                 continue
-            zo.writestr(info, zipfile.ZipFile(args.packed).read(name))
-    print('[repair] shell assets removed: %d' % len(removed))
+            if name == 'AndroidManifest.xml':
+                content = manifest
+            elif name == 'classes.dex':
+                content = dex_fixed
+            else:
+                content = zin.read(name)
+            if name == 'resources.arsc':
+                info.compress_type = zipfile.ZIP_STORED  # R+ requires uncompressed
+            # predict the local header: [30B fixed][name][extra] -> align data
+            # (replace extra with pure padding, zipalign-style — never append
+            # behind a possibly-structured extra)
+            while True:
+                data_off = zo.fp.tell() + 30 + len(info.filename) + len(info.extra)
+                need = (-data_off) % 4
+                if not need:
+                    break
+                info.extra = b'\x00' * (len(info.extra) + need)
+            zo.writestr(info, content)
+    print('[repair] shell assets removed: %d (all entries 4-byte aligned)' % len(removed))
 
     # 3. sign
     data = open(args.out, 'rb').read()

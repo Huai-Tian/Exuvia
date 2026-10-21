@@ -522,7 +522,12 @@ def test_repair_pipeline():
     key, cert = sign2.gen_key_cert()
     cert_der = cert.public_bytes(sign2.serialization.Encoding.DER)
     signed = sign2.sign_v2(blob, key, cert_der)
-    # re-verify: the digest + the RSA (independent recompute)
+    # re-verify with an INDEPENDENT implementation (never trust the module's
+    # own math — the r31 lesson: an ID/padding mismatch and a missing top-level
+    # 0x5a prefix both survived self-verification because the verifier shared
+    # the signer's assumptions). The verifier below is written from the SPEC:
+    # chunk = SHA256(0xa5|u32le(len)|chunk); top = SHA256(0x5a|u32le(count)|...);
+    # padding is selected BY ALGORITHM ID (0x0103 -> PKCS1v15, 0x0101 -> PSS).
     import struct as st
     import hashlib
     cd_off, eocd_off = sign2._find_cd(signed)
@@ -531,9 +536,16 @@ def test_repair_pipeline():
     size = st.unpack_from('<Q', signed, magic_off - 8)[0]
     block_start = cd_off - size - 8
     region1 = signed[:block_start]
-    region3 = (signed[cd_off:eocd_off] + signed[eocd_off:eocd_off + 16]
-               + st.pack('<I', block_start) + signed[eocd_off + 20:])
-    computed = hashlib.sha256(sign2.chunk_digests(region1) + sign2.chunk_digests(region3)).digest()
+    region_cd = signed[cd_off:eocd_off]
+    region_eocd = (signed[eocd_off:eocd_off + 16]
+                   + st.pack('<I', block_start) + signed[eocd_off + 20:])
+    def spec_chunks(b):
+        cs = [b[i:i + 1048576] for i in range(0, len(b), 1048576)] or [b'']
+        return [hashlib.sha256(b'\xa5' + st.pack('<I', len(c)) + c).digest() for c in cs]
+    # THREE sections chunked independently (spec) — never merge CD with EOCD
+    all_dg = spec_chunks(region1) + spec_chunks(region_cd) + spec_chunks(region_eocd)
+    computed = hashlib.sha256(b'\x5a' + st.pack('<I', len(all_dg))
+                              + b''.join(all_dg)).digest()
     # locate the claimed digest + verify
     pairs = {}
     p = block_start + 8
@@ -553,14 +565,20 @@ def test_repair_pipeline():
     pk, pos = read_lp(signer, pos)
     dg_seq, _ = read_lp(sd, 0)
     dg_rec, _ = read_lp(dg_seq, 0)
+    alg_id = st.unpack_from('<I', dg_rec, 0)[0]
+    assert alg_id == 0x0103, 'algorithm id must declare PKCS1v15 (got 0x%04x)' % alg_id
     claimed = dg_rec[8:40]
     assert claimed == computed, 'v2 digest mismatch'
     sig_rec, _ = read_lp(sigs_seq, 0)
+    sig_alg_id = st.unpack_from('<I', sig_rec, 0)[0]
+    assert sig_alg_id == alg_id, 'digest vs signature algorithm ids differ'
     sig = sig_rec[8:8 + st.unpack_from('<I', sig_rec, 4)[0]]
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.asymmetric import padding as pad
     from cryptography.hazmat.primitives.serialization import load_der_public_key
-    load_der_public_key(pk).verify(sig, sd, pad.PKCS1v15(), hashes.SHA256())
+    # padding selected BY the declared ID — the way a real verifier does it
+    sig_pad = {0x0103: pad.PKCS1v15, 0x0102: pad.PSS, 0x0101: pad.PSS}[sig_alg_id]()
+    load_der_public_key(pk).verify(sig, sd, sig_pad, hashes.SHA256())
     # the zip still readable + the EOCD CD offset points past the block
     zz = zf.ZipFile(io.BytesIO(signed))
     assert zz.read('a.txt') == b'hello'
@@ -719,15 +737,32 @@ def test_dexdoctor():
     # wound D: whole-memory dump carrying the shell's runtime workspace
     # (high-entropy crypto material) past the map_list
     wd = bytearray(healthy) + bytes(range(256)) * 100
+    # wound E: repack toolchain bug — one map section split into two entries
+    # (ART rejects the whole DEX with "Duplicate map section")
+    we = bytearray(healthy)
+    mo = st.unpack_from('<I', we, 52)[0]
+    items = [list(st.unpack_from('<HHII', we, mo + 4 + k * 12)) for k in range(st.unpack_from('<I', we, mo)[0])]
+    split = []
+    for it in items:
+        if it[0] == 0x0001 and it[2] == 2:  # string_ids (fixed-size): split in half
+            split.append([0x0001, 0, 1, it[3]])
+            split.append([0x0001, 0, 1, it[3] + 4])
+        else:
+            split.append(list(it))
+    split.sort(key=lambda x: x[3])
+    new_map = st.pack('<I', len(split)) + b''.join(st.pack('<HHII', t, u, c, o) for t, u, c, o in split)
+    del we[mo:]
+    we += new_map
+    st.pack_into('<I', we, 32, len(we))  # file_size grows by the extra entry
     for name, wound in (('A sums+file_size', wa), ('B map_off', wb), ('C padding', wc),
-                       ('D shell workspace', wd)):
+                       ('D shell workspace', wd), ('E duplicate map section', we)):
         t = dexdoctor.Triage(bytes(wound)).diagnose()
         assert t.issues, 'wound %s not detected' % name
         healed = t.fix()
         assert healed == healthy, 'wound %s healed imperfectly (bytes differ)' % name
         post = dexdoctor.Triage(healed).diagnose()
         assert not post.issues, 'wound %s leaves residual: %s' % (name, post.issues)
-    print('dexdoctor OK: 4 planted pathologies detected + healed to exact original bytes')
+    print('dexdoctor OK: 5 planted pathologies detected + healed to exact original bytes')
 
 
 if __name__ == '__main__':

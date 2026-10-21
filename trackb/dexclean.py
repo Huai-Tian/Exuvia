@@ -98,11 +98,13 @@ class Dex:
             p, ok = start, True
             while p < end:
                 size = struct.unpack_from('<I', self.d, p)[0]
-                if size > 1000 or p + 4 + size * w > end:
+                if size > 1000 or p + 4 + size * w > end + 4:
                     ok = False
                     break
                 p = (p + 4 + size * w + 3) & ~3
-            if ok and p == end:
+            # exact tile OR a final padding overhang of <=4 bytes (memory-
+            # layout dexes place sections at NON-4-aligned offsets)
+            if ok and end <= p <= end + 4:
                 return w
         return 4
 
