@@ -4,17 +4,21 @@
 
 ## 📖 Introduction
 
-**Exuvia** (蝉蜕) is a deterministic Android unpacking / code-recovery pipeline built for AI agents, aimed at the new generation of enterprise-grade packers.
+**Exuvia** (蝉蜕) is a deterministic Android unpacking / repair pipeline built for AI agents, aimed at the new generation of enterprise-grade packers. **Two product lines, one binary**:
 
-One Rust binary performs every mechanical step at **zero token cost** — unpack, inventory, entropy measurement, DEX parsing, JNI symbol location, decrypt-routine candidate locating, evidence slicing — and compresses every genuine gap of intelligence into a **work package** that an external LLM solves. The tool itself never calls a model and never pretends to understand: wherever judgment is needed, a formatted interface hands it to the side that actually has intelligence. Verification of returned solutions is *not* outsourced either — structural assertions live on the Rust-trusted side, numeric test pairs run in a hardened `python3 -I` sandbox, and the word "passed" is one only Rust gets to say.
+- **Unpacking (dissection + debt outsourcing)**: `exuvia packed.apk` produces the full dissection handoff (L1 skeleton + debt list + evidence slices); genuine intelligence gaps are compressed into work packages for an external LLM, settled back through the four-gate merge. Zero token cost on the tool side — it never calls a model and never pretends to understand; the word "passed" is one only Rust gets to say.
+- **Repair (dump → runnable APK)**: `exuvia repair packed.apk dumped.dex -o out.apk` — third-party dumpers are everywhere, but nobody repairs the dumped DEX back into an APK that actually launches (the shell's wrapper Application, stub dex, native loader assets, woven bytecode and frozen native stubs are still in the package). Pipeline: dump triage → class cleaning → deweaving → method-body restoration → manifest surgery → zipalign → v2 signing.
 
-The ontology is deliberate: **body** (a single binary, including the embedded sandbox runner — nothing ever written to disk), **soul** (a single SKILL.md file carrying the methodology, the format fixtures that double as CI golden files, and the profile fence), **interface** (three protocol streams: handoff / goal / proposal). There is no schema file — the serde types are the format; `exuvia schema --dump` derives machine-readable views on demand.
+The ontology is deliberate: **body** (a single binary — including the embedded sandbox runner, fed to `python3 -I` via stdin, zero disk writes; and the embedded repair toolchain, extracted to a temp dir at runtime), **soul** (a single SKILL.md file carrying the methodology, the format fixtures that double as CI golden files, and the profile fence), **interface** (three protocol streams: handoff / goal / proposal). There is no schema file — the serde types are the format; `exuvia schema --dump` derives machine-readable views on demand.
 
 **Zero learning curve by design**: Exuvia does not rely on accumulated experience. The first analysis of an unknown packer already runs at peak performance because the judgment is injected through architecture (structured starting point, preloaded common sense, per-stub work packages, dual-anchor verification) — not through a fingerprint database that grows with history. When a new packer generation appears, that is once again "a first time that feels like a second time".
 
 > **Using an AI assistant (Copilot / Claude / GPT ...) for development on this project?** Read [README_AGENT.md](README_AGENT.md) first — it is written specifically for AI and contains the project's many **counter-intuitive design decisions and hard red lines**. Skipping it and editing code directly is very likely to reintroduce a decision that was deliberately overturned.
 
 ## ✨ Features
+
+- **One-command repair: dump → installable, runnable APK** (product line b)
+  `exuvia repair packed.apk dumped.dex -o restored.apk [--dump third_party_dump.dex]...` — dump triage (dexdoctor heals the known dump pathology catalog P0-P11) → class cleaning (shell/foreign classes, zero false kills) → deweaving (bridge invokes restored to the framework calls they replaced) → method-body restoration (shell-extracted native stubs merged back from any source that carries the body; with no source, a framework-contract fallback guarantees install+launch+no-crash, with the boundary reported honestly) → manifest surgery (wrapper Application removed) → zipalign (the R+ install gate) → fresh v2 signature. **Closed through 12 rounds of on-device feedback on a real enterprise-packed sample; dumps from two different dumpers both run on real devices.**
 
 - **Drag in, get a map — zero questions, zero tokens**
   `exuvia packed.apk` produces the full dissection handoff: `REPORT.json` + `REPORT.md` (human half), `debt.json` (the honest blocklist), `evidence/` (hash-anchored byte slices), `workspace/`, `attempts.log`. Non-interactive is a hard constraint — any prompt would kill the agent scenario.
@@ -77,9 +81,14 @@ Build from source (no release binaries yet — the planned release form is two p
 cargo build --release
 ```
 
-Prerequisite: a system `python3` on PATH. It is the sandbox executor for merge-gate semantic verification — a *bound* component of the design (IDA-style assumption), never bundled; missing or fake = `installation-broken`, and the tool refuses to run rather than degrade.
+Prerequisite: a system `python3` on PATH — it is the sandbox executor for merge-gate semantic verification and the runtime for the embedded repair toolchain, a *bound* component of the design (IDA-style assumption), never bundled; missing or fake = `installation-broken`, and the tool refuses to run rather than degrade. The repair pipeline's heavy dependency (`java` + dexlib2 jars) stays user-side (sources ship in-repo under `tools/dexlib/`; the jar policy matches apktool.jar) — absent, the pipeline degrades honestly and reports it.
 
 ```bash
+# 0) Repair a dump (the most common path; independent of the outsourcing loop)
+#     All shell markers removed + method-body restoration + v2 signing, one command:
+exuvia repair packed.apk dumped.dex -o restored.apk \
+  --dump third_party_dump.dex    # optional: body-carrying third-party dump, repeatable
+
 # 1) Dissect (zero tokens)
 exuvia packed.apk
 
@@ -119,6 +128,7 @@ exuvia unpack validate handoff/
 | `--profile <file>` | Override the judgment embedded in the SKILL.md fence (TOML; parse failure = installation-broken) |
 | `--json` | Output is JSON anyway; this flag JSON-ifies `--version` too |
 | `--version` | Version + supported protocol versions |
+| `exuvia repair <packed.apk> <dumped.dex> -o <out.apk> [--dump <dex>]... [--reference <dex>]` | **Repair pipeline**: dump → runnable APK (triage → cleaning → deweaving → body restoration → surgery → zipalign → v2 sign); `--dump` = body-carrying third-party dumps (production path, complementary), `--reference` = the unpacked original (internal testing only) |
 | `exuvia next --goal <file>` | Pack the work package (scope-gate source) |
 | `exuvia schema --dump <handoff\|goal\|proposal>` | Derive machine-readable format views on demand (no static schema files) |
 | `exuvia unpack merge <dir>` | Proposal return flow: four gates → settle |
@@ -130,14 +140,17 @@ Exit codes: **2** = `installation-broken` (own components; refuse to run — the
 
 - **OS**: Linux x64 (current CI baseline). A Windows exe is a planned release target; the OS-level sandbox currently implements Linux rlimits, with the Windows Job Object path scheduled for the release engineering phase.
 - **Build**: Rust stable (edition 2024).
-- **Runtime**: a system `python3` (sandbox verification layer — bound, never bundled); no root required; expect hostile inputs by default and prefer a disposable snapshot environment.
+- **Runtime**: a system `python3` (sandbox verification layer + runtime for the embedded repair toolchain — bound, never bundled); the repair pipeline additionally needs user-side `java` + dexlib2 jars (sources ship in-repo under `tools/dexlib/`; the jar policy matches apktool.jar); no root required; expect hostile inputs by default and prefer a disposable snapshot environment.
 - **No other runtime is shipped or required**: the pipeline carries no Python distribution of its own.
 
 ## ⚠️ Project Status
 
-Research-grade, v0.1. The full protocol loop (`packed.apk` → next → merge → validate) is implemented and graduated on synthetic samples (36 tests, CI-enforced fixture↔serde double anchoring, byte-deterministic outputs). **It has not yet been battle-tested against a real packed sample** — the first dissection of a real first-generation packer is the next milestone, and everything after that is expected to teach the tool some humility.
+Research-grade, v0.1. Both product lines have been battle-tested against a real enterprise-packed sample:
 
-Honest scope notes — static/simulated analysis cannot solve these, and the debt list says so instead of pretending: device-environment-derived keys (IMEI, build fingerprint), network-fetched payloads, streamed DEX assembly, and full semantic recovery of VMP (that last one is Track C / L3 territory — "equivalent semantics", not original bytes).
+- **Repair pipeline**: closed through **12 rounds of on-device feedback** — dumps from two different dumpers (compact-repacked / memory-expanded layouts), repaired by the same pipeline, **both run normally on a real device** (install, launch, no crash). A local five-gate acceptance suite (zip / pathology / strict decompilation / content idempotency / signature) must be ALL GREEN before anything ships.
+- **Unpacking**: the reference shell's full crypto chain is solved (variant RC4, SM4-CFB, key derivation, runtime-table permutation — coordinates in [README_AGENT.md](README_AGENT.md) §0.5); the protocol loop (`packed.apk` → next → merge → validate) graduated on synthetic samples (CI-enforced fixture↔serde double anchoring, byte-deterministic outputs).
+
+Honest scope notes — static/simulated analysis cannot solve these, and the debt list says so instead of pretending: device-environment-derived keys (IMEI, build fingerprint), network-fetched payloads, streamed DEX assembly, and full semantic recovery of VMP (Track C / L3 territory — "equivalent semantics", not original bytes). One known semantic boundary of the repair line, reported honestly: **when a shell-extracted method has no body-carrying source at all, the framework-contract fallback guarantees install + launch + no crash, but that method's own business logic is absent** (the output JSON reports the synthesized count).
 
 The end state is defined behaviorally, not byte-exactly: an installable, runnable APK with behavioral parity. Restoring the original bytes is the most reliable *means* for one- and two-generation packers; equivalent implementations serve where original bytes never existed.
 
@@ -192,7 +205,7 @@ Exuvia restores or faithfully reproduces behavior; it does not tamper. Signature
 Unpacking and repackaging may violate the terms of service of third-party software and the laws of your jurisdiction. The developer and contributors **are not responsible for any legal liabilities or other consequences** arising from such use.
 
 - **Research Quality**:
-The pipeline is research-grade and has not yet been validated against real-world packer samples; results may be incomplete (the debt list is a deliverable, not a failure). Run analysis on samples in an appropriate isolated environment.
+The pipeline is research-grade and validated so far against one real enterprise-packed sample family (plus synthetic fixtures); results may be incomplete (the debt list is a deliverable, not a failure). Run analysis on samples in an appropriate isolated environment.
 
 - **No Warranty**:
 This software is provided under the terms of its license, **without any express or implied warranties**, including but not limited to the warranties of merchantability, fitness for a particular purpose, and non-infringement.

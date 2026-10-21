@@ -4,9 +4,10 @@
 
 ## 📖 介绍
 
-**Exuvia**（蝉蜕）是一个**面向 AI Agent 的 Android 通用脱壳 / 代码恢复流水线**，主攻新一代企业级加固壳。
+**Exuvia**（蝉蜕）是一个**面向 AI Agent 的 Android 通用脱壳 / 修复流水线**，主攻新一代企业级加固壳。**两条产品线，一个二进制**：
 
-一个 Rust 单二进制承担全部机械工作、**零 token 消耗**——解包、清点、熵测量、DEX 解析、JNI 符号定位、解密例程候选定位、证据切片——并把每一处真正的智能缺口压缩成**卡点工作包**，外包给外部 LLM 求解。工具本体不调用任何模型，也不假装理解：每一处需要判断的位置，都被一道格式化接口推给了真正拥有智能的那一侧。回流的解法同样不被"外包判断"——结构断言驻留在 Rust 可信侧，数值测试对跑在加固过的 `python3 -I` 沙箱里，而"通过"这两个字只有 Rust 有资格说。
+- **脱壳（剖析 + 卡点外包）**：`exuvia packed.apk` 产出完整剖析包（L1 骨架 + 欠账清单 + 证据切片），智能缺口压缩成工作包外包给外部 LLM，回流经四层闸门销账。全程零 token 消耗，工具本体不调用任何模型、也不假装理解——每一处需要判断的位置，都被一道格式化接口推给了真正拥有智能的那一侧；"通过"两个字只有 Rust 有资格说。
+- **修复（dump → 可运行 APK）**：`exuvia repair packed.apk dumped.dex -o out.apk` 单命令修复——第三方脱壳服务遍地都是，但没人把 dump 出的 DEX 修回能启动的 APK（壳的 wrapper Application、stub dex、native 加载资产、织入字节码、native stub 都还在包里）。管线：病理分诊 → 类清理 → 解织入 → 方法体还原 → manifest 手术 → zipalign → v2 签名。
 
 本体论是刻意的：**躯体**（单二进制，内嵌沙箱执行器——全程零落盘）、**灵魂**（单文件 SKILL.md：方法论、同时充当 CI golden fixture 的格式示例、profile fence）、**接口**（三条协议数据流：handoff / goal / proposal）。schema 文件不存在——serde 类型即格式；`exuvia schema --dump` 按需派生机器可读视图。
 
@@ -15,6 +16,9 @@
 > **使用 AI 助手（Copilot / Claude / GPT 等）参与本项目的二次开发？** 请先阅读 [README_AGENT.md](README_AGENT.md)——它专为 AI 编写，包含本项目大量**反直觉的设计决策与红线约束**，跳过它直接改代码极可能把已被刻意推翻的决策改回去。
 
 ## ✨ 功能特性
+
+- **一键修复 dump → 可安装可运行的 APK**（产品线 b）
+  `exuvia repair packed.apk dumped.dex -o restored.apk [--dump 第三方dump.dex]...`：病理分诊（dexdoctor，P0-P11 dump 病谱全愈合）→ 类清理（壳类/外来类零误杀）→ 解织入（桥调用还原为原框架调用）→ 方法体还原（壳抽取的 native stub 从任何携带方法体的来源合并还原；无来源时框架契约兜底——产物可安装可启动不崩，如实标注业务逻辑边界）→ manifest 手术（wrapper Application 摘除）→ zipalign（R+ 安装门）→ v2 签名。**经真实加固样本 12 轮真机反馈闭环验证，两个不同脱壳器的 dump 双双真机成功**。
 
 - **拖入即得地图——零提问、零 token**
   `exuvia packed.apk` 产出完整剖析包：`REPORT.json` + `REPORT.md`（人类可读半边）、`debt.json`（诚实的欠账清单）、`evidence/`（hash 锚定的字节切片）、`workspace/`、`attempts.log`。非交互是硬约束——任何交互式提问都会直接杀死 Agent 场景。
@@ -77,9 +81,14 @@ exuvia packed.apk ──► handoff/   (REPORT.json+md · debt.json · evidence/
 cargo build --release
 ```
 
-前置：PATH 上有系统 `python3`。它是 merge 闸门语义验证的沙箱执行器——设计上的*绑定*组件（IDA 式前提），绝不捆绑；缺失或伪造 = `installation-broken`，工具拒绝运行而不是降级。
+前置：PATH 上有系统 `python3`。它是 merge 闸门语义验证的沙箱执行器，也是修复管线内嵌工具链的运行时——设计上的*绑定*组件（IDA 式前提），绝不捆绑；缺失或伪造 = `installation-broken`，工具拒绝运行而不是降级。修复管线的重依赖（`java` + dexlib2 jar）用户侧安置、git 只发源码——与 apktool.jar 同政策；缺席时管线如实降级并报告。
 
 ```bash
+# 0) 修复一条 dump（最常用路径，独立于外包循环）
+#    壳的手术标记全清 + 方法体还原 + v2 签名，一条命令：
+exuvia repair packed.apk dumped.dex -o restored.apk \
+  --dump third_party_dump.dex    # 可选：携带方法体的第三方 dump，可多次，互补还原
+
 # 1) 剖析（零 token）
 exuvia packed.apk
 
@@ -119,6 +128,7 @@ exuvia unpack validate handoff/
 | `--profile <file>` | 覆盖 SKILL.md fence 内嵌的默认判断（TOML；解析失败 = installation-broken） |
 | `--json` | 输出本就恒 JSON；此 flag 连 `--version` 也 JSON 化 |
 | `--version` | 版本 + 支持的协议版本 |
+| `exuvia repair <packed.apk> <dumped.dex> -o <out.apk> [--dump <dex>]... [--reference <dex>]` | **修复管线**：dump → 可运行 APK（病理分诊→清理→解织入→方法体还原→manifest 手术→zipalign→v2 签名）；`--dump` = 携带方法体的第三方 dump（生产主路径，可多来源互补），`--reference` = 原包（仅内部测试） |
 | `exuvia next --goal <file>` | 打包卡点工作包（范围闸数据源） |
 | `exuvia schema --dump <handoff\|goal\|proposal>` | 按需派生机器可读格式视图（无静态 schema 文件） |
 | `exuvia unpack merge <dir>` | proposal 回流：四层闸门 → 销账 |
@@ -130,14 +140,17 @@ exuvia unpack validate handoff/
 
 - **操作系统**：Linux x64（当前 CI 基线）。Windows exe 是计划中的发行目标；OS 级沙箱当前只实现 Linux rlimit，Windows Job Object 路径排在 release 工程期。
 - **构建**：Rust stable（edition 2024）。
-- **运行**：系统 `python3`（沙箱验证层——绑定，绝不捆绑）；无需 root；默认预期敌意输入，建议在可弃置的一次性快照环境中分析。
+- **运行**：系统 `python3`（沙箱验证层 + 修复管线内嵌工具链的运行时——绑定，绝不捆绑）；修复管线另需用户侧 `java` + dexlib2 jar（源码随仓库 `tools/dexlib/`，jar 同 apktool 政策不发行）；无需 root；默认预期敌意输入，建议在可弃置的一次性快照环境中分析。
 - **不发行也不需要任何其他运行时**：流水线不携带任何自有 Python 发行物。
 
 ## ⚠️ 项目状态
 
-研究级，v0.1。协议全链（`packed.apk` → next → merge → validate）已实现，并在合成样本上毕业（36 项测试、CI 强制的 fixture↔serde 双向锚定、产物字节确定）。**尚未与真实加固样本交手**——真实一代壳的第一次剖析是下一个里程碑，其后的一切都预期会让这门工具学会谦逊。
+研究级，v0.1。两条产品线均已与真实加固样本交手：
 
-诚实的范围边界——静态/模拟分析解决不了这些，欠账清单会如实标注而不是假装能解：设备环境派生的 key（IMEI、build fingerprint）、网络拉取的 payload、流式拼装的 DEX、VMP 的完整语义还原（最后一项属轨道 C / L3 范畴——交付"等价语义"，不是原始字节）。
+- **修复管线**：经真实企业级加固样本（360 技术族）**12 轮真机反馈闭环**——两个不同脱壳器产出的 dump（紧凑重排型 / 内存展开型）经同一管线修复后**双双真机正常运行**（安装、启动、无崩溃）；本地五重验收门（zip / 病理 / 严格反编译 / 内容幂等 / 签名）ALL GREEN 才出仓。
+- **脱壳剖析**：语料壳的解密链已全解（变体 RC4、国密 SM4-CFB、密钥派生、运行时表置换），全链坐标见 [README_AGENT.md](README_AGENT.md) §0.5；协议全链（`packed.apk` → next → merge → validate）在合成样本上毕业（CI 强制的 fixture↔serde 双向锚定、产物字节确定）。
+
+诚实的范围边界——欠账清单与产物统计会如实标注而不是假装能解：设备环境派生的 key（IMEI、build fingerprint）、网络拉取的 payload、流式拼装的 DEX、VMP 的完整语义还原（轨道 C / L3 范畴——交付"等价语义"）；以及修复线的已知语义边界——**壳抽取的方法在无任何来源携带其方法体时，契约兜底体只保证可安装可启动不崩，该方法自身的业务逻辑缺席**（产物 JSON 如实标注合成数量）。
 
 终点按行为定义，不按字节：一台**行为一致（behavioral parity）的可安装、可运行 APK**。还原原始字节是一/二代壳最可靠的*手段*；原始字节不存在的四代壳，由等效实现顶上。
 
@@ -185,7 +198,7 @@ Exuvia 还原或忠实复现行为，不做篡改。签名自校验逻辑与其�
 脱壳与重打包**可能违反第三方软件的服务条款及你所在司法辖区的法律**。使用前请自行评估风险。开发者与贡献者**对由此产生的任何法律责任或其他后果概不负责**。
 
 - **研究级质量**：
-本流水线为研究级，尚未在真实加固样本上验证；结果可能不完整（欠账清单是交付物，不是失败）。请在适当隔离的环境中分析样本。
+本流水线为研究级，迄今在一个真实企业级加固样本族（及合成语料）上验证；结果可能不完整（欠账清单是交付物，不是失败）。请在适当隔离的环境中分析样本。
 
 - **无担保**：
 本软件按其许可证条款提供，**不附带任何明示或默示的担保**，包括但不限于适销性、特定用途适用性与非侵权性。

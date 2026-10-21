@@ -1,9 +1,10 @@
 # SKILL — Exuvia
 
-Exuvia: deterministic Android unpacking pipeline. `exuvia packed.apk` → dissection handoff (L1 skeleton + debt + evidence), zero LLM tokens. §3/§4 are format DRAFT v0 (maintainer audits fields); fixtures here are the source of truth for serde types.
+Exuvia: deterministic Android unpacking + repair pipeline. Two product lines in one binary: (a) `exuvia packed.apk` → dissection handoff (L1 skeleton + debt + evidence), zero LLM tokens; (b) `exuvia repair` → one-command dump-to-runnable-APK repair (§7). §3/§4 are format DRAFT v0 (maintainer audits fields); fixtures here are the source of truth for serde types.
 
 ## 1. Actions
 
+0. REPAIR (independent of the outsourcing loop): `exuvia repair <packed.apk> <dumped.dex> -o <out.apk> [--dump <dex>]...` — §7. Skip this loop entirely.
 1. READ `handoff/REPORT.json` + `debt.json` (§2)
 2. WRITE `goal.json` (§3) — semantic targeting is yours; the tool executes formatted targets only
 3. SUBMIT proposal package (§4); on rejection: read error → patch → resubmit (§5)
@@ -140,13 +141,13 @@ Work packages may inject family guidance — follow it first; it outranks genera
 - debt entry = facts + difficulty signals, no cost estimates (you price tokens):
   - `status = blocked-solvable` → your arena; `out-of-scope` → spend nothing;
   - `jni_calls` high → JNI idiom lens; `vm_handlers` high → VMP, weigh out-of-scope (§6 step 2) first; `opcode_entropy` high without vm_handlers → control-flow obfuscation, tractable;
-  - thresholds live in the fence (§7).
+  - thresholds live in the fence (§8).
 - Two output paths per debt entry, chosen by cost comparison (yours, from the facts above): `recovered` (restore original bytes) vs `equivalent` (read the L2 decompilation of the native code, write a functionally equivalent implementation). When recovery cost far exceeds equivalent-implementation cost, take the `equivalent` path — but only if `accepts_equivalent` is set in the goal (§3).
 - `attempts.log`: read before attempting. A path that died twice is dead. Rejected proposals increment `attempts` on every claimed debt that exists in the handoff.
 
 ## 3. goal.json — DRAFT v0
 
-Every field machine-decidable. Categories are named lookup tables defined in the fence (§7).
+Every field machine-decidable. Categories are named lookup tables defined in the fence (§8).
 
 | Field | Semantics |
 |---|---|
@@ -245,7 +246,40 @@ Documented error codes (this set is authoritative; do not rely on others):
 5. Rejected twice → hint holds the reason; one more fix with a different approach. A third identical approach is waste.
 6. Still stuck → attempts.log-grade note: tried / why failed / next. Honest debt is a valid deliverable.
 
-## 7. Profile fence
+## 7. Repair pipeline (`exuvia repair`)
+
+The industry gap this closes: dumpers (third-party services, FART, frida hooks) produce DEX, but nobody repairs the APK so the dumped DEX actually LAUNCHES — the shell's markers (wrapper Application in the manifest, stub dex, native loader assets, woven bytecode, frozen native stubs) are still in the APK. `exuvia repair` removes the shell's protection and rebuilds an installable, v2-signed APK in one command:
+
+```bash
+exuvia repair packed.apk dumped.dex -o restored.apk \
+  [--dump third_party_dump.dex]... [--reference original_classes.dex]
+```
+
+Stages (all embedded in the binary; output JSON reports counts per stage):
+
+| Stage | Tool | What it does |
+|---|---|---|
+| doctor | dexdoctor | triage & heal dump pathologies (sabotaged checksums, wiped map_off, page padding, map section anomalies P1-P11) |
+| clean | dexclean | drop shell/foreign class_defs (reachability from manifest components; R8-obfuscation aware) |
+| deweave | deweave | restore shell-woven bytecode in place (bridge invokes → the framework calls they replaced; probes → nops) |
+| restore | dexlib2 Restore | merge method bodies for shell-extracted stubs from every source that carries them (§ sources below) |
+| stubsafe | dexlib2 StubSafe | synthesize contract-equivalent bodies for lethal stubs no source could fill; final standard-layout re-serialization |
+| surgery | axmltool+repair | remove `<application android:name="WRAPPER">`, strip shell asset entries, swap classes.dex |
+| sign | sign2 | fresh APK v2 signature (RSASSA-PKCS1+SHA2-256) + zipalign semantics (4-byte aligned entries, resources.arsc STORED) |
+
+**Method-body sources, in order** (shell extraction freezes methods as `native + no code_item` — the body lived in the runtime hook; once the shell is gone such a stub dies with UnsatisfiedLinkError):
+
+- `--dump <dex>` (repeatable) — third-party dumps / earlier unpack-stage output. THE PRODUCTION PATH: a dump taken at the right moment carries decrypted bodies; several dumps are complementary (each source is tried; any source carrying a body wins).
+- `--reference <dex>` — the unpacked original. INTERNAL TESTING ONLY (production has no original; same merge mechanism as `--dump`).
+- no source — StubSafe fallback: `native + framework-lifecycle name` is the shell's tell (a legal native lifecycle override cannot exist — the template-method contract requires the super chain). StubSafe synthesizes the contract-equivalent minimal body (`invoke-super {pN}, Super.sameSignature` + return, ACC_NATIVE cleared). Everything else native is KEPT — a legal JNI declaration backed by a `.so` still in the APK is a necessary, side-effect-free leftover we reuse rather than re-invent.
+
+**Known semantic boundary (honest)**: a contract-equivalent body satisfies the framework contract (installs, launches, no crash) but carries no business logic. If `onCreate` was extracted and NO source carries its body, the activity shows a blank UI — the body is simply not present in any accessible carrier (method-level lazy decryption never writes it back; 32 fulldump dexes verified zero hits on the reference corpus). Body recovery requires a source; the contract body guarantees survival.
+
+**Runtime prerequisites** (heavy deps stay user-side, apktool-style — the repo ships source only): system `python3`; `java` + dexlib2 jars + `Restore.class`/`StubSafe.class` under `EXUVIA_DEXLIB` (default `/workspace/tools/dexlib`; `tools/dexlib/*.java` sources ship in-repo — compile with the same classpath the other tools use). Absent dexlib2 → the pipeline degrades honestly (stubsafe/repack skipped, patched dump layout kept; the run reports it).
+
+Output JSON carries: `doctor_fixes`, `deweave_restored`, `restore_count` (bodies merged from sources), `stubsafe_count` (contract bodies synthesized), `surgery_removed`, `shell_assets_removed`, `final_size`, full `log`.
+
+## 8. Profile fence
 
 ```toml profile
 # anchor: info string "toml profile". Rust extracts + parses at startup;
@@ -273,12 +307,13 @@ guidance = [
 ]
 ```
 
-## 8. Version anchors
+## 9. Version anchors
 
 ```text
-SKILL_VERSION: 1.2.0
+SKILL_VERSION: 1.3.0
 handoff_version: 1    goal_version: 1    proposal_version: 1
 ```
 
-- File version = methodology + §7 fence snapshot. Format changes start in fixtures, serde types follow, CI binds both directions.
+- File version = methodology + §8 fence snapshot. Format changes start in fixtures, serde types follow, CI binds both directions.
+- 1.3.0: §7 repair-pipeline documentation added (product line b: `exuvia repair`); no protocol change.
 - Before adapting to a new environment, compare `exuvia --version` against these.
