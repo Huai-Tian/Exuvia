@@ -59,6 +59,7 @@ SENTINEL = 0x630000000000
 
 DT_NULL, DT_HASH, DT_STRTAB, DT_SYMTAB, DT_SYMENT = 0, 4, 5, 6, 11
 DT_GNU_HASH, DT_JMPREL = 0x6FFFFEF5, 23
+DT_INIT_ARRAY, DT_INIT_ARRAYSZ = 25, 27
 R_RELATIVE, R_GLOB_DAT, R_JUMP_SLOT = 1027, 1025, 1026
 
 
@@ -481,7 +482,12 @@ def make_libc(uc, elf):
         'pthread_detach': f_noop, '__cxa_atexit': f_noop, '__cxa_finalize': f_noop,
         'time': lambda x0, x1, x2, x3, x4=0, x5=0: 1234, 'getpid': lambda x0, x1, x2, x3, x4=0, x5=0: 1234,
         'srand': f_noop, 'rand': lambda x0, x1, x2, x3, x4=0, x5=0: 42,
-        'dladdr': lambda x0, x1, x2, x3, x4=0, x5=0: (wr(x1, struct.pack('<QQQQ', 0, 0, 0, 0)), 0)[1],
+        'dladdr': lambda x0, x1, x2, x3, x4=0, x5=0: (
+            # r29: shells self-locate via dladdr(self_fn, &info) and store
+            # dli_fbase as a runtime-table pointer (the polymorphic-ELF
+            # pattern: the so's own mapped header doubles as the encrypted
+            # table; fbase+0 IS the cipher). Emulator mapping base = 0.
+            wr(x1, struct.pack('<QQQQ', 0, 0, 0, x0)), 1)[1],
         'dlerror': f_noop, '__errno': f_errno, 'sysconf': lambda x0, x1, x2, x3, x4=0, x5=0: 4096,
         'dlopen': f_dlopen, 'dlsym': f_dlsym, 'dlclose': f_noop,
         'inflate': f_inflate, 'inflateInit_': f_inflateInit_, 'inflateEnd': f_inflateEnd,
@@ -536,6 +542,10 @@ def main():
                          'signature-key derivation mixes packageName+signature hashes — the string '
                          'side needs real bytes; same honest approximation as --sig-file)')
     ap.add_argument('--timeout', type=int, default=60, help='emulation timeout seconds')
+    ap.add_argument('--no-init', action='store_true',
+                    help='skip running .init_array before the entries (real loaders run it at '
+                         'load time; shells stash table allocators there — Battle-1 init[2] '
+                         'sets the runtime-table pointer the JNI_OnLoad SM4 decrypt needs)')
     args = ap.parse_args()
 
     data = open(args.so, 'rb').read()
@@ -856,12 +866,40 @@ def main():
         uc.reg_write(UC_ARM64_REG_SP, STACK + STACKSZ // 2)
         uc.reg_write(UC_ARM64_REG_LR, SENTINEL)
 
+    # r29: run .init_array like a real loader — shells stash table allocators
+    # there (Battle-1: init[2] tail-calls the runtime-table setter; without it
+    # the JNI_OnLoad SM4 decrypt degrades silently to a NULL destination).
+    # The RELATIVE relocations above already materialized the fn pointers.
+    init_ran = []
+    if not args.no_init:
+        try:
+            dtag = elf.dynamic_tags()
+            ia, iasz = dtag.get(DT_INIT_ARRAY, 0), dtag.get(DT_INIT_ARRAYSZ, 0)
+        except Exception:
+            ia, iasz = 0, 0
+        for k in range(iasz // 8 if ia else 0):
+            try:
+                fn = struct.unpack('<Q', bytes(uc.mem_read(ia + k * 8, 8)))[0]
+                if not fn:
+                    continue
+                uc.reg_write(UC_ARM64_REG_SP, STACK + STACKSZ // 2)
+                uc.reg_write(UC_ARM64_REG_LR, SENTINEL)
+                uc.emu_start(fn, SENTINEL, timeout=args.timeout * 1000 * 1000)
+                init_ran.append('0x%x' % fn)
+            except Exception:
+                # per-init best-effort: one crashing init must not starve the rest
+                init_ran.append('0x%x!' % fn if fn else '0!')
+
     def dump_fixed_regions():
         # --dump-mem：跑完（无论成败）dump 固定区——物化诊断（数据段运行时解密/派生 key 落点）
+        # r29: per-spec best-effort — one bad address must not kill the run's output
         for spec in args.dump_mem:
-            va_s, ln_s, path = spec.split(':')
-            blob = bytes(uc.mem_read(int(va_s, 0), int(ln_s, 0)))
-            open(path, 'wb').write(blob)
+            try:
+                va_s, ln_s, path = spec.split(':')
+                blob = bytes(uc.mem_read(int(va_s, 0), int(ln_s, 0)))
+                open(path, 'wb').write(blob)
+            except Exception:
+                pass
 
     returns = []
     try:
@@ -910,6 +948,8 @@ def main():
         open(path, 'wb').write(blob)
         dumps.append(path)
     out = {'return': f'0x{ret:x}', 'dumps': dumps, 'watch': watch_events}
+    if init_ran:
+        out['init_array_ran'] = init_ran
     if len(returns) > 1:
         out['chain_returns'] = returns
     mmaps = libc.pop('_mmap_regions', [])
