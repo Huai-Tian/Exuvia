@@ -130,6 +130,52 @@ def test_so_emulator():
         ev = {e.get('svc'): e for e in out.get('svc_events', [])}
         assert 'openat' in ev and ev['openat'].get('fd', 0) >= 0x100, out.get('svc_events')
         print('so_emulator svc OK: raw openat/read syscalls served from the --fs world')
+    # --chain session mode (r28): fn1 stores a magic into the image; fn2 loads
+    # it back — the second entry MUST observe the first entry's write (shared
+    # memory across entries in one emulated process).
+    with tempfile.TemporaryDirectory() as td:
+        so = os.path.join(td, 'chain.so')
+        eh = bytearray(64)
+        eh[0:4] = b'\x7fELF'
+        eh[4] = 2
+        eh[5] = 1
+        eh[6] = 1
+        eh[16:18] = struct.pack('<H', 3)
+        eh[18:20] = struct.pack('<H', 183)
+        struct.pack_into('<Q', eh, 0x20, 64)
+        struct.pack_into('<H', eh, 0x36, 64)
+        struct.pack_into('<H', eh, 0x38, 56)
+        struct.pack_into('<H', eh, 0x3A, 1)
+        ph = bytearray(56)
+        struct.pack_into('<I', ph, 0, 1)
+        struct.pack_into('<Q', ph, 8, 0x1000)
+        struct.pack_into('<Q', ph, 16, 0x1000)
+        struct.pack_into('<Q', ph, 32, 0x1000)
+        struct.pack_into('<Q', ph, 40, 0x1000)
+        fn1 = b''.join(struct.pack('<I', w) for w in (
+            0xD2822000,   # movz x0, #0x1100   (cell address)
+            0xD297DDE1,   # movz x1, #0xBEEF   (0xBEEF<<5|1 — carry counted!)
+            0xF9000001,   # str x1, [x0]
+            0xD65F03C0,   # ret
+        ))
+        fn2 = b''.join(struct.pack('<I', w) for w in (
+            0xD2822000,  # movz x0, #0x1100
+            0xF9400000,  # ldr x0, [x0]
+            0xD65F03C0,  # ret
+        ))
+        img = bytes(eh) + bytes(ph)
+        img += b'\0' * (0x1000 - len(img))
+        img += fn1 + b'\0' * (0x10 - len(fn1)) + fn2
+        img += b'\0' * (0x1000 - (len(img) - 0x1000))
+        open(so, 'wb').write(img)
+        r = subprocess.run(
+            [sys.executable, os.path.join(HERE, 'so_emulator.py'), so,
+             '--chain', '0x1000,0x1010'],
+            capture_output=True, text=True, timeout=60)
+        assert r.returncode == 0, f'chain exit {r.returncode}: {r.stderr}\n{r.stdout}'
+        out = json.loads(r.stdout)
+        assert out['chain_returns'] == ['0x1100', '0xbeef'], out['chain_returns']
+        print('so_emulator chain OK: fn1 write observed by fn2 (session-shared memory)')
 
 
 def test_rc4_vector():

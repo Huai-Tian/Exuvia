@@ -333,6 +333,25 @@ def make_libc(uc, elf):
         f = files.get(x0)
         return f.tell() if f else 0
 
+    # dl bridge (r28): mini-linkers dlopen("")/their own libraries and resolve
+    # self-symbols via dlsym — a NULL handle sends the shell into its embedded
+    # INTERPRETER fallback (Battle-1: the interpreter_wrap_int64_t cascade was
+    # exactly this — dlopen("") returns the SELF handle in a real process).
+    DLOPEN_SELF = 0x530000000000
+
+    def f_dlopen(x0, x1, x2, x3, x4=0, x5=0):
+        return DLOPEN_SELF
+
+    def f_dlsym(x0, x1, x2, x3, x4=0, x5=0):
+        name = cstr(x1)
+        try:
+            for nm, val in elf.dyn_symbols():
+                if nm == name and val:
+                    return val
+        except Exception:
+            pass
+        return 0
+
     # mmap bridge (Battle-1 r13): shells mmap a runtime file (their own APK /
     # released blob) — [0x2e40d0] composes an mmap-base pointer, and the SM4
     # engine (r12) consumes that region. fd from the --fs fopen bridge =>
@@ -464,6 +483,7 @@ def make_libc(uc, elf):
         'srand': f_noop, 'rand': lambda x0, x1, x2, x3, x4=0, x5=0: 42,
         'dladdr': lambda x0, x1, x2, x3, x4=0, x5=0: (wr(x1, struct.pack('<QQQQ', 0, 0, 0, 0)), 0)[1],
         'dlerror': f_noop, '__errno': f_errno, 'sysconf': lambda x0, x1, x2, x3, x4=0, x5=0: 4096,
+        'dlopen': f_dlopen, 'dlsym': f_dlsym, 'dlclose': f_noop,
         'inflate': f_inflate, 'inflateInit_': f_inflateInit_, 'inflateEnd': f_inflateEnd,
         'fopen': f_fopen, 'fread': f_fread, 'fclose': f_fclose,
         'fseek': f_fseek, 'lseek': f_lseek, 'ftell': f_ftell,
@@ -480,7 +500,13 @@ def make_libc(uc, elf):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('so')
-    ap.add_argument('--fn', required=True, help='target function VA (hex)')
+    ap.add_argument('--fn', help='target function VA (hex)')
+    ap.add_argument('--chain', default='',
+                    help='fn1,fn2,... — SESSION MODE: run multiple entries sequentially in ONE '
+                         'emulated process (shared memory, the real-device lifecycle: '
+                         'init_array -> JNI_OnLoad -> natives -> workers). --arg/--java apply '
+                         'to the FIRST entry; later entries start with zeroed x0-x7. '
+                         'Use when a single --fn cannot reproduce a cross-function state.')
     ap.add_argument('--arg', action='append', default=[], help='xN=VAL (register setup, hex)')
     ap.add_argument('--watch', action='append', default=[], help='VA to snapshot x0-x7/buffer at (hex)')
     ap.add_argument('--watch-write', action='append', default=[],
@@ -680,7 +706,10 @@ def main():
                         uc.mem_write(x2, struct.pack('<Q', 0))
                     return sig_regions[0][0]
                 z = HEAP + 0x7000000
-                uc.mem_map(z & ~(PAGE - 1), 0x1000)
+                try:
+                    uc.mem_map(z & ~(PAGE - 1), 0x1000)
+                except Exception:
+                    pass  # r18 heap auto-extension covers this address now
                 uc.mem_write(z, b'\0' * 64)
                 if x2:
                     uc.mem_write(x2, struct.pack('<Q', 0))
@@ -725,8 +754,27 @@ def main():
             'x5': uc_.reg_read(UC_ARM64_REG_X5), 'x6': uc_.reg_read(UC_ARM64_REG_X6),
             'x7': uc_.reg_read(UC_ARM64_REG_X7),
         }
+        # r27: extended-context registers — deep-chain forensics (reader bases,
+        # stack frames) live in x8-x18 (callee-saved convention shells rely on)
         try:
-            buf = bytes(uc_.mem_read(x0, 32)).hex() if 0x1000 < x0 < 0x800000000000 else ''
+            from unicorn.arm64_const import (UC_ARM64_REG_X8, UC_ARM64_REG_X9,
+                                             UC_ARM64_REG_X10, UC_ARM64_REG_X11,
+                                             UC_ARM64_REG_X12, UC_ARM64_REG_X13,
+                                             UC_ARM64_REG_X14, UC_ARM64_REG_X15,
+                                             UC_ARM64_REG_X16, UC_ARM64_REG_X17, UC_ARM64_REG_X18)
+            for nm, c in (('x8', UC_ARM64_REG_X8), ('x9', UC_ARM64_REG_X9),
+                          ('x10', UC_ARM64_REG_X10), ('x11', UC_ARM64_REG_X11),
+                          ('x12', UC_ARM64_REG_X12), ('x13', UC_ARM64_REG_X13),
+                          ('x14', UC_ARM64_REG_X14), ('x15', UC_ARM64_REG_X15),
+                          ('x16', UC_ARM64_REG_X16), ('x17', UC_ARM64_REG_X17),
+                          ('x18', UC_ARM64_REG_X18)):
+                regs_all[nm] = uc_.reg_read(c)
+        except ImportError:
+            pass
+        try:
+            # r28: drop the stale upper bound (heap base 0x500000000000 > the old
+            # 0x800000000000 cap — heap-pointed strings were silently skipped)
+            buf = bytes(uc_.mem_read(x0, 32)).hex() if x0 > 0x1000 else ''
         except Exception:
             buf = ''
         watch_events.append(json.dumps({
@@ -735,6 +783,8 @@ def main():
             'x3': '0x%x' % regs_all['x3'], 'x4': '0x%x' % regs_all['x4'],
             'x5': '0x%x' % regs_all['x5'], 'x6': '0x%x' % regs_all['x6'],
             'x7': '0x%x' % regs_all['x7'], 'buf': buf,
+            **{k: '0x%x' % v for k, v in regs_all.items() if k.startswith('x1') and len(k) <= 3},
+            'lr': '0x%x' % uc_.reg_read(UC_ARM64_REG_LR),
         }))
 
     for w in args.watch:
@@ -769,16 +819,42 @@ def main():
     for spec in args.poke:
         addr_s, hexdata = spec.split(':', 1)
         uc.mem_write(int(addr_s, 0), bytes.fromhex(hexdata))
-    uc.reg_write(UC_ARM64_REG_SP, STACK + STACKSZ // 2)
-    for spec in args.arg:
-        reg, val = spec.split('=')
-        regmap = {'x0': UC_ARM64_REG_X0, 'x1': UC_ARM64_REG_X1, 'x2': UC_ARM64_REG_X2,
-                  'x3': UC_ARM64_REG_X3, 'x4': UC_ARM64_REG_X4, 'x5': UC_ARM64_REG_X5,
-                  'x6': UC_ARM64_REG_X6, 'x7': UC_ARM64_REG_X7}
-        uc.reg_write(regmap[reg.lower()], int(val, 0))
-    uc.reg_write(UC_ARM64_REG_LR, SENTINEL)
 
-    fn_va = int(args.fn, 0)
+    # r28 session mode: shells live a MULTI-ENTRY lifecycle in one process
+    # (init_array -> JNI_OnLoad -> natives -> workers) with shared memory —
+    # a single --fn cannot reproduce cross-function state. --chain runs the
+    # entries sequentially in this ONE unicorn instance. Per-entry args ride
+    # along as 'fn;reg=VAL;reg=VAL' tokens (later entries start zeroed unless
+    # given args); the FIRST entry also receives the global --arg setup.
+    entries = []  # [(fn_va, {reg: val_str}), ...]
+    if args.fn:
+        entries.append((int(args.fn, 0), {}))
+    for tok in filter(None, (t.strip() for t in args.chain.split(','))):
+        parts = tok.split(';')
+        entry_args = {}
+        for kv in parts[1:]:
+            if '=' in kv:
+                k, v = kv.split('=', 1)
+                entry_args[k.strip()] = v
+        entries.append((int(parts[0], 0), entry_args))
+    if not entries:
+        print('{"error":"E_ARGS","detail":"need --fn or --chain"}')
+        sys.exit(2)
+    regmap = {'x0': UC_ARM64_REG_X0, 'x1': UC_ARM64_REG_X1, 'x2': UC_ARM64_REG_X2,
+              'x3': UC_ARM64_REG_X3, 'x4': UC_ARM64_REG_X4, 'x5': UC_ARM64_REG_X5,
+              'x6': UC_ARM64_REG_X6, 'x7': UC_ARM64_REG_X7}
+
+    def setup_entry(idx):
+        for r in regmap.values():
+            uc.reg_write(r, 0)
+        if idx == 0:
+            for spec in args.arg:
+                reg, val = spec.split('=')
+                uc.reg_write(regmap[reg.lower()], int(val, 0))
+        for reg, val in entries[idx][1].items():
+            uc.reg_write(regmap[reg.lower()], int(val, 0))
+        uc.reg_write(UC_ARM64_REG_SP, STACK + STACKSZ // 2)
+        uc.reg_write(UC_ARM64_REG_LR, SENTINEL)
 
     def dump_fixed_regions():
         # --dump-mem：跑完（无论成败）dump 固定区——物化诊断（数据段运行时解密/派生 key 落点）
@@ -787,8 +863,12 @@ def main():
             blob = bytes(uc.mem_read(int(va_s, 0), int(ln_s, 0)))
             open(path, 'wb').write(blob)
 
+    returns = []
     try:
-        uc.emu_start(fn_va, SENTINEL, timeout=args.timeout * 1000 * 1000)
+        for idx, (fn_va, _entry_args) in enumerate(entries):
+            setup_entry(idx)
+            uc.emu_start(fn_va, SENTINEL, timeout=args.timeout * 1000 * 1000)
+            returns.append('0x%x' % uc.reg_read(UC_ARM64_REG_X0))
     except Exception as e:
         # 错误路径也带上已观察到的 watch 事件——黑盒失败的现场属于证据（r10 诊断改进）
         # r20: 崩溃现场寄存器快照（x0-x7/sp/lr/pc）——深链故障定位刚需（装载器清零
@@ -814,6 +894,7 @@ def main():
                 pass
         dump_fixed_regions()
         print(f'{{"error":"E_EMU","detail":"{e}","pc":"0x{uc.reg_read(UC_ARM64_REG_PC):x}",'
+              f'"entry":"0x{entries[idx][0]:x}",'
               f'"regs":{json.dumps(regs)},'
               f'"svc_events":{json.dumps(svc_events)},'
               f'"watch":{json.dumps(watch_events)}}}')
@@ -829,6 +910,8 @@ def main():
         open(path, 'wb').write(blob)
         dumps.append(path)
     out = {'return': f'0x{ret:x}', 'dumps': dumps, 'watch': watch_events}
+    if len(returns) > 1:
+        out['chain_returns'] = returns
     mmaps = libc.pop('_mmap_regions', [])
     if mmaps:
         out['mmap_regions'] = [{'addr': '0x%x' % m['addr'], 'len': m['len'], 'source': m['source']} for m in mmaps]
