@@ -471,12 +471,90 @@ def make_libc(uc, elf):
                                'x1': '0x%x' % x1, 'x2': '0x%x' % x2})
         uc_.reg_write(UC_ARM64_REG_X0, 0)
 
+    # printf engine (r30): shells build runtime strings (pref names, class
+    # descriptors, tag keys) with sprintf/snprintf/__sprintf_chk — a return-0
+    # stub leaves the buffer zeroed and every downstream consumer sees "".
+    # AAPCS64 variadic: named args in x-regs, varargs continue in x-regs then
+    # spill to the stack. FP varargs (v-regs) are rare in shell code — degrade
+    # to 0 rather than crash.
+    def _varg_reader(first_reg):
+        """closure: nth vararg value, regs x{first_reg}..x7 then stack."""
+        def nth(k):
+            reg_idx = first_reg + k
+            if reg_idx <= 7:
+                reg = {2: UC_ARM64_REG_X2, 3: UC_ARM64_REG_X3, 4: UC_ARM64_REG_X4,
+                       5: UC_ARM64_REG_X5, 6: UC_ARM64_REG_X6, 7: UC_ARM64_REG_X7}[reg_idx]
+                return uc.reg_read(reg)
+            sp = uc.reg_read(UC_ARM64_REG_SP)
+            return struct.unpack('<Q', bytes(uc.mem_read(sp + (reg_idx - 8) * 8, 8)))[0]
+        return nth
+
+    def _fmt_render(fmt_addr, nth):
+        fmt = cstr(fmt_addr).decode('utf-8', 'replace')
+        out = bytearray()
+        ai = 0
+        i = 0
+        while i < len(fmt):
+            c = fmt[i]
+            if c != '%':
+                out += c.encode(); i += 1; continue
+            i += 1
+            if i < len(fmt) and fmt[i] == '%':
+                out += b'%'; i += 1; continue
+            # flags/width/precision (consumed, honored only minimally)
+            while i < len(fmt) and fmt[i] in '-+ #00123456789.':
+                i += 1
+            while i < len(fmt) and fmt[i] in 'hljztL':
+                i += 1
+            if i >= len(fmt):
+                break
+            spec = fmt[i]; i += 1
+            v = nth(ai); ai += 1
+            if spec in 'diu':
+                out += str(v if spec == 'u' else
+                            (v - (1 << 64) if v & (1 << 63) else v)).encode()
+            elif spec in 'xX':
+                out += (('%x' if spec == 'x' else '%X') % v).encode()
+            elif spec == 'c':
+                out += bytes([v & 0xFF])
+            elif spec == 'p':
+                out += ('0x%x' % v).encode()
+            elif spec == 's':
+                out += cstr(v) if v else b'(null)'
+            else:
+                out += ('%%%c' % spec).encode()
+        return bytes(out)
+
+    def _mk_printf(first_reg, dest_arg=0, size_arg=None):
+        def f(x0, x1, x2, x3, x4=0, x5=0):
+            args = (x0, x1, x2, x3, x4, x5)
+            fmt_addr = args[first_reg - 1] if first_reg >= 2 else x1
+            rendered = _fmt_render(fmt_addr, _varg_reader(first_reg))
+            buf = args[dest_arg]
+            if size_arg is not None:
+                cap = args[size_arg]
+                rendered = rendered[:max(0, cap - 1)]
+            wr(buf, rendered + b'\0')
+            return len(rendered)
+        return f
+
+    f_sprintf = _mk_printf(2)                      # sprintf(buf, fmt, ...)
+    f_snprintf = _mk_printf(3, size_arg=1)         # snprintf(buf, n, fmt, ...)
+    f_sprintf_chk = _mk_printf(4)                  # __sprintf_chk(buf, flag, slen, fmt, ...)
+    f_snprintf_chk = _mk_printf(5, size_arg=1)     # __snprintf_chk(buf, n, flag, slen, fmt, ...)
+
     table = {
         'malloc': f_malloc, '_Znwm': f_malloc, '_Znam': f_malloc, 'calloc': f_calloc,
         'free': f_free, '_ZdlPv': f_free, '_ZdaPv': f_free,
         'memcpy': f_memcpy, 'memmove': f_memcpy, 'memset': f_memset,
         'memcmp': f_memcmp, 'strlen': f_strlen, '__strlen_chk': f_strlen,
         'strcmp': f_strcmp, 'strcpy': lambda x0, x1, x2, x3, x4=0, x5=0: (wr(x0, cstr(x1) + b'\0'), x0)[1],
+        'strcat': lambda x0, x1, x2, x3, x4=0, x5=0: (
+            wr(x0 + len(cstr(x0)), cstr(x1) + b'\0'), x0)[1],
+        'strncpy': lambda x0, x1, x2, x3=0, x4=0, x5=0: (
+            wr(x0, cstr(x1)[:x2].ljust(x2, b'\0')), x0)[1],
+        'snprintf': f_snprintf, 'sprintf': f_sprintf,
+        '__snprintf_chk': f_snprintf_chk, '__sprintf_chk': f_sprintf_chk,
         '__aarch64_sync_cache_range': f_noop, 'pthread_mutex_init': f_noop,
         'pthread_mutex_lock': f_noop, 'pthread_mutex_unlock': f_noop,
         'pthread_detach': f_noop, '__cxa_atexit': f_noop, '__cxa_finalize': f_noop,

@@ -108,6 +108,14 @@ def gate_content(path):
     comps, pkg = dexclean.manifest_classes_from_apk(path)
     dx = dexclean.Dex(dexb)
     defined = set(n for _, n, _ in dx.class_defs())
+    # multi-dex: manifest components may live in classes2.dex..classesN.dex
+    for extra in sorted(n for n in z.namelist()
+                        if n.startswith('classes') and n != 'classes.dex' and n.endswith('.dex')):
+        try:
+            dx2 = dexclean.Dex(z.read(extra))
+            defined |= set(n for _, n, _ in dx2.class_defs())
+        except Exception:
+            pass
     missing = [c for c in comps if c not in defined and c.startswith(pkg or '')]
     if missing:
         problems.append('manifest components missing from DEX: %s' % missing[:5])
