@@ -15,12 +15,16 @@ triage station at the pipeline's front door:
     P4 magic version anomaly       — dex\n036\\0..039\\0 variants
     P5 endian/header_size anomaly  — hostile corruption or wrong-arch dump
     P6 header tables vs map_list disagreement — partial sabotage
+    P7 data beyond the map_list     — whole-memory dumps carry the shell's
+                                     runtime workspace (high-entropy crypto
+                                     material) past the last legal structure
 
   REPAIR (validated against synthetic wounds; --fix writes, default reports):
     P1 -> recompute sha1+adler32          P2 -> file_size := actual length
     P3 -> map_list signature scan (TYPE_HEADER_ITEM sentinel + sorted-offset
           invariant + cross-check against surviving header tables)
     P5 -> endian/header_size restored to spec constants
+    P7 -> trim everything past map_end (dead to ART, secrets to the shell)
 
 Usage:
   dexdoctor.py dumped.dex [-o out.dex] [--fix] [--json]
@@ -104,6 +108,13 @@ class Triage:
         if map_ok:
             self.meta['map_entries'] = self._map_list(d, map_off)
             self._crosscheck_tables(d)
+            # P7: anything past the map_list (the last legal structure) is
+            # the shell's runtime workspace riding along in a whole-memory dump
+            cnt2 = struct.unpack_from('<I', d, map_off)[0]
+            map_end = map_off + 4 + cnt2 * 12
+            if map_end < n:
+                self.issues.append('P7 %d bytes beyond map_list (shell workspace)' % (n - map_end))
+                self.meta['map_end'] = map_end
         self.meta.update({'file_size_field': file_size, 'actual_size': n, 'map_off': map_off,
                           'version': ver.decode('latin1')})
         return self
@@ -166,6 +177,16 @@ class Triage:
                     self.issues = [i for i in self.issues if not i.startswith('P3')]
                 else:
                     print('  !! P3 unrepairable: map_list scan found no candidate', file=sys.stderr)
+            elif code.startswith('P7'):
+                # map_end from triage; after a P3 repair it must be recomputed
+                mo = struct.unpack_from('<I', d, 52)[0]
+                cnt = struct.unpack_from('<I', d, mo)[0]
+                map_end = mo + 4 + cnt * 12
+                if HEADER_SIZE < map_end < len(d):
+                    trimmed = len(d) - map_end
+                    del d[map_end:]
+                    struct.pack_into('<I', d, 32, len(d))
+                    self.fixes.append('trimmed %d bytes past map_list (shell workspace)' % trimmed)
         # P1 last: sums cover the whole (possibly just-repaired) content
         d[12:32] = hashlib.sha1(bytes(d[32:])).digest()
         adler = zlib.adler32(bytes(d[12:])) & 0xFFFFFFFF

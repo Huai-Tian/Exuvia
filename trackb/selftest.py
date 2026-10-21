@@ -716,14 +716,18 @@ def test_dexdoctor():
     # wound C: page-aligned dump with trailing zero padding
     pad = (4096 - len(healthy) % 4096) or 4096
     wc = bytearray(healthy) + b'\x00' * pad
-    for name, wound in (('A sums+file_size', wa), ('B map_off', wb), ('C padding', wc)):
+    # wound D: whole-memory dump carrying the shell's runtime workspace
+    # (high-entropy crypto material) past the map_list
+    wd = bytearray(healthy) + bytes(range(256)) * 100
+    for name, wound in (('A sums+file_size', wa), ('B map_off', wb), ('C padding', wc),
+                       ('D shell workspace', wd)):
         t = dexdoctor.Triage(bytes(wound)).diagnose()
         assert t.issues, 'wound %s not detected' % name
         healed = t.fix()
         assert healed == healthy, 'wound %s healed imperfectly (bytes differ)' % name
         post = dexdoctor.Triage(healed).diagnose()
         assert not post.issues, 'wound %s leaves residual: %s' % (name, post.issues)
-    print('dexdoctor OK: 3 planted pathologies detected + healed to exact original bytes')
+    print('dexdoctor OK: 4 planted pathologies detected + healed to exact original bytes')
 
 
 if __name__ == '__main__':
