@@ -445,6 +445,196 @@ def test_elfrecon():
         print('elfrecon symbols OK: 4-entry dynsym recovered through 16B slack (backtrack route)')
 
 
+def _build_synthetic_axml():
+    """A minimal AXML: string pool + one <application> with a stub android:name.
+    Layout: file hdr | string pool | start elem (2 attrs) | end elem."""
+    import struct as _s
+
+    def _u16(v):
+        return _s.pack('<H', v)
+
+    def _u32(v):
+        return _s.pack('<I', v)
+
+    strings = ['application', 'name', 'com.stub.StubApp', 'allowBackup']
+    # string pool chunk: hdr(8) + count/styleCount/flags/stringsStart/stylesStart (20)
+    offsets = []
+    data = b''
+    for sstr in strings:
+        enc = _u16(len(sstr)) + sstr.encode('utf-16-le') + b'\x00\x00'
+        offsets.append(len(data))
+        data += enc
+    strings_start = 28 + 4 * len(strings)
+    pool = (_u16(0x0001) + _u16(28) + _u32(0)  # csize patched below
+            + _u32(len(strings)) + _u32(0) + _u32(0) + _u32(strings_start) + _u32(0)
+            + b''.join(_u32(o) for o in offsets) + data)
+    pool = bytearray(pool)
+    _s.pack_into('<I', pool, 4, len(pool))
+    pool = bytes(pool)
+    # start element: headerSize=16, attrStart=20, attrSize=20, 2 attrs
+    # attrs: name="com.stub.StubApp" (idx 1/2), allowBackup (idx 3 raw=-1 data=0)
+    a1 = _u32(0xFFFFFFFF) + _u32(1) + _u32(2) + _u16(8) + bytes([0, 0x03]) + _u32(2)
+    a2 = _u32(0xFFFFFFFF) + _u32(3) + _u32(0xFFFFFFFF) + _u16(8) + bytes([0, 0x12]) + _u32(0)
+    attrs = a1 + a2
+    body = (_u32(1) + _u32(0xFFFFFFFF)   # line, comment
+            + _u32(0xFFFFFFFF) + _u32(0)  # ns=-1, name=0 ('application')
+            + _u16(20) + _u16(20) + _u16(2) + _u16(0) + _u16(0) + _u16(0)  # attrExt
+            + attrs)
+    se = _u16(0x0102) + _u16(16) + _u32(0) + body  # size patched below
+    se = bytearray(se)
+    _s.pack_into('<I', se, 4, len(se))
+    se = bytes(se)
+    ee = _u16(0x0103) + _u16(16) + _u32(24) + _u32(1) + _u32(0xFFFFFFFF) + _u32(0xFFFFFFFF)
+    total = 8 + len(pool) + len(se) + len(ee)
+    hdr = _u16(0x0003) + _u16(8) + _u32(total)
+    return hdr + pool + se + ee
+
+
+def test_repair_pipeline():
+    """The repair pipeline (r30): AXML surgery + the v2 sign round-trip +
+    the dexclean classification on a synthetic DEX — all synthetic, zero-sample."""
+    sys.path.insert(0, HERE)
+    import repair
+    import sign2
+    import dexclean
+    import io
+    import zipfile as zf
+
+    # --- A. the manifest surgery on a synthetic AXML
+    axml = _build_synthetic_axml()
+    surgery = repair.find_manifest_surgery(axml, None)
+    assert surgery, 'surgery point not found in the synthetic AXML'
+    attr_off, attr_size, chunk_off, chunk_csize, val = surgery
+    assert val == 'com.stub.StubApp', val
+    fixed = repair.apply_surgery(axml, attr_off, attr_size, chunk_off, chunk_csize)
+    from axmltool import Axml
+    ax2 = Axml(fixed)
+    app = [n for n in ax2.tree if n['name'] == 'application'][0]
+    assert all(a['name'] != 'name' for a in app['attrs']), 'stub attr still present'
+    assert any(a['name'] == 'allowBackup' for a in app['attrs']), 'sibling attr lost'
+    print('repair pipeline OK: synthetic manifest surgery (stub attr removed, siblings kept)')
+
+    # --- B. the v2 sign round-trip on a synthetic zip
+    buf = io.BytesIO()
+    with zf.ZipFile(buf, 'w') as z:
+        z.writestr('a.txt', 'hello')
+    blob = buf.getvalue()
+    key, cert = sign2.gen_key_cert()
+    cert_der = cert.public_bytes(sign2.serialization.Encoding.DER)
+    signed = sign2.sign_v2(blob, key, cert_der)
+    # re-verify: the digest + the RSA (independent recompute)
+    import struct as st
+    import hashlib
+    cd_off, eocd_off = sign2._find_cd(signed)
+    magic_off = cd_off - 16
+    assert signed[magic_off:cd_off] == sign2.MAGIC
+    size = st.unpack_from('<Q', signed, magic_off - 8)[0]
+    block_start = cd_off - size - 8
+    region1 = signed[:block_start]
+    region3 = (signed[cd_off:eocd_off] + signed[eocd_off:eocd_off + 16]
+               + st.pack('<I', block_start) + signed[eocd_off + 20:])
+    computed = hashlib.sha256(sign2.chunk_digests(region1) + sign2.chunk_digests(region3)).digest()
+    # locate the claimed digest + verify
+    pairs = {}
+    p = block_start + 8
+    while p < magic_off - 8:
+        plen = st.unpack_from('<Q', signed, p)[0]
+        pid = st.unpack_from('<I', signed, p + 8)[0]
+        pairs[pid] = signed[p + 12:p + 8 + plen]
+        p += 8 + plen
+    v2 = pairs[sign2.V2_BLOCK_ID]
+    def read_lp(b, pos):
+        n = st.unpack_from('<I', b, pos)[0]
+        return b[pos + 4:pos + 4 + n], pos + 4 + n
+    signers_seq, _ = read_lp(v2, 0)
+    signer, _ = read_lp(signers_seq, 0)
+    sd, pos = read_lp(signer, 0)
+    sigs_seq, pos = read_lp(signer, pos)
+    pk, pos = read_lp(signer, pos)
+    dg_seq, _ = read_lp(sd, 0)
+    dg_rec, _ = read_lp(dg_seq, 0)
+    claimed = dg_rec[8:40]
+    assert claimed == computed, 'v2 digest mismatch'
+    sig_rec, _ = read_lp(sigs_seq, 0)
+    sig = sig_rec[8:8 + st.unpack_from('<I', sig_rec, 4)[0]]
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import padding as pad
+    from cryptography.hazmat.primitives.serialization import load_der_public_key
+    load_der_public_key(pk).verify(sig, sd, pad.PKCS1v15(), hashes.SHA256())
+    # the zip still readable + the EOCD CD offset points past the block
+    zz = zf.ZipFile(io.BytesIO(signed))
+    assert zz.read('a.txt') == b'hello'
+    assert st.unpack_from('<I', signed, eocd_off + 16)[0] == cd_off
+    print('repair pipeline OK: v2 sign round-trip (digest+RSA verified, zip intact)')
+
+    # --- C. the dexclean classification on a minimal synthetic DEX
+    # craft: header + string_ids(1) + type_ids(1) + class_defs(1: com.stub.StubApp)
+    import struct as st2
+    import hashlib as hl
+    import zlib
+
+    def _mk_dex(class_desc):
+        strings = [class_desc, b'\x00'.decode()]  # the type string + an empty
+        # sections: string_ids at 0x70, then data
+        hdr = bytearray(0x70)
+        hdr[0:8] = b'dex\n035\x00'
+        # build the body after the header
+        body = b''
+        string_ids = b''
+        string_data = b''
+        offs = []
+        # the strings data starts after the tables; compute layout:
+        # [0x70: string_ids (n*4)] [type_ids (m*4)] [class_defs (k*32)] [string data] [map]
+        n_str = 2
+        n_type = 1
+        n_cls = 1
+        str_ids_off = 0x70
+        type_ids_off = str_ids_off + n_str * 4
+        class_defs_off = type_ids_off + n_type * 4
+        data_off = class_defs_off + n_cls * 32
+        # string data: uleb len + bytes + NUL
+        s0_off = data_off
+        s1_off = s0_off + 1 + len(strings[0]) + 1
+        str_blob = (bytes([len(strings[0])]) + strings[0].encode() + b'\x00'
+                    + b'\x00')  # the second (empty) string
+        # class def: class_idx=0, access=0, super=0xFFFFFFFF, ifaces=0, src=0xFFFFFFFF, ann=0, data=0, sval=0
+        cd = st2.pack('<IIIIIIII', 0, 0, 0xFFFFFFFF, 0, 0xFFFFFFFF, 0, 0, 0)
+        map_off = data_off + len(str_blob)
+        # map_list: 5 entries: header(0x00), string_id(0x01), type_id(0x02), class_def(0x06), map(0x1000)
+        entries = [(0x0000, 1, 0), (0x0001, n_str, str_ids_off), (0x0002, n_type, type_ids_off),
+                   (0x0006, n_cls, class_defs_off), (0x1000, 5, map_off)]
+        map_list = st2.pack('<I', 5) + b''.join(st2.pack('<HHI', t, 0, c) for t, _, c in entries)
+        # assemble
+        out = bytearray(hdr)
+        out += st2.pack('<I', s0_off)  # string_ids[0] = the offset of string 0
+        out += st2.pack('<I', s1_off)  # string_ids[1]
+        out += st2.pack('<I', 0)       # type_ids[0] -> string 0
+        out += cd
+        out += str_blob
+        out += map_list
+        # header fields: string_ids_size/off @56, type_ids_size/off @64
+        st2.pack_into('<IIII', out, 56, n_str, str_ids_off, n_type, type_ids_off)
+        # class_defs_size/off @96/+100 (adjacent)
+        st2.pack_into('<II', out, 96, n_cls, class_defs_off)
+        st2.pack_into('<I', out, 52, map_off)
+        file_size = len(out)
+        st2.pack_into('<I', out, 32, file_size)
+        st2.pack_into('<I', out, 36, 0x70)
+        out[12:32] = hl.sha1(bytes(out[32:])).digest()
+        st2.pack_into('<I', out, 8, zlib.adler32(bytes(out[12:])) & 0xFFFFFFFF)
+        return bytes(out)
+
+    d_shell = _mk_dex('Lcom/stub/StubApp;')
+    dx = dexclean.Dex(d_shell)
+    keep, shell, foreign = dx.classify('', [])
+    assert len(shell) == 1 and shell[0][1] == 'com.stub.StubApp', (keep, shell, foreign)
+    d_app = _mk_dex('Lcom/example/MyApp;')
+    dx2 = dexclean.Dex(d_app)
+    k2, s2_, f2 = dx2.classify('com.example', [])
+    assert len(k2) == 1 and len(s2_) == 0 and len(f2) == 0, (k2, s2_, f2)
+    print('repair pipeline OK: dexclean classification (shell caught, app kept)')
+
+
 def test_rc4mat():
     """rc4mat (r17 tool): material-space scan — synthetic 14B-header material ->
     parity-key derivation round-trip + planted scan hit via the CLI."""
@@ -505,5 +695,6 @@ if __name__ == '__main__':
     test_sigx()
     test_sm4recon()
     test_elfrecon()
+    test_repair_pipeline()
     test_rc4mat()
     print('trackb selftest: ALL GREEN')

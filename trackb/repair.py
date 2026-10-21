@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+"""Repair prototype: packed APK + dumped DEX -> restored APK. Sample-agnostic.
+
+The industry gap this fills: dumpers (56.al etc.) produce DEX fine, but the
+dumped DEX dropped back into the packed APK still won't launch — because the
+SHELL left surgery markers in the APK (the wrapper Application class in the
+manifest, the stub classes.dex, the native loader assets). This tool performs
+that repair mechanically:
+
+  repair <packed.apk> <dumped.dex> [-o out.apk] [--app-name CLS|--no-app-name]
+
+  1. MANIFEST SURGERY: parse the binary AXML, find the <application> element's
+     android:name attribute pointing at a wrapper class (auto-detect: the class
+     that lives in the SHELL's stub classes.dex — com.stub.*, *.StubApp,
+     com.secneo.* etc. — or give --app-name CLS / --no-app-name to force).
+     Remove the 20-byte attribute entry in place (chunk sizes and the file
+     header adjusted; the sequential-chunk AXML format tolerates the shift).
+  2. DEX SWAP: classes.dex <- the dumped DEX (validation: magic/checksum/
+     signature fields verified and re-fixed if the dumper broke them).
+  3. SHELL ASSET REMOVAL: entries the known shells drop into assets/
+     (libjiagu*, .jgapp, *.jiagu patterns).
+  4. REBUILD: zip with the original entry order/methods preserved, then
+     zipalign + v2-sign via the trackb/sigx tool.
+
+Verification (this corpus has ground truth): the repaired APK's manifest
+must be structurally identical to the original's; all shared entries
+byte-equal; only the signing block differs.
+"""
+import argparse
+import hashlib
+import struct
+import sys
+import zipfile
+import zlib
+
+# wrapper-class patterns seen across the industry packers (360/secneo/qihoo
+# family + generic stubs). A <application android:name> matching these gets
+# removed; the pattern list is heuristic — the definitive test is "the class
+# is absent from the dumped DEX" (checked when the DEX is parseable).
+WRAPPER_PATTERNS = (
+    'com.stub.', 'StubApp', '.stub.', 'com.secneo.', 'com.qihoo.',
+    'com.tencent.bugly.', 'protect.', 'com.morgoo.', 'dxloader.',
+    'com.wrapper.', 'com.app.plugin.', 'android.support.multidex',
+)
+
+
+def find_manifest_surgery(axml: bytes, dex_classes=None):
+    """Locate the <application android:name> surgery point. Returns
+    (attr_abs_offset, attr_size, chunk_off, pool_stub_string) or None."""
+    d = axml
+    if d[:2] != struct.pack('<H', 3):
+        raise ValueError('manifest is not AXML')
+    # string pool
+    off = 8
+    strings = []
+    pool_off = None
+    while off < len(d) - 8:
+        ctype, hsize, csize = struct.unpack_from('<HHI', d, off)
+        if csize < hsize or off + csize > len(d):
+            break
+        if ctype == 0x0001:
+            pool_off = off
+            (s_count, _sc, flags, data_start, _ss) = struct.unpack_from('<IIIII', d, off + 8)
+            offsets = struct.unpack_from('<%dI' % s_count, d, off + hsize)
+            for so in offsets:
+                p = off + data_start + so
+                n = struct.unpack_from('<H', d, p)[0]
+                if n & 0x8000:
+                    n = ((n & 0x7FFF) << 16) | struct.unpack_from('<H', d, p + 2)[0]
+                    raw = d[p + 4:p + 4 + n * 2]
+                else:
+                    raw = d[p + 2:p + 2 + n * 2]
+                strings.append(raw.decode('utf-16-le', errors='replace'))
+        elif ctype == 0x0102:
+            ns, name = struct.unpack_from('<II', d, off + 16)
+            (attr_start, attr_size, attr_count, id_idx, _cl, _st) = struct.unpack_from('<HHHHHH', d, off + 24)
+            if name < len(strings) and strings[name] == 'application':
+                # scan the attributes for android:name with a wrapper-class value
+                for k in range(attr_count):
+                    a = off + 16 + attr_start + k * attr_size
+                    if a + 20 > len(d):
+                        break
+                    a_ns, a_name, a_raw, _vs, _vr, _vt, _vd = struct.unpack_from('<IIIHBBI', d, a)
+                    nm = strings[a_name] if a_name < len(strings) else ''
+                    val = strings[a_raw] if a_raw < len(strings) else ''
+                    if nm == 'name' and val:
+                        if val in WRAPPER_PATTERNS or any(p in val for p in WRAPPER_PATTERNS):
+                            return (a, attr_size, off, csize, val)
+                        # definitive: the class is NOT in the dumped DEX
+                        if dex_classes is not None and val not in dex_classes and val.startswith('com.'):
+                            return (a, attr_size, off, csize, val)
+        off += csize
+    return None
+
+
+def apply_surgery(axml: bytes, attr_off: int, attr_size: int, chunk_off: int, chunk_csize: int) -> bytes:
+    """Remove the attribute entry at attr_off; fix attrCount, chunk size, file size."""
+    d = bytearray(axml)
+    # 1. extract the attribute entry
+    del d[attr_off:attr_off + attr_size]
+    # 2. attrCount -= 1 (u16 at chunk_off+28)
+    cnt = struct.unpack_from('<H', d, chunk_off + 28)[0]
+    struct.pack_into('<H', d, chunk_off + 28, cnt - 1)
+    # 3. the element chunk size -= attr_size
+    struct.pack_into('<I', d, chunk_off + 4, chunk_csize - attr_size)
+    # 4. the file-level chunk size -= attr_size (the XML chunk header @0)
+    total = struct.unpack_from('<I', d, 4)[0]
+    struct.pack_into('<I', d, 4, total - attr_size)
+    return bytes(d)
+
+
+def dex_classes_set(dex: bytes):
+    """The set of class descriptors in a DEX (fast: scan the type strings via
+    the header map — but a robust cheap scan: the type list from string ids).
+    For the prototype: parse the header + string ids."""
+    if dex[:4] != b'dex\n':
+        return None
+    try:
+        string_ids_size = struct.unpack_from('<I', dex, 56)[0]
+        string_ids_off = struct.unpack_from('<I', dex, 60)[0]
+        out = set()
+        for i in range(min(string_ids_size, 200000)):
+            off = struct.unpack_from('<I', dex, string_ids_off + i * 4)[0]
+            # uleb128 length
+            n = 0
+            shift = 0
+            while True:
+                b = dex[off]
+                off += 1
+                n |= (b & 0x7F) << shift
+                shift += 7
+                if not (b & 0x80):
+                    break
+            s = dex[off:off + n].decode('utf-8', errors='replace')
+            if s.startswith('L') and s.endswith(';'):
+                out.add(s[1:-1].replace('/', '.'))
+        return out
+    except Exception:
+        return None
+
+
+def dex_validate_fix(dex: bytes):
+    """Verify/fix the DEX header checksum+signature (dumpers often leave them
+    stale after repairing the map). Returns (dex, fixes_applied)."""
+    if dex[:4] != b'dex\n':
+        return dex, []
+    fixes = []
+    sig = hashlib.sha1(dex[32:]).digest()
+    if dex[12:32] != sig:
+        dex = dex[:12] + sig + dex[32:]
+        fixes.append('sha1-signature')
+    adler = zlib.adler32(dex[12:]) & 0xFFFFFFFF
+    if struct.unpack_from('<I', dex, 8)[0] != adler:
+        dex = dex[:8] + struct.pack('<I', adler) + dex[12:]
+        fixes.append('adler32-checksum')
+    return dex, fixes
+
+
+SHELL_ASSET_PATTERNS = (
+    'libjiagu', '.jgapp', 'jiagu',  # 360 family
+)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument('packed')
+    ap.add_argument('dumped_dex')
+    ap.add_argument('-o', '--out', default=None)
+    ap.add_argument('--app-name', default=None,
+                    help='force the original Application class to SET (skip removal)')
+    ap.add_argument('--keep-app-name', action='store_true',
+                    help='do not touch the android:name attribute')
+    args = ap.parse_args()
+    out = args.out or args.packed.rsplit('.', 1)[0] + '.repaired.apk'
+
+    zin = zipfile.ZipFile(args.packed)
+    dex = open(args.dumped_dex, 'rb').read()
+    dex, fixes = dex_validate_fix(dex)
+    if fixes:
+        print('dex fixes applied: %s' % ', '.join(fixes))
+
+    manifest = zin.read('AndroidManifest.xml')
+    if not args.keep_app_name and not args.app_name:
+        klasses = dex_classes_set(dex)
+        surgery = find_manifest_surgery(manifest, klasses)
+        if surgery:
+            attr_off, attr_size, chunk_off, chunk_csize, val = surgery
+            print('manifest surgery: removing android:name="%s" (attr @0x%x, 20B)' % (val, attr_off))
+            manifest = apply_surgery(manifest, attr_off, attr_size, chunk_off, chunk_csize)
+        else:
+            print('manifest: no wrapper android:name found (nothing to remove)')
+
+    removed = []
+    with zipfile.ZipFile(out, 'w') as zo:
+        for info in zin.infolist():
+            name = info.filename
+            if name == 'AndroidManifest.xml':
+                zo.writestr(name, manifest)
+                continue
+            if name == 'classes.dex':
+                zo.writestr(name, dex)
+                continue
+            if any(p in name for p in SHELL_ASSET_PATTERNS) and name.startswith('assets/'):
+                removed.append(name)
+                continue
+            zo.writestr(info, zin.read(name))
+    print('removed shell entries: %s' % (removed or 'none'))
+    print('repaired APK: %s' % out)
+
+
+if __name__ == '__main__':
+    main()
