@@ -568,62 +568,6 @@ def test_repair_pipeline():
     print('repair pipeline OK: v2 sign round-trip (digest+RSA verified, zip intact)')
 
     # --- C. the dexclean classification on a minimal synthetic DEX
-    # craft: header + string_ids(1) + type_ids(1) + class_defs(1: com.stub.StubApp)
-    import struct as st2
-    import hashlib as hl
-    import zlib
-
-    def _mk_dex(class_desc):
-        strings = [class_desc, b'\x00'.decode()]  # the type string + an empty
-        # sections: string_ids at 0x70, then data
-        hdr = bytearray(0x70)
-        hdr[0:8] = b'dex\n035\x00'
-        # build the body after the header
-        body = b''
-        string_ids = b''
-        string_data = b''
-        offs = []
-        # the strings data starts after the tables; compute layout:
-        # [0x70: string_ids (n*4)] [type_ids (m*4)] [class_defs (k*32)] [string data] [map]
-        n_str = 2
-        n_type = 1
-        n_cls = 1
-        str_ids_off = 0x70
-        type_ids_off = str_ids_off + n_str * 4
-        class_defs_off = type_ids_off + n_type * 4
-        data_off = class_defs_off + n_cls * 32
-        # string data: uleb len + bytes + NUL
-        s0_off = data_off
-        s1_off = s0_off + 1 + len(strings[0]) + 1
-        str_blob = (bytes([len(strings[0])]) + strings[0].encode() + b'\x00'
-                    + b'\x00')  # the second (empty) string
-        # class def: class_idx=0, access=0, super=0xFFFFFFFF, ifaces=0, src=0xFFFFFFFF, ann=0, data=0, sval=0
-        cd = st2.pack('<IIIIIIII', 0, 0, 0xFFFFFFFF, 0, 0xFFFFFFFF, 0, 0, 0)
-        map_off = data_off + len(str_blob)
-        # map_list: 5 entries: header(0x00), string_id(0x01), type_id(0x02), class_def(0x06), map(0x1000)
-        entries = [(0x0000, 1, 0), (0x0001, n_str, str_ids_off), (0x0002, n_type, type_ids_off),
-                   (0x0006, n_cls, class_defs_off), (0x1000, 5, map_off)]
-        map_list = st2.pack('<I', 5) + b''.join(st2.pack('<HHI', t, 0, c) for t, _, c in entries)
-        # assemble
-        out = bytearray(hdr)
-        out += st2.pack('<I', s0_off)  # string_ids[0] = the offset of string 0
-        out += st2.pack('<I', s1_off)  # string_ids[1]
-        out += st2.pack('<I', 0)       # type_ids[0] -> string 0
-        out += cd
-        out += str_blob
-        out += map_list
-        # header fields: string_ids_size/off @56, type_ids_size/off @64
-        st2.pack_into('<IIII', out, 56, n_str, str_ids_off, n_type, type_ids_off)
-        # class_defs_size/off @96/+100 (adjacent)
-        st2.pack_into('<II', out, 96, n_cls, class_defs_off)
-        st2.pack_into('<I', out, 52, map_off)
-        file_size = len(out)
-        st2.pack_into('<I', out, 32, file_size)
-        st2.pack_into('<I', out, 36, 0x70)
-        out[12:32] = hl.sha1(bytes(out[32:])).digest()
-        st2.pack_into('<I', out, 8, zlib.adler32(bytes(out[12:])) & 0xFFFFFFFF)
-        return bytes(out)
-
     d_shell = _mk_dex('Lcom/stub/StubApp;')
     dx = dexclean.Dex(d_shell)
     keep, shell, foreign = dx.classify('', [])
@@ -687,6 +631,79 @@ def test_rc4mat():
         print('crypto_recon rc4mat OK: planted material found by the material-space scan')
 
 
+def _mk_dex(class_desc):
+    """Synthetic minimal DEX (1 type, 1 class): header + tables + map_list,
+    with sums computed. Shared by the repair/dexdoctor anchors."""
+    import struct as st2
+    import hashlib as hl
+    import zlib
+    strings = [class_desc, '']
+    hdr = bytearray(0x70)
+    hdr[0:8] = b'dex\n035\x00'
+    n_str = 2
+    n_type = 1
+    n_cls = 1
+    str_ids_off = 0x70
+    type_ids_off = str_ids_off + n_str * 4
+    class_defs_off = type_ids_off + n_type * 4
+    data_off = class_defs_off + n_cls * 32
+    s0_off = data_off
+    s1_off = s0_off + 1 + len(strings[0]) + 1
+    str_blob = (bytes([len(strings[0])]) + strings[0].encode() + b'\x00' + b'\x00')
+    cd = st2.pack('<IIIIIIII', 0, 0, 0xFFFFFFFF, 0, 0xFFFFFFFF, 0, 0, 0)
+    map_off = data_off + len(str_blob)
+    entries = [(0x0000, 1, 0), (0x0001, n_str, str_ids_off), (0x0002, n_type, type_ids_off),
+               (0x0006, n_cls, class_defs_off), (0x1000, 1, map_off)]
+    map_list = st2.pack('<I', 5) + b''.join(st2.pack('<HHII', t, 0, c, o) for t, c, o in entries)
+    out = bytearray(hdr)
+    out += st2.pack('<I', s0_off)
+    out += st2.pack('<I', s1_off)
+    out += st2.pack('<I', 0)
+    out += cd
+    out += str_blob
+    out += map_list
+    st2.pack_into('<IIII', out, 56, n_str, str_ids_off, n_type, type_ids_off)
+    st2.pack_into('<II', out, 96, n_cls, class_defs_off)
+    st2.pack_into('<I', out, 52, map_off)
+    st2.pack_into('<I', out, 32, len(out))
+    st2.pack_into('<I', out, 36, 0x70)
+    st2.pack_into('<I', out, 40, 0x12345678)  # endian tag
+    out[12:32] = hl.sha1(bytes(out[32:])).digest()
+    st2.pack_into('<I', out, 8, zlib.adler32(bytes(out[12:])) & 0xFFFFFFFF)
+    return bytes(out)
+
+
+def test_dexdoctor():
+    """dexdoctor (r31): triage + first-aid for wounded dumps. Each planted
+    pathology must heal back to the EXACT original bytes (the golden test)."""
+    import struct as st
+    import dexdoctor
+    healthy = _mk_dex('Lcom/example/MyApp;')
+    t0 = dexdoctor.Triage(healthy).diagnose()
+    assert not t0.issues, 'healthy synthetic triaged as wounded: %s' % t0.issues
+
+    # wound A: shell-zeroed sums + trashed file_size
+    wa = bytearray(healthy)
+    wa[12:32] = b'\x00' * 20
+    st.pack_into('<I', wa, 8, 0)
+    st.pack_into('<I', wa, 32, 0)
+    # wound B: map_off wiped (the anti-static-parse sabotage) + sums zeroed
+    wb = bytearray(healthy)
+    st.pack_into('<I', wb, 52, 0)
+    wb[12:32] = b'\x00' * 20
+    # wound C: page-aligned dump with trailing zero padding
+    pad = (4096 - len(healthy) % 4096) or 4096
+    wc = bytearray(healthy) + b'\x00' * pad
+    for name, wound in (('A sums+file_size', wa), ('B map_off', wb), ('C padding', wc)):
+        t = dexdoctor.Triage(bytes(wound)).diagnose()
+        assert t.issues, 'wound %s not detected' % name
+        healed = t.fix()
+        assert healed == healthy, 'wound %s healed imperfectly (bytes differ)' % name
+        post = dexdoctor.Triage(healed).diagnose()
+        assert not post.issues, 'wound %s leaves residual: %s' % (name, post.issues)
+    print('dexdoctor OK: 3 planted pathologies detected + healed to exact original bytes')
+
+
 if __name__ == '__main__':
     test_so_emulator()
     test_rc4_vector()
@@ -696,5 +713,6 @@ if __name__ == '__main__':
     test_sm4recon()
     test_elfrecon()
     test_repair_pipeline()
+    test_dexdoctor()
     test_rc4mat()
     print('trackb selftest: ALL GREEN')

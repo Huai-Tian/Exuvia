@@ -8,6 +8,9 @@ native loader assets) are still in the APK. This wraps the full pipeline:
 
   repair_all.py <packed.apk> <dumped.dex> -o <restored.apk> [--key k --cert c]
 
+  0. DOCTOR  dexdoctor:  triage the dump for shell sabotage (zeroed checksums,
+                          wiped map_off, page padding) and heal it — every
+                          pathology must heal to structurally-clean DEX.
   1. CLEAN   dexclean:   classify the dumped DEX (shell stubs / foreign-app
                           pollution / R8-obfuscated app classes) and drop the
                           junk class_defs (map+checksum refixed).
@@ -19,9 +22,10 @@ native loader assets) are still in the APK. This wraps the full pipeline:
   3. SIGN    sign2:      fresh APK v2 signature (RSASSA-PKCS1+SHA2-256), or a
                           provided key/cert pair.
 
-All four stages are importable modules (axmltool / dexclean / sign2 / repair).
-Zero-sample policy: no sample knowledge embedded — the wrapper patterns are
-generic and the definitive test is always the DEX cross-reference.
+All five stages are importable modules (dexdoctor / axmltool / dexclean /
+sign2 / repair). Zero-sample policy: no sample knowledge embedded — the
+wrapper patterns are generic and the definitive test is always the DEX
+cross-reference.
 """
 import argparse
 import sys
@@ -43,9 +47,19 @@ def main():
     import dexclean
     import repair
     import sign2
+    import dexdoctor
+
+    # 0. triage the dump — third-party dumps arrive wounded (shell-sabotaged
+    #    checksums, wiped map_off, page padding); heal before any parsing
+    dump = open(args.dumped_dex, 'rb').read()
+    tri = dexdoctor.Triage(dump, args.dumped_dex).diagnose()
+    if tri.issues:
+        dump = tri.fix()
+        print('[doctor] wounds healed: %s' % '; '.join(tri.fixes))
+    else:
+        print('[doctor] dump healthy')
 
     # 1. clean
-    dump = open(args.dumped_dex, 'rb').read()
     dex = dexclean.Dex(dump)
     comps, pkg = dexclean.manifest_classes_from_apk(args.packed)
     keep, shell, foreign = dex.classify(pkg or '', comps)
