@@ -89,6 +89,26 @@ enum Cmd {
         #[arg(long, default_value = "hunt")]
         out: std::path::PathBuf,
     },
+    /// 修复管线：dump 的 DEX → 可安装可运行的 APK
+    /// （12 轮真机验证的 Python 工具链内嵌于二进制；系统 python3 是前提假设）
+    Repair {
+        /// 加固后的（壳）APK
+        #[arg(value_name = "PACKED_APK")]
+        packed: std::path::PathBuf,
+        /// dump 出的 DEX 文件
+        #[arg(value_name = "DUMPED_DEX")]
+        dex: std::path::PathBuf,
+        /// 输出 APK 路径
+        #[arg(short, long)]
+        out: std::path::PathBuf,
+        /// 参照 DEX（原包 classes.dex；仅内部测试用，生产场景无原包）
+        #[arg(long)]
+        reference: Option<std::path::PathBuf>,
+        /// 额外 dump 来源（第三方 dump / 脱壳阶段产物，可多次）——
+        /// 被壳抽取的方法从任何携带其方法体的来源还原，多来源互补
+        #[arg(long = "dump", value_name = "DUMP_DEX")]
+        dumps: Vec<std::path::PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -122,12 +142,16 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
 
     // 启动校验：失败输出结构化错误（给 Agent 读），退出码 2（DRAFT 值）
-    if let Err(e) = install::check(cli.profile.as_deref()) {
-        eprintln!(
-            "{{\"status\":\"installation-broken\",\"detail\":\"{}\"}}",
-            e.replace('"', "'")
-        );
-        return ExitCode::from(install::BROKEN_EXIT as u8);
+    // Repair 子命令例外：它是独立修复工具（Python 工具链内嵌），不依赖 SKILL.md fence
+    let is_repair = matches!(cli.cmd, Some(Cmd::Repair { .. }));
+    if !is_repair {
+        if let Err(e) = install::check(cli.profile.as_deref()) {
+            eprintln!(
+                "{{\"status\":\"installation-broken\",\"detail\":\"{}\"}}",
+                e.replace('"', "'")
+            );
+            return ExitCode::from(install::BROKEN_EXIT as u8);
+        }
     }
 
     if cli.version {
@@ -231,6 +255,38 @@ fn main() -> ExitCode {
                     eprintln!("{{\"error\":\"{}\"}}", e.replace('"', "'"));
                     ExitCode::FAILURE
                 }
+            }
+        }
+        Some(Cmd::Repair { packed, dex, out, reference, dumps }) => {
+            use exuvia::repair::{run_repair, RepairArgs};
+            let args = RepairArgs {
+                packed_apk: packed,
+                dumped_dex: dex,
+                out_apk: out,
+                reference_dex: reference,
+                extra_dumps: dumps,
+                key_pem: None,
+                cert_der: None,
+            };
+            let result = run_repair(&args);
+            let json = serde_json::json!({
+                "success": result.success,
+                "doctor_fixes": result.doctor_fixes,
+                "deweave_restored": result.deweave_restored,
+                "restore_count": result.restore_count,
+                "stubsafe_count": result.stubsafe_count,
+                "surgery_removed": result.surgery_removed,
+                "shell_assets_removed": result.shell_assets_removed,
+                "final_size": result.final_size,
+                "output": args.out_apk,
+                "error": result.error,
+                "log": result.logs,
+            });
+            println!("{}", serde_json::to_string_pretty(&json).unwrap());
+            if result.success {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
             }
         }
         Some(Cmd::Unpack { cmd }) => match cmd {

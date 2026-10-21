@@ -71,6 +71,14 @@ Exuvia 是一个**面向 AI Agent 的 Android 通用脱壳 / 代码恢复流水�
 
 ## 0.5 第一战交接视图（r20 末状态——技术事实坐标 + 分析路径，接手 Agent 从这里继续）
 
+> **🏁 里程碑：v12 修复产物真机双双成功（2026-10-21 20:41-20:45）**——
+> **v2 (fulldump) ✓**：安装 → MainActivity 启动 (result code=0) → App 正常运行 → 无 FATAL/crash/died；
+> **v1 (56.al) ✓**：安装 → MainActivity 启动 (result code=0) → App 正常运行 → 无 FATAL/crash/died。
+> **跨脱壳器通用性验证通过**：两个不同脱壳器（56.al 紧凑重排 1.85MB vs fulldump 内存展开 4.5MB）的 dump
+> 经同一修复管线产出的两个 APK 均在真机（Oppo/Android 15+，targetSdk 36）上正常运行。
+> 从 v1 首次交付到 v12 双双成功：**12 轮交付、11 个根因、2 个产物、2 次真机成功**。
+> Patch 已提交 GitHub (`8e3001b→0fe9cc3`)。
+
 > **⚠️ r26 补充（修复阶段完成后的脱壳回归）**：修复阶段（r30-r31，十轮真机反馈闭环）已于 r31 末交
 > 付 v12 产物——修复管线 10 工具 + 统一任务协议 v1.0。脱壳阶段核心未解问题不变：**classes.dex 尾
 > 容器 (1MB) 的 key 是运行时构造的**。r26-r27 轮次（脱壳回归）关键发现：
@@ -129,6 +137,14 @@ Exuvia 是一个**面向 AI Agent 的 Android 通用脱壳 / 代码恢复流水�
 >   - **关键结论**：容器解密不发生在 JNI_OnLoad/Workers 阶段——它发生在后续的 Java 方法调用
 >   （attachBaseContext）中，需要壳先通过 RegisterNatives 注册 native 方法。模拟需要扩展
 >   生命周期或直接调用解密函数；
+>   - **r28 补充：容器 key 全维度穷尽搜索（终局负空间）**：
+>     壳工作区步长 1 扫描（25KB × 每 16B 窗口作为 SM4 key）= 0；壳工作区步长 4 轮密钥扫描
+>     （25KB × 每 128B 作为 32-u32 SM4 RK）= 0；dump 运行时数据区 (0x2e3e18-0x2e40a0) 轮密钥 = 0；
+>     dump 运行时表区域 (0x2e4000-0x2e4300) 轮密钥 = 0；dump 尾部 64KB 步长 1 = 0。
+>     **结论：容器 key 是纯运行时构造的，不存在于 dump/静态容器/壳工作区的任何位置。**
+>     获取 key 需要完整模拟 attachBaseContext 生命周期（工程量大），或从真机运行时捕获。
+>   - **战略决策**：修复管线已闭环（v1+v2 真机成功），容器解密是"追求字节级完美"的增强功能。
+>     下一步优先级：① 产品化（Rust 单二进制 exuvia repair 子命令）② 测试更多壳样本 ③ 容器解密（低优先级）
 
 **语料**：`/workspace/corpus/`——`ssd-free-r1.orig.apk`（原包，v2 签名）、`ssd-free-r1.packed.apk`（加固包）、`extracted/`（壳 APK 解包：classes.dex + assets/libjiagu*.so 四架构）、`handoff/`（attempts.log——**先读它**：r1-r14 原始行随沙箱丢失，bootstrap 条目诚实留痕，r 轮摘要以 git 提交信息与本文档为准；接手 HANDOFF 副本在 handoff/HANDOFF_r15_entry.md）。
 

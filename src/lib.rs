@@ -5,6 +5,7 @@ pub mod gate;
 pub mod install;
 pub mod next;
 pub mod protocol;
+pub mod repair;
 pub mod report;
 pub mod sandbox;
 pub mod track_a;

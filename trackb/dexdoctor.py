@@ -171,10 +171,20 @@ class Triage:
             if bad:
                 self.issues.append('P10 %d corrupted annotation entries' % bad)
                 self.meta['ann_bad'] = bad
-            # P11: ART also walks the MAP-DECLARED 2003/2004 sections entry
-            # by entry — content that no reference chain ever touches (the
-            # memory-layout map's type labels are unreliable and often point
-            # at debug_info streams)
+            # P11: ART also walks the MAP-DECLARED annotation/encoded-array
+            # sections entry by entry — content that no reference chain ever
+            # touches (the memory-layout map's type labels are unreliable and
+            # often point at debug_info streams).
+            # NOTE: correct DEX spec type codes (fixed 2026-10-21 — the original
+            # implementation swapped 0x2003/0x2004/0x2005 and mislabeled them;
+            # for raw dumps the deletion repair happened to work because the
+            # dump's map was misaligned in *both* slots, but repacked dexes
+            # from dexlib2 carry a *correct* debug_info section at 0x2003 that
+            # must NOT be walked as annotations):
+            #   0x2003 = DEBUG_INFO_ITEM    — not walked (variable-length state machine)
+            #   0x2004 = ANNOTATION_ITEM    — [visibility u1][encoded_annotation]
+            #   0x2005 = ENCODED_ARRAY_ITEM — [size uleb][encoded_value...]
+            #   0x2006 = ANNOTATIONS_DIRECTORY_ITEM — [class u4][fields u4][methods u4][params u4]
             bad_types = self._map_section_audit(bytes(d))
             if bad_types:
                 self.issues.append('P11 map-declared sections invalid: %s'
@@ -419,10 +429,17 @@ class Triage:
 
     @classmethod
     def _map_section_audit(cls, d):
-        """P11: walk the MAP-DECLARED annotation_item (0x2003) and
-        encoded_array_item (0x2004) sections entry by entry the way ART's
+        """P11: walk the MAP-DECLARED annotation_item (0x2004) and
+        encoded_array_item (0x2005) sections entry by entry the way ART's
         verifier does. Returns the set of section TYPES holding at least one
-        invalid entry (empty set = clean)."""
+        invalid entry (empty set = clean).
+
+        Correct DEX spec type codes (fixed 2026-10-21):
+          0x2003 = DEBUG_INFO_ITEM (not walked — variable-length state machine)
+          0x2004 = ANNOTATION_ITEM [visibility u1][encoded_annotation]
+          0x2005 = ENCODED_ARRAY_ITEM [size uleb][encoded_value...]
+          0x2006 = ANNOTATIONS_DIRECTORY_ITEM (not walked — offsets only)
+        """
         mo = struct.unpack_from('<I', d, 52)[0]
         n = struct.unpack_from('<I', d, mo)[0]
         items = [struct.unpack_from('<HHII', d, mo + 4 + k * 12) for k in range(n)]
@@ -430,7 +447,7 @@ class Triage:
         bad_types = set()
         for i, (t, _u, c, off) in enumerate(items):
             end = items[i + 1][3] if i + 1 < len(items) else len(d)
-            if t == 0x2003:  # annotation_item: [visibility][encoded_annotation]
+            if t == 0x2004:  # ANNOTATION_ITEM: [visibility u1][encoded_annotation]
                 p = off
                 for _ in range(c):
                     if not cls._ann_item_ok(d, p):
@@ -452,7 +469,7 @@ class Triage:
                     if not ok or np_ > end:
                         break
                     p = np_
-            elif t == 0x2004:  # encoded_array_item: [size uleb][encoded_value...]
+            elif t == 0x2005:  # ENCODED_ARRAY_ITEM: [size uleb][encoded_value...]
                 p = off
                 for _ in range(c):
                     try:
@@ -477,8 +494,8 @@ class Triage:
         the map_list. (The earlier count=0 trick — 'empty section' — was
         rejected by real-hardware ART with 'Unknown map item type': the map
         is rigid, absent entries are fine, hollow ones are not. The required-
-        entry checks cover header/map_list/string_ids/... — 2003/2004 are NOT
-        in that list, so removal is legal.) Returns the number of entries
+        entry checks cover header/map_list/string_ids/... — 0x2004/0x2005 are
+        NOT in that list, so removal is legal.) Returns the number of entries
         removed."""
         if not bad_types:
             return 0

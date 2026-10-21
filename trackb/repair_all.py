@@ -41,10 +41,15 @@ def main():
     ap.add_argument('--key')
     ap.add_argument('--cert')
     ap.add_argument('--keep-shell-classes', action='store_true')
-    ap.add_argument('--reference', help='reference DEX (the unpacked original or a '
-                    'prior version) — native-stub methods frozen by the shell '
-                    '(entry lifecycle hooks) are restored from here; without it, '
-                    'the repack can only re-serialize the stub state')
+    ap.add_argument('--dump', action='append', metavar='DEX',
+                    help='additional dump DEX (third-party dumps — FART, frida '
+                    'hooks, earlier unpack-stage output) — shell-extracted '
+                    'methods are restored from any source that carries the '
+                    'body; may be given multiple times, sources are tried in '
+                    'order and are complementary')
+    ap.add_argument('--reference', help='reference DEX (the unpacked original — '
+                    'INTERNAL TESTING ONLY; production runs have no original) — '
+                    'same merge mechanism as --dump, highest-trust source')
     args = ap.parse_args()
 
     import os
@@ -89,43 +94,110 @@ def main():
     else:
         print('[deweave] no shell weaving found')
 
-    # 1.6 repack (dexlib2): re-serialize the whole DEX into a fresh,
-    # spec-standard layout. Patching a memory-layout dump's map NEVER
-    # converges (ART's padding/overlap/walk checks each reject the next
-    # irregularity); re-serialization rebuilds every section compactly with
-    # a canonical map — the same layout the smali ecosystem has shipped for
-    # two decades. Semantics preserved (classes/methods/code/annotations).
+    # 1.6 restore + stubsafe + repack (dexlib2).
+    #
+    # The shell's method EXTRACTION froze app methods as native+no-code stubs
+    # (the real body lived in the runtime hook). The shell removed, such a
+    # stub is lethal: the JNI hook is gone -> UnsatisfiedLinkError. Body
+    # sources, tried in order:
+    #   --dump      third-party dumps / earlier unpack-stage output — THE
+    #               PRODUCTION PATH. A dump taken at the right moment carries
+    #               decrypted bodies; several dumps are complementary.
+    #   --reference the unpacked original — internal testing only.
+    # Restore merges back every body any source carries. What NO source has
+    # is handled by StubSafe:
+    #   native + framework-lifecycle name  -> contract-equivalent super-delegate
+    #   body synthesized (a legal native lifecycle override cannot exist — the
+    #   template-method contract requires the super chain, so this is the
+    #   shell's tell). Lethal stub state is eliminated; the app launches.
+    #   native + no lifecycle contract    -> KEPT as-is: a legal JNI
+    #   declaration backed by a .so still shipped in the APK is a necessary,
+    #   side-effect-free leftover we reuse rather than re-invent.
+    # The final stage re-serializes the whole DEX into a fresh, spec-standard
+    # layout. Patching a memory-layout dump's map NEVER converges (ART's
+    # padding/overlap/walk checks each reject the next irregularity);
+    # re-serialization rebuilds every section compactly with a canonical map —
+    # the same layout the smali ecosystem has shipped for two decades.
+    # Semantics preserved (classes/methods/code/annotations).
     # heavy toolchain jars live user-side (workspace root /tools/dexlib) —
     # same policy as apktool.jar; the git repo ships only source
     repack_dir = os.environ.get('EXUVIA_DEXLIB', '/workspace/tools/dexlib')
     jars = 'dexlib2-2.5.2.jar:util-2.5.2.jar:guava-31.1-jre.jar:.'
-    if os.path.exists(os.path.join(repack_dir, 'dexlib2-2.5.2.jar')) and \
-            os.path.exists(os.path.join(repack_dir, 'Repack.class')):
-        tmp_in = args.out + '.repack_in.dex'
-        tmp_out = args.out + '.classes_repacked.dex'
-        open(tmp_in, 'wb').write(cleaned)
-        if args.reference and os.path.exists(os.path.join(repack_dir, 'Restore.class')):
-            # restore: native stubs get reference bodies + standard layout
-            r = subprocess.run(['java', '-Xmx2g', '-cp', jars,
-                                'Restore', tmp_in, args.reference, tmp_out],
-                               cwd=repack_dir, capture_output=True, text=True, timeout=600)
-            verb = 'restore'
+    have_dexlib = os.path.exists(os.path.join(repack_dir, 'dexlib2-2.5.2.jar'))
+    have_restore = have_dexlib and os.path.exists(os.path.join(repack_dir, 'Restore.class'))
+    have_stubsafe = have_dexlib and os.path.exists(os.path.join(repack_dir, 'StubSafe.class'))
+    have_repack = have_dexlib and os.path.exists(os.path.join(repack_dir, 'Repack.class'))
+
+    sources = []
+    for d in (args.dump or []):
+        if os.path.exists(d):
+            sources.append(('dump', d))
         else:
-            # repack: just standard layout (no reference)
-            r = subprocess.run(['java', '-Xmx2g', '-cp', jars,
-                                'Repack', tmp_in, tmp_out],
-                               cwd=repack_dir, capture_output=True, text=True, timeout=600)
-            verb = 'repack'
-        if r.returncode == 0 and os.path.exists(tmp_out):
-            cleaned = open(tmp_out, 'rb').read()
-            os.remove(tmp_in)
-            os.remove(tmp_out)
-            for line in [l for l in (r.stdout + '').strip().split('\n') if l.strip()]:
-                print('[%s] %s' % (verb, line))
-            print('[%s] dexlib2 standard layout (%d bytes)' % (verb, len(cleaned)))
+            print('[restore] dump source not found, skipped: %s' % d)
+    if args.reference:
+        if os.path.exists(args.reference):
+            sources.append(('reference', args.reference))
         else:
-            print('[%s] FAILED — falling back to the patched dump layout' % verb)
-            print(r.stdout + r.stderr)
+            print('[restore] reference not found, skipped: %s' % args.reference)
+
+    if have_dexlib:
+        cur = args.out + '.stage.dex'
+        open(cur, 'wb').write(cleaned)
+        # restore: merge bodies from every source that carries them
+        for kind, src in sources:
+            if not have_restore:
+                break
+            nxt = args.out + '.stage_next.dex'
+            r = subprocess.run(['java', '-Xmx2g', '-cp', jars,
+                                'Restore', cur, src, nxt],
+                               cwd=repack_dir, capture_output=True, text=True, timeout=600)
+            if r.returncode == 0 and os.path.exists(nxt):
+                os.remove(cur)
+                cur = nxt
+                for line in [l for l in (r.stdout + '').strip().split('\n') if l.strip()]:
+                    print('[restore:%s] %s' % (kind, line))
+            else:
+                print('[restore:%s] FAILED on %s — continuing without it' % (kind, src))
+                print(r.stdout + r.stderr)
+        # stubsafe: synthesize contract-equivalent bodies for whatever lethal
+        # stubs no source could fill; also the final standard-layout repack
+        if have_stubsafe:
+            nxt = args.out + '.stage_final.dex'
+            r = subprocess.run(['java', '-Xmx2g', '-cp', jars,
+                                'StubSafe', cur, nxt],
+                               cwd=repack_dir, capture_output=True, text=True, timeout=600)
+            if r.returncode == 0 and os.path.exists(nxt):
+                os.remove(cur)
+                cleaned = open(nxt, 'rb').read()
+                os.remove(nxt)
+                for line in [l for l in (r.stdout + '').strip().split('\n') if l.strip()]:
+                    print('[stubsafe] %s' % line)
+                print('[stubsafe] dexlib2 standard layout (%d bytes)' % len(cleaned))
+            else:
+                print('[stubsafe] FAILED — falling back to the restore-stage DEX')
+                print(r.stdout + r.stderr)
+                cleaned = open(cur, 'rb').read()
+                os.remove(cur)
+        elif have_repack:
+            # legacy fallback when StubSafe.class is absent
+            nxt = args.out + '.stage_final.dex'
+            r = subprocess.run(['java', '-Xmx2g', '-cp', jars,
+                                'Repack', cur, nxt],
+                               cwd=repack_dir, capture_output=True, text=True, timeout=600)
+            if r.returncode == 0 and os.path.exists(nxt):
+                os.remove(cur)
+                cleaned = open(nxt, 'rb').read()
+                os.remove(nxt)
+                print('[repack] dexlib2 standard layout (%d bytes)' % len(cleaned))
+            else:
+                print('[repack] FAILED — falling back to the patched dump layout')
+                print(r.stdout + r.stderr)
+                cleaned = open(cur, 'rb').read()
+                os.remove(cur)
+        else:
+            cleaned = open(cur, 'rb').read()
+            os.remove(cur)
+            print('[repack] dexlib2 tools unavailable — using the patched dump layout')
     else:
         print('[repack] dexlib2 not available — using the patched dump layout')
 
