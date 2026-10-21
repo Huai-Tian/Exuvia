@@ -132,7 +132,7 @@ def split_args(s):
     return out
 
 
-def synth(trace_path, mname, msig, super_cls):
+def synth(trace_path, mname, msig, super_cls, cls=None):
     lines = [l.rstrip('\n') for l in open(trace_path)]
     ops = []
     for l in lines:
@@ -194,8 +194,12 @@ def synth(trace_path, mname, msig, super_cls):
                 r = rf.alloc(key)
                 body.append(f"    {'const/4' if r <= 15 else 'const/16'} v{r}, 0x0")
             return f'v{r}'
-        if re.fullmatch(r'-?\d+', tok):
-            v = int(tok)
+        # hex/decimal literal — jvalue ints print as-is (e.g. '0x1'); they are
+        # NOT addresses. Addresses in the fake world are >= 0x100000 (heap
+        # 0x5000_0000_0000, sentinels 0x51E0_0000) and always trace-produced.
+        mnum = re.fullmatch(r'-?(0x[0-9a-fA-F]+|\d+)', tok)
+        if mnum and (tok.lstrip('-').isdigit() or int(tok, 0) < 0x100000):
+            v = int(tok, 0)
             if ty == 'Z':
                 v &= 1
             key = f'c{v}:{ty if ty in "ZBCSIJ" else "I"}'
@@ -226,9 +230,12 @@ def synth(trace_path, mname, msig, super_cls):
             r = rf.get('a' + addr)
             if r is not None:
                 return f'v{r}'
-            ty2 = alloc_ty.get(addr)
-            return reg_label(addr, ty2)
-        notes.append(f'unresolved value token {tok!r} ({ty}) -> null')
+            # fallthrough: token referenced but never produced in this trace —
+            # emitting a bare register reference here synthesizes an UNDEFINED
+            # register and ART rejects the class (VerifyError copy1 vN<-vM).
+            notes.append(f'untracked token {tok!r} ({ty}) -> null')
+        else:
+            notes.append(f'unresolved value token {tok!r} ({ty}) -> null')
         key = 'zero:o'
         r = rf.get(key)
         if r is None:
@@ -236,8 +243,13 @@ def synth(trace_path, mname, msig, super_cls):
             body.append(f"    {'const/4' if r <= 15 else 'const/16'} v{r}, 0x0")
         return f'v{r}'
 
-    def emit_invoke(kind, pairs, target):
-        """pairs: [(label, ty), ...] including implicit 'this' for non-static."""
+    def emit_invoke(kind, pairs, target, this_cast=None):
+        """pairs: [(label, ty), ...] including implicit 'this' for non-static.
+        this_cast: owner class of the callee — when the traced producer gave
+        the receiver a DIFFERENT declared type (e.g. getDecorView():View vs
+        ViewGroup.addView), the register's inferred type won't satisfy the
+        verifier; insert check-cast (sound: GetMethodID succeeded at runtime,
+        so the object IS an instance of the owner class)."""
         n = len(pairs)
         if n == 0:
             body.append(f'    {kind} {{}}, {target}')
@@ -245,6 +257,8 @@ def synth(trace_path, mname, msig, super_cls):
         for i, (lab, ty) in enumerate(pairs):
             mv = 'move-object/from16' if ty.startswith(('L', '[')) else 'move/from16'
             body.append(f'    {mv} v{i}, {lab}')
+            if i == 0 and this_cast and ty.startswith('L') and ty != this_cast:
+                body.append(f'    check-cast v{i}, {this_cast}')
         regs = ', '.join(f'v{i}' for i in range(n))
         if n <= 5:
             body.append(f'    {kind} {{{regs}}}, {target}')
@@ -366,8 +380,10 @@ def synth(trace_path, mname, msig, super_cls):
                                 f'{ty}-><init>{csig}')
                 else:
                     op = 'invoke-interface' if owner in KNOWN_INTERFACES else 'invoke-virtual'
-                    emit_invoke(op, [(reg_label(x1), 'L')] + list(zip(arg_labels, arg_tys)),
-                                f'{owner}->{mnm}{csig}')
+                    x1_ty = (cls if (this_addr and x1 == this_addr)
+                             else rf.reg_ty.get(rf.map.get('a' + x1)))
+                    emit_invoke(op, [(reg_label(x1), x1_ty or owner)] + list(zip(arg_labels, arg_tys)),
+                                f'{owner}->{mnm}{csig}', this_cast=owner)
             if cret != 'V' and mnm != '<init>':
                 r = vreg_of(retaddr, cret)
                 op = 'move-result-object' if cret.startswith(('L', '[')) else 'move-result'
@@ -422,7 +438,7 @@ def main():
         if not msig:
             print(f'[skip] no signature for {mname}', file=sys.stderr)
             continue
-        res = synth(os.path.join(args.traces, fn), mname, msig, args.sup)
+        res = synth(os.path.join(args.traces, fn), mname, msig, args.sup, cls=args.cls)
         blocks.append(render(mname, msig, res, args.sup))
         for n in res.get('notes', []):
             print(f'[note] {mname}: {n}', file=sys.stderr)

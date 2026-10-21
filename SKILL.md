@@ -272,6 +272,7 @@ Stages (all embedded in the binary; output JSON reports counts per stage):
 - `--dump <dex>` (repeatable) — third-party dumps / earlier unpack-stage output. THE PRODUCTION PATH: a dump taken at the right moment carries decrypted bodies; several dumps are complementary (each source is tried; any source carrying a body wins).
 - `--reference <dex>` — the unpacked original. INTERNAL TESTING ONLY (production has no original; same merge mechanism as `--dump`).
 - no source — StubSafe fallback: `native + framework-lifecycle name` is the shell's tell (a legal native lifecycle override cannot exist — the template-method contract requires the super chain). StubSafe synthesizes the contract-equivalent minimal body (`invoke-super {pN}, Super.sameSignature` + return, ACC_NATIVE cleared). Everything else native is KEPT — a legal JNI declaration backed by a `.so` still in the APK is a necessary, side-effect-free leftover we reuse rather than re-invent.
+- dex2c-translate source (trackb/jnitrace.py + trackb/trace2smali.py) — for the translate-to-JNI family (§8 family 2): the body exists as JNI C++ in the shell .so, so it IS recoverable without any dump. jnitrace runs the native function under the trackb emulator against a 233-slot fake JNIEnv and records the JNI call sequence (= the original method's behavioral skeleton); trace2smali compiles that sequence into a straight-line smali body, spliced over the hollow stub. Synthesized bodies must satisfy three ART-verifier format facts earned from a device VerifyError (2026-10-22): (a) jvalue ints print hex in traces — treat small `0x…` tokens as literals, never as addresses (an address-keyed register that no traced instruction produced is an UNDEFINED register: VerifyError `copy1 vN<-vM type=Undefined`); (b) a receiver whose traced producer type differs from the callee owner (e.g. `getDecorView():View` feeding `ViewGroup.addView`) needs `check-cast` to the owner — sound because GetMethodID succeeded at runtime; (c) 35c/22c forms carry 4-bit registers — copy operands through a low scratch band (v0..vN) with `move*/from16`, escalate to `/range` past arity 5; interface owners need `invoke-interface`.
 
 **Known semantic boundary (honest)**: a contract-equivalent body satisfies the framework contract (installs, launches, no crash) but carries no business logic. If `onCreate` was extracted and NO source carries its body, the activity shows a blank UI — the body is simply not present in any accessible carrier (method-level lazy decryption never writes it back; 32 fulldump dexes verified zero hits on the reference corpus). Body recovery requires a source; the contract body guarantees survival.
 
@@ -305,15 +306,32 @@ guidance = [
     "return flow: a hunt hit (or interception pair) transcribes into a pure-function decrypt proposal — no exploration left; recovered claims verify via structural assertions (DEX parse) x byte tests; the repacked APK then needs only the assembler + user-side zipalign/apksigner (no DEX writer for this family)",
     "L2 evidence: attach disassembly streams next to the byte slices (trackb/disasm.py --symbol, capstone user-side) — Battle-1 proved expectation-chasing and routine-reading need instruction streams as first-class artifacts; PT_DYNAMIC runtime view resolves shell symbols that static views miss",
 ]
+
+# 族知识 2：dex2c 翻译族（第二战实测毕业，维护者真机确认 2026-10-21/22）。
+# 形态：方法体被翻译为 JNI C++（常加 OLLVM 控制流平坦化），原 Dalvik 字节码
+# 不在包内任何载体（明文/单字节 XOR/操作数掩码骨架/内嵌 dex 全部证伪）；
+# 壳 classes.dex 尾部挂 AES-128-CBC 容器（密钥/IV 在 .so rodata，机械可搜），
+# 子容器首 0x70 字节 XOR 单字节密钥。
+# 卡点重判：原判定"无 dump 不可恢复"——JNI 语义即行为骨架，模拟执行原生
+# 函数记录 JNI 调用序列即可重建直线 smali 体，全程桌面、无 dump、无参照。
+[families.dex2c-translate]
+description = "method bodies translated to (often OLLVM-flattened) JNI C++; original Dalvik absent from the package; shell tail container AES-128-CBC + XOR-prefix sub-containers; recovery = JNI-semantics trace -> smali synthesis, desktop-only, no dump, no reference"
+guidance = [
+    "prove absence before recovering: plaintext/XOR/skeleton/embedded-dex searches with a sha1+adler self-check oracle must ALL fail — only then is translate-to-JNI the confirmed shape (extraction and translation need opposite pipelines)",
+    "desktop recipe, in order: (1) dexcontainer.py rebuilds every dex from the tail container (profile-driven, per-dex sha1+adler oracle — cannot false-positive); (2) locate the JNINativeMethod-like table in the .so (name/sig/fn triples) for the native-ized methods; (3) jnitrace.py per function — fake JNIEnv, token world, numeric Call results return 0 to select the cold-start path, field reads keep unique sentinels for dataflow linking; (4) trace2smali.py compiles traces to smali (ART-verifier rules: hex jvalues are literals, check-cast on receiver-type mismatch, low scratch band vs 4-bit register forms, invoke-interface for interface owners); (5) splice over hollow stubs, assemble, repack, v2-sign",
+    "honest boundaries: straight-line bodies only (single-path trace); runtime-built strings needing device state surface as const-string \"\" placeholders flagged in the report; the cold-path convention fixes which branch a repaired fresh launch takes",
+    "cross-validation when a baseline exists (internal calibration only): synthesized sequences matched the baseline nearly 1:1 including exact constants",
+]
 ```
 
 ## 9. Version anchors
 
 ```text
-SKILL_VERSION: 1.3.0
+SKILL_VERSION: 1.4.0
 handoff_version: 1    goal_version: 1    proposal_version: 1
 ```
 
 - File version = methodology + §8 fence snapshot. Format changes start in fixtures, serde types follow, CI binds both directions.
 - 1.3.0: §7 repair-pipeline documentation added (product line b: `exuvia repair`); no protocol change.
+- 1.4.0: §7 fourth method-body source (JNI-trace → smali synthesis) + §8 family 2 dex2c-translate entered (Battle-2 maintainer device-confirmed); no protocol change.
 - Before adapting to a new environment, compare `exuvia --version` against these.
