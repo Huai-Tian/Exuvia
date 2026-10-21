@@ -72,6 +72,49 @@ class Dex:
          self.field_ids_off) = struct.unpack_from('<IIII', d, 72)
         (self.method_ids_size, self.method_ids_off, self.class_defs_size,
          self.class_defs_off, self.data_size, self.data_off) = struct.unpack_from('<IIIIII', d, 88)
+        self._tlw = self._detect_type_list_width()
+
+    def _detect_type_list_width(self):
+        """type_list entries are u32 per the classic 035 spec, but the 039
+        (min-api 29) toolchain emits compact u16 lists. Detect STRUCTURALLY
+        (never by version table): boundary-walk the map-declared 0x1001
+        region — the correct width tiles it exactly, the wrong one dies
+        early or overruns. Fallback 4 (the classic spec)."""
+        mo = self.map_off
+        if not mo or mo + 4 > len(self.d):
+            return 4
+        n = struct.unpack_from('<I', self.d, mo)[0]
+        items = [struct.unpack_from('<HHII', self.d, mo + 4 + k * 12) for k in range(n)]
+        items.sort(key=lambda x: x[3])
+        start = end = None
+        for i, it in enumerate(items):
+            if it[0] == 0x1001:
+                start = it[3]
+                end = items[i + 1][3] if i + 1 < len(items) else len(self.d)
+                break
+        if start is None or end is None or end <= start:
+            return 4
+        for w in (4, 2):
+            p, ok = start, True
+            while p < end:
+                size = struct.unpack_from('<I', self.d, p)[0]
+                if size > 1000 or p + 4 + size * w > end:
+                    ok = False
+                    break
+                p = (p + 4 + size * w + 3) & ~3
+            if ok and p == end:
+                return w
+        return 4
+
+    def _read_type_list(self, off):
+        """type_idx entries at the DETECTED width (see _detect_type_list_width)."""
+        if not off:
+            return []
+        n = struct.unpack_from('<I', self.d, off)[0]
+        w = self._tlw
+        if w == 2:
+            return list(struct.unpack_from('<%dH' % n, self.d, off + 4)) if n else []
+        return list(struct.unpack_from('<%dI' % n, self.d, off + 4)) if n else []
 
     def strings(self):
         """All string_ids as decoded strings (MUTF-8 approximated as utf-8)."""
@@ -109,10 +152,8 @@ class Dex:
             out = set()
             if super_idx != 0xFFFFFFFF:
                 out.add(super_idx)
-            if ifaces_off:
-                n = struct.unpack_from('<I', self.d, ifaces_off)[0]
-                for k in range(n):
-                    out.add(struct.unpack_from('<I', self.d, ifaces_off + 4 + k * 4)[0])
+            for t in self._read_type_list(ifaces_off):
+                out.add(t)
             if class_data_off:
                 p = class_data_off
                 nsf, p = uleb128(self.d, p)
@@ -141,10 +182,8 @@ class Dex:
                         pr = self.proto_ids_off + proto_idx * 12
                         out.add(struct.unpack_from('<I', self.d, pr + 4)[0])  # return type
                         poff = struct.unpack_from('<I', self.d, pr + 8)[0]
-                        if poff:
-                            pn = struct.unpack_from('<I', self.d, poff)[0]
-                            for q in range(pn):
-                                out.add(struct.unpack_from('<I', self.d, poff + 4 + q * 4)[0])
+                        for t in self._read_type_list(poff):
+                            out.add(t)
             edges[class_idx] = {t for t in out if t != class_idx and t < self.type_ids_size}
         return edges
 

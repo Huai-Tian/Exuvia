@@ -673,6 +673,28 @@ def _mk_dex(class_desc):
     return bytes(out)
 
 
+def test_fidelity():
+    """fidelity (r31): self-comparison verdict + injected-divergence detection."""
+    import tempfile, os
+    import fidelity
+    healthy = _mk_dex('Lcom/example/MyApp;')
+    with tempfile.TemporaryDirectory() as td:
+        p = os.path.join(td, 'a.dex')
+        q = os.path.join(td, 'b.dex')
+        open(p, 'wb').write(healthy)
+        open(q, 'wb').write(healthy)
+        rep = fidelity.report(p, q)
+        assert rep['verdict'] == 'IDENTICAL-CLASSSET'
+        assert rep['bytes']['identical'] and rep['classes']['dump_only'] == []
+        assert rep['members'].get('reliable'), 'synthetic 035 walk must be reliable'
+        # divergence: a different app entirely
+        other = _mk_dex('Lcom/other/Thing;')
+        open(q, 'wb').write(other)
+        rep2 = fidelity.report(p, q)
+        assert rep2['verdict'] == 'DIVERGENT'
+    print('fidelity OK: self-compare IDENTICAL-CLASSSET, foreign dex DIVERGENT')
+
+
 def test_dexdoctor():
     """dexdoctor (r31): triage + first-aid for wounded dumps. Each planted
     pathology must heal back to the EXACT original bytes (the golden test)."""
@@ -714,5 +736,6 @@ if __name__ == '__main__':
     test_elfrecon()
     test_repair_pipeline()
     test_dexdoctor()
+    test_fidelity()
     test_rc4mat()
     print('trackb selftest: ALL GREEN')
