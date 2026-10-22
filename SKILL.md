@@ -259,6 +259,8 @@ exuvia repair packed.apk dumped.dex -o restored.apk \
 
 **Ship channels — three dex roles, not interchangeable** (choosing wrong silently drops code from the output APK): the positional `dumped.dex` is triaged (doctor → clean → deweave) and repacked as `classes.dex`; `--dump <dex>` is a restore SOURCE ONLY — read for method bodies, never ships; `--extra-dex <dex>` (repeatable, order preserved) ships AS-IS as `classes2.dex..classesN.dex` with NO re-serialization — the channel for unpack-stage gate products (e.g. a merge-gate-passed `recovered.dex` / hunt hit) and any complete healthy dex that must reach the output byte-exact. A whole dex that only carries classes absent from the positional dump (the dex2c family's tail-container sub-dex is the case on record: sole `MainActivity` carrier) ships via `--extra-dex`; routing it to `--dump` produces an APK that installs but cannot launch.
 
+**Completeness precondition (device-earned, tosks 2026-10-22)**: whatever ships must be BODY-COMPLETE for every class the runtime touches. A raw container-recovered dex whose methods are still `native` hollow stubs is NOT shippable as-is — after surgery the shell runtime (`StubApp` + `assets/lib*.so` carrying the translated JNI bodies) is gone, and ART dies with `UnsatisfiedLinkError` on the first lifecycle call. Family-2 translated classes must first pass through the dex2c source (jnitrace → trace2smali synthesis, below); only the synthesized, all-Dalvik dex goes to `--extra-dex`. Container recovery hands you the class/method skeleton and the untranslated classes — the translated bodies come from the trace, never from the container.
+
 Stages (all embedded in the binary; output JSON reports counts per stage):
 
 | Stage | Tool | What it does |
@@ -334,7 +336,7 @@ guidance = [
 ## 9. Version anchors
 
 ```text
-SKILL_VERSION: 1.7.0
+SKILL_VERSION: 1.7.1
 handoff_version: 1    goal_version: 1    proposal_version: 1
 ```
 
@@ -344,4 +346,5 @@ handoff_version: 1    goal_version: 1    proposal_version: 1
 - 1.5.0: §7 dex2c source automation (--init/--seed-dex/--arms/--sigs-dex + offline TLS string materialization) + verify_all acceptance gate documented; §8 family-2 guidance synced to the automated recipe; §2 TOOLKIT inventory refreshed; doctor pathology range corrected to P0–P11; no protocol change.
 - 1.6.0: hunt gains the block-chaining arm (`--aes-cbc/--aes-iv`, profile aes128cbc-tail-v1: trailer anchor, header-block length scan-verified, XOR-prefix sub-container walk) + fourth mechanical payload-debt source (parse-healthy dex with file_size vs data-section-end gap ≥0x70 — both battle families share the shape); §2 hunt entry + §8 family-2 recipe synced; no protocol change.
 - 1.7.0: repair CLI gains the `--extra-dex` ship channel (pass-through dex appended as classes2..N, no re-serialization — for unpack-stage gate products; the positional/`--dump`/`--extra-dex` three-role contract documented in §7). Found by the tosks pipeline regression: a sub-dex routed via `--dump` is source-only and silently drops from the output APK; no protocol change.
+- 1.7.1: §7 ship-channel completeness precondition (device-earned, tosks crash 2026-10-22): a raw container-recovered dex with `native` hollow stubs is not shippable — after surgery the shell runtime carrying the translated JNI bodies is gone and ART dies with UnsatisfiedLinkError on the first lifecycle call; family-2 translated classes must pass through the dex2c source (jnitrace → trace2smali) first, only the all-Dalvik synthesized dex goes to `--extra-dex`; no protocol change.
 - Before adapting to a new environment, compare `exuvia --version` against these.
