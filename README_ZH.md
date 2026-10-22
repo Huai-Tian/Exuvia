@@ -18,7 +18,7 @@
 ## ✨ 功能特性
 
 - **一键修复 dump → 可安装可运行的 APK**（产品线 b）
-  `exuvia repair packed.apk dumped.dex -o restored.apk [--dump 第三方dump.dex]...`：病理分诊（dexdoctor，P0-P11 dump 病谱全愈合）→ 类清理（壳类/外来类零误杀）→ 解织入（桥调用还原为原框架调用）→ 方法体还原（壳抽取的 native stub 从任何携带方法体的来源合并还原；无来源时框架契约兜底——产物可安装可启动不崩，如实标注业务逻辑边界）→ manifest 手术（wrapper Application 摘除）→ zipalign（R+ 安装门）→ v2 签名。**经真实加固样本 12 轮真机反馈闭环验证，两个不同脱壳器的 dump 双双真机成功**。
+  `exuvia repair packed.apk dumped.dex -o restored.apk [--dump 第三方dump.dex]...`：病理分诊（dexdoctor，P0-P11 dump 病谱全愈合）→ 类清理（壳类/外来类零误杀）→ 解织入（桥调用还原为原框架调用）→ 方法体还原（壳抽取的 native stub 从任何携带方法体的来源合并还原；无来源时框架契约兜底——产物可安装可启动不崩，如实标注业务逻辑边界；dex2c 翻译族另有第四来源——JNI 语义 trace 直接合成方法体，无 dump 可恢复）→ manifest 手术（wrapper Application 摘除）→ zipalign（R+ 安装门）→ v2 签名。**经真实加固样本 12 轮真机反馈闭环验证，两个不同脱壳器的 dump 双双真机成功；dex2c 翻译族的闭环 APK（无 dump、无参照重建）亦真机确认**。
 
 - **拖入即得地图——零提问、零 token**
   `exuvia packed.apk` 产出完整剖析包：`REPORT.json` + `REPORT.md`（人类可读半边）、`debt.json`（诚实的欠账清单）、`evidence/`（hash 锚定的字节切片）、`workspace/`、`attempts.log`。非交互是硬约束——任何交互式提问都会直接杀死 Agent 场景。
@@ -26,14 +26,17 @@
 - **两类卡点，全部机械判定**
   `method-native-stub`：每个 `ACC_NATIVE` stub 被机械定位——JNI 短名与 mangled 签名推导 → dynsym 查表 → 方法体从 `.so` 中切出（VA 经 PT_LOAD 映射为文件偏移）。`encrypted-payload`：每个"声称是 DEX 但字节不是 DEX"的文件自动成为卡点——无熵阈值，只有机械事实——附 64 KiB 头部切片、以事实形式列出的 asset 原始熵、以及机械定位的解密例程候选（`JNI_OnLoad` 符号表命中、`.init_array` 段位置）。
 
+- **hunt：密文段坐标的机械搜索（桌面化运行时事实）**
+  算法与 key 一旦由事实确定（符号追踪 / LLM 复现），密文段的起点与长度就是机械可搜的有限空间：`exuvia hunt --carrier <载体> --rc4 <hex> [--rc4-stride/--rc4-seed/--rc4-jbias 变体参数]` 全偏移扫描，判据链（zlib 头 → inflate → DEX magic → 全表 parse）自决段长——命中即精确坐标，零命中是诚实落盘的负事实。真机 frida hook 因此从主路径移除。
+
 - **卡点外包循环——全流程唯一烧 token 处**
   `exuvia next --goal goal.json` 打包卡点工作包（范围闸数据源 + 证据引用 + 族知识引导）。外部 LLM 返回 `proposal/` 包：一个纯函数解密实现 + 测试对，且期望值必须来自独立格式事实（DEX magic），绝不许来自提交者自己的输出。循环的驱动者永远在工具之外。
 
 - **四层 merge 闸门，判定权在 Rust**
   ① 语法/格式（serde 解析，未知字段拒绝）→ ② 对账（范围闸：只认领工作包内的 debt id；hash 字节精确；`accepts_equivalent` 路由）→ ③ 语义（**双锚**：可信侧结构断言解析 DEX × 沙箱内字节测试——两锚永不同时依赖不可信层）→ ④ 销账：归档产物、移除欠账、追加 `attempts.log`。拒绝以 `code + detail + hint` 结构化输出给 Agent 读，并对被认领的卡点递增 `attempts`。
 
-- **merge 即得 L1**
-  `recovered` 产物的输出呈 DEX 形状时，归档为 `workspace/<debt_id>/recovered.dex`——立即可用 jadx 打开导航。
+- **merge 即得 L1，洋葱环揭示下一层**
+  `recovered` 产物的输出呈 DEX 形状时，归档为 `workspace/<debt_id>/recovered.dex`——立即可用 jadx 打开导航；`exuvia analyze --dex` 对其二次剖析即得下一层欠账地图（壳分层设防：壳 → 字符串 → 方法 → VMP，同一外包循环逐层复用）。
 
 - **加固沙箱，零落盘**
   胶水执行器以字符串资源内嵌于二进制，经 stdin 喂给 `python3 -I`——不释放任何文件到磁盘（安全工具不得长得像恶意软件，否则会被分析机上的 AV/EDR 盯上）。环境清空；CPU 10 秒 / 地址空间 512 MB / fd 64 的 rlimit 兜底 5 秒软超时；文本级 import 白名单防误用。
@@ -130,6 +133,8 @@ exuvia unpack validate handoff/
 | `--version` | 版本 + 支持的协议版本 |
 | `exuvia repair <packed.apk> <dumped.dex> -o <out.apk> [--dump <dex>]... [--reference <dex>]` | **修复管线**：dump → 可运行 APK（病理分诊→清理→解织入→方法体还原→manifest 手术→zipalign→v2 签名）；`--dump` = 携带方法体的第三方 dump（生产主路径，可多来源互补），`--reference` = 原包（仅内部测试） |
 | `exuvia next --goal <file>` | 打包卡点工作包（范围闸数据源） |
+| `exuvia analyze --dex <file> [--out <dir>]` | 洋葱二次分析：解卡产物回注 → 下一层欠账地图（默认 handoff-2/） |
+| `exuvia hunt --carrier <file> [--rc4 <hex>]... [--xor <hex>]... [--rc4-stride N --rc4-seed A:B --rc4-jbias N] [--out <dir>]` | L2 参数空间搜索：已知算法+key → 密文段坐标机械命中（hunt.json + hits/；负事实诚实落盘） |
 | `exuvia schema --dump <handoff\|goal\|proposal>` | 按需派生机器可读格式视图（无静态 schema 文件） |
 | `exuvia unpack merge <dir>` | proposal 回流：四层闸门 → 销账 |
 | `exuvia unpack validate <dir>` | 剖析包自检（下游消费前跑） |
@@ -141,14 +146,16 @@ exuvia unpack validate handoff/
 - **操作系统**：Linux x64（当前 CI 基线）。Windows exe 是计划中的发行目标；OS 级沙箱当前只实现 Linux rlimit，Windows Job Object 路径排在 release 工程期。
 - **构建**：Rust stable（edition 2024）。
 - **运行**：系统 `python3`（沙箱验证层 + 修复管线内嵌工具链的运行时——绑定，绝不捆绑）；修复管线另需用户侧 `java` + dexlib2 jar（源码随仓库 `tools/dexlib/`，jar 同 apktool 政策不发行）；无需 root；默认预期敌意输入，建议在可弃置的一次性快照环境中分析。
+- **trackb/ 用户侧工具集**（so_emulator / jnitrace / trace2smali / dexcontainer / disasm 等 21 件，源码随仓库分发）：重依赖（unicorn、capstone）由用户侧 pip 安装，缺席 = `unavailable` 降级标注，不 fail。
 - **不发行也不需要任何其他运行时**：流水线不携带任何自有 Python 发行物。
 
 ## ⚠️ 项目状态
 
 研究级，v0.1。两条产品线均已与真实加固样本交手：
 
-- **修复管线**：经真实企业级加固样本（360 技术族）**12 轮真机反馈闭环**——两个不同脱壳器产出的 dump（紧凑重排型 / 内存展开型）经同一管线修复后**双双真机正常运行**（安装、启动、无崩溃）；本地五重验收门（zip / 病理 / 严格反编译 / 内容幂等 / 签名）ALL GREEN 才出仓。
-- **脱壳剖析**：语料壳的解密链已全解（变体 RC4、国密 SM4-CFB、密钥派生、运行时表置换），全链坐标见 [README_AGENT.md](README_AGENT.md) §0.5；协议全链（`packed.apk` → next → merge → validate）在合成样本上毕业（CI 强制的 fixture↔serde 双向锚定、产物字节确定）。
+- **修复管线**：经真实企业级加固样本（360 技术族）**12 轮真机反馈闭环**——两个不同脱壳器产出的 dump（紧凑重排型 / 内存展开型）经同一管线修复后**双双真机正常运行**（安装、启动、无崩溃）；本地五重验收门（zip / 病理 / 严格反编译 / 内容残留·多 dex 并集 / 签名）ALL GREEN 才出仓。
+- **dex2c 翻译族（第二战）**：方法体被翻译为 JNI C++、原 Dalvik 字节码不在包内任何载体的家族——**无 dump、无参照**完成恢复：尾容器 dex 重建（dexcontainer，sha1+adler 自校验）→ JNI 调用序列追踪（jnitrace：运行时预热 / clinit 静态域播种 / 空值守卫双路枚举全自动，TLS 字符串离线物化）→ smali 合成（trace2smali，ART 校验规则内建）→ 闭环 APK **真机确认**（2026-10）。族知识入册 SKILL §8。
+- **脱壳剖析**：语料壳的解密链已全解（变体 RC4、国密 SM4-CFB、密钥派生、运行时表置换；尾容器 key 确认为运行时构造——静态穷尽零命中，如实留作唯一剩余卡点），全链坐标见 [README_AGENT.md](README_AGENT.md) §0.5；协议全链（`packed.apk` → next → merge → validate）在合成样本上毕业（CI 强制的 fixture↔serde 双向锚定、产物字节确定）。
 
 诚实的范围边界——欠账清单与产物统计会如实标注而不是假装能解：设备环境派生的 key（IMEI、build fingerprint）、网络拉取的 payload、流式拼装的 DEX、VMP 的完整语义还原（轨道 C / L3 范畴——交付"等价语义"）；以及修复线的已知语义边界——**壳抽取的方法在无任何来源携带其方法体时，契约兜底体只保证可安装可启动不崩，该方法自身的业务逻辑缺席**（产物 JSON 如实标注合成数量）。
 
@@ -176,8 +183,8 @@ exuvia unpack validate handoff/
 作者不提供、也不协商双许可、商业例外或专有再分发。
 无视 AGPL 义务转售牟利属于侵犯著作权。
 
-- **署名与声明完整性：**
-再分发未修改的构建时，必须附带本声明并正确署名。禁止在再分发时移除、篡改或隐藏本非商业声明。
+- **署名与声明完整性（AGPL 第 7(b) 条附加条款）：**
+依据 AGPL-3.0 第 7(b) 条——许可证明确允许的"保留合理法律声明与作者署名"附加条款：再分发本项目（无论是否修改）须保留本非商业声明与作者署名；移除、篡改或隐藏本声明即构成许可违规。本条款不是对 AGPL 权利的额外限制，而是 AGPL 自身提供的声明保留机制。
 
 - **仅限官方渠道：**
 请仅从本仓库（GitHub）或其他官方指定渠道获取本项目。任何其他来源的构建均为非官方、未经验证，使用者自负风险。
@@ -191,6 +198,12 @@ exuvia unpack validate handoff/
 - **只分析合法持有的样本。**
 使用者须对所分析样本的合法持有自行负责。本项目不针对任何特定加固厂商：壳可以被*识别*（行业惯例），但指纹、SOP 与处理器一律按技术族命名——永不写厂商名，社区贡献遵循同一规则。
 
+- **验证语料来源（零第三方样本）：**
+本项目的全部验证语料均为**作者自有的开源应用**，由作者自行加固（"原包 + 加固包"成对私有持有）——仓库不分发样本本体，也不公开分析任何第三方应用；比对逻辑公开（`ci/verify/`），样本私有。
+
+- **不含厂商代码：**
+本项目不包含、不分发任何加固厂商的代码、库或 SDK——壳只被分析，不被捆绑；修复产物中的壳组件在输出时被移除，而非再分发。
+
 - **Exuvia 是恢复器，不是 patcher——这是设计，也是法律边界：**
 Exuvia 还原或忠实复现行为，不做篡改。签名自校验逻辑与其他任何逻辑同等对待、忠实还原——恒真 patch 永不在功能面。这条线同时也是"研究恢复"与"破解"的分界线。
 
@@ -198,7 +211,7 @@ Exuvia 还原或忠实复现行为，不做篡改。签名自校验逻辑与其�
 脱壳与重打包**可能违反第三方软件的服务条款及你所在司法辖区的法律**。使用前请自行评估风险。开发者与贡献者**对由此产生的任何法律责任或其他后果概不负责**。
 
 - **研究级质量**：
-本流水线为研究级，迄今在一个真实企业级加固样本族（及合成语料）上验证；结果可能不完整（欠账清单是交付物，不是失败）。请在适当隔离的环境中分析样本。
+本流水线为研究级，迄今在两个真实企业级加固技术族（及合成语料）上验证；结果可能不完整（欠账清单是交付物，不是失败）。请在适当隔离的环境中分析样本。
 
 - **无担保**：
 本软件按其许可证条款提供，**不附带任何明示或默示的担保**，包括但不限于适销性、特定用途适用性与非侵权性。
