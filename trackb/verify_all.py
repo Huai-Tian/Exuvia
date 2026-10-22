@@ -126,8 +126,17 @@ def gate_content(path):
         from androguard.core.apk import APK
         from androguard.core.dex import DEX
         a = APK(path)
-        d = DEX(dexb)
-        ag_defined = set(c.get_name() for c in d.get_classes())
+        # multi-dex: androguard sees only the single dex it is handed — a
+        # classes.dex-only read false-positives "main activity missing" when
+        # the activity lives in classes2.dex+ (tosks closed-loop build).
+        # Union every classesN.dex entry, same as the dexclean check above.
+        ag_defined = set()
+        for entry in sorted(n for n in z.namelist()
+                            if n.startswith('classes') and n.endswith('.dex')):
+            try:
+                ag_defined |= set(c.get_name() for c in DEX(z.read(entry)).get_classes())
+            except Exception:
+                continue
         main = a.get_main_activity()
         if main:
             dn = 'L' + main.replace('.', '/') + ';'
