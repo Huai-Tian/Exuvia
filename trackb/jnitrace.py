@@ -18,12 +18,14 @@ Usage:
   python3 jnitrace.py shell.so --fn 0x98408 --label onCreate
   python3 jnitrace.py shell.so --fn 0x98408 --fn 0x9bae0 --out traces/
   python3 jnitrace.py shell.so --fn 0x98408 --seed-dex dump.dex   # clinit seed
+  python3 jnitrace.py shell.so --fn 0x98408 --arms --out traces/  # fork null arms
 
 Exit codes: 0 = trace captured; 2 = unicorn missing; 3 = ELF parse error.
 """
 
 import argparse
 import importlib.util
+import json
 import os
 import struct
 import sys
@@ -41,8 +43,8 @@ try:
     from unicorn import Uc, UC_ARCH_ARM64, UC_MODE_LITTLE_ENDIAN, UC_HOOK_CODE, UC_HOOK_MEM_UNMAPPED
     from unicorn.arm64_const import (
         UC_ARM64_REG_X0, UC_ARM64_REG_X1, UC_ARM64_REG_X2, UC_ARM64_REG_X3,
-        UC_ARM64_REG_X4, UC_ARM64_REG_X5, UC_ARM64_REG_LR, UC_ARM64_REG_SP,
-        UC_ARM64_REG_PC, UC_ARM64_REG_TPIDR_EL0,
+        UC_ARM64_REG_X4, UC_ARM64_REG_X5, UC_ARM64_REG_FP, UC_ARM64_REG_LR,
+        UC_ARM64_REG_SP, UC_ARM64_REG_PC, UC_ARM64_REG_TPIDR_EL0,
     )
 except ImportError:
     print('{"error":"unavailable","detail":"unicorn not installed (user-side dependency)"}')
@@ -136,6 +138,10 @@ class Tracer:
         self.sent_ctr = 0x51E00000   # sentinel base for primitive JNI results
         self.sent = {}               # sentinel -> producer description
         self.sstatic = {}            # static-object field key -> written token
+        self.null_tokens = set()     # tok() hands these out as 0 (flipped-arm runs)
+        self.seed_tokens = set()     # clinit seeds: device-true non-null, never forked
+        self.guards = []             # null-guard points on fake tokens (--arms)
+        self._guard_seen = set()
 
     def sentinel(self, producer):
         """Numeric JNI results (Get*Field/CallInt/...) must be UNIQUE tokens:
@@ -149,6 +155,11 @@ class Tracer:
         t = HEAP + self.next_tok
         self.next_tok += 0x10
         self.toks[t] = desc
+        if t in self.null_tokens:
+            # flipped arm: this producer's result is null on the explored path
+            # (allocation order is deterministic, so the token identity is
+            # stable across re-runs up to the guard that consumes it)
+            return 0
         return t
 
     def cstr(self, a):
@@ -372,7 +383,7 @@ def assign_seed_tokens(keys):
 
 
 def trace_function(so_path, fn, label='', this_desc='this', max_insn=2000000, run_init=False,
-                   seeds=None):
+                   seeds=None, arms=False, null_tokens=(), guards_out=None):
     data = open(so_path, 'rb').read()
     elf = emu_base.Elf(data)
     uc = Uc(UC_ARCH_ARM64, UC_MODE_LITTLE_ENDIAN)
@@ -410,11 +421,13 @@ def trace_function(so_path, fn, label='', this_desc='this', max_insn=2000000, ru
             uc.mem_write(r_offset, struct.pack('<Q', addend))
 
     tr = Tracer(uc)
+    tr.null_tokens = set(null_tokens)
     if seeds:
         # clinit-initialized static object fields are non-null on device by
         # the time any method runs (see scan_clinit_object_seeds); in-run
         # writes still override via the normal SetStaticObjectField path
         tr.sstatic.update(seeds)
+        tr.seed_tokens = set(seeds.values())
         # keep tok() from re-issuing a seed token to an unrelated object
         hi = max(seeds.values()) - HEAP + 0x10
         if hi > tr.next_tok:
@@ -572,6 +585,39 @@ def trace_function(so_path, fn, label='', this_desc='this', max_insn=2000000, ru
 
     uc.hook_add(UC_HOOK_MEM_UNMAPPED, hook_unmapped)
 
+    if arms:
+        # Null-guard discovery: a CBZ/CBNZ Xt whose tested value is a fake
+        # token marks a branch the fake world steered arbitrarily. Only DATA
+        # producers are forked — method-call results ('ret:') and instance
+        # field reads ('field:') are genuinely nullable on device (e.g.
+        # ViewGroup.getChildAt on a fresh launch). Resolution and allocation
+        # results (class:/mid:/sfid:/new:/alloc:/this/…) are non-null on
+        # device by JNI contract (failure raises instead), so their null
+        # arms are error paths no replay can take; clinit seeds are
+        # device-true non-null. Detection is value-based, so register copies
+        # are covered; only the 64-bit CBZ/CBNZ forms are recognized
+        # (translators emit them for null checks; cmp+b.eq chains are
+        # future work).
+        REG_X = ([UC_ARM64_REG_X0 + i for i in range(29)]
+                 + [UC_ARM64_REG_FP, UC_ARM64_REG_LR])
+
+        def hook_guard(uc_, addr, size, user):
+            w = struct.unpack('<I', uc_.mem_read(addr, 4))[0]
+            if (w >> 24) not in (0xB4, 0xB5):
+                return
+            rt = w & 0x1F
+            if rt == 31:
+                return
+            v = uc_.reg_read(REG_X[rt])
+            if (v in tr.toks and v not in tr.seed_tokens
+                    and tr.toks[v].startswith(('ret:', 'field:'))
+                    and v not in tr._guard_seen):
+                tr._guard_seen.add(v)
+                tr.guards.append({'pc': addr, 'token': v, 'desc': tr.toks[v],
+                                  'kind': 'cbz' if (w >> 24) == 0xB4 else 'cbnz'})
+
+        uc.hook_add(UC_HOOK_CODE, hook_guard, begin=0, end=maxv)
+
     uc.reg_write(UC_ARM64_REG_SP, STACK + STACKSZ - 0x100)
     uc.reg_write(UC_ARM64_REG_TPIDR_EL0, TLS)
 
@@ -620,6 +666,8 @@ def trace_function(so_path, fn, label='', this_desc='this', max_insn=2000000, ru
         out.append(f'[emu stop] {type(e).__name__}: pc={hex(uc.reg_read(UC_ARM64_REG_PC))}')
     out.append(f'=== {len(tr.trace)} JNI calls ===')
     out.extend(tr.trace)
+    if guards_out is not None:
+        guards_out.extend(tr.guards)
     return '\n'.join(out)
 
 
@@ -636,6 +684,15 @@ def main():
                     'fields (<clinit> sput-object targets) and pre-seed them '
                     'non-null in the fake world — the device truth for such '
                     'fields, derivable from any dump; repeatable')
+    ap.add_argument('--arms', action='store_true',
+                    help='enumerate null-guard points on fake object tokens '
+                    '(CBZ/CBNZ on a token: the JNI producer result is '
+                    'environment-state-dependent on device) and write one '
+                    'extra trace per guard with that producer forced null; '
+                    'requires --out. Single-flip v1: guards discovered only '
+                    'on a flipped arm are not recursively enumerated')
+    ap.add_argument('--arms-max', type=int, default=16,
+                    help='max flipped-arm traces per function (default 16)')
     args = ap.parse_args()
     seed_keys = set()
     for dex_path in args.seed_dex:
@@ -649,10 +706,14 @@ def main():
     if args.seed_dex:
         print('[seed-dex] total: %d field(s) pre-seeded'
               % len(set(seeds.values())), file=sys.stderr)
+    if args.arms and not args.out:
+        ap.error('--arms requires --out (flipped-arm traces are written per guard)')
     for k, f in enumerate(args.fn):
         label = args.label[k] if k < len(args.label) else f
+        guards = []
         text = trace_function(args.so, int(f, 16), label, args.this, run_init=args.init,
-                              seeds=seeds or None)
+                              seeds=seeds or None, arms=args.arms,
+                              guards_out=guards if args.arms else None)
         if args.out:
             os.makedirs(args.out, exist_ok=True)
             with open(os.path.join(args.out, f'trace_{label or f}.txt'), 'w') as fh:
@@ -660,6 +721,21 @@ def main():
             print(f'{label or f}: {text.count(chr(10))} lines -> {args.out}/trace_{label or f}.txt')
         else:
             print(text)
+        if args.arms:
+            with open(os.path.join(args.out, f'{label or f}.guards.json'), 'w') as fh:
+                json.dump([{'i': i, 'pc': hex(g['pc']), 'token': hex(g['token']),
+                            'kind': g['kind'], 'desc': g['desc']}
+                           for i, g in enumerate(guards)], fh, indent=1)
+            for i, g in enumerate(guards[:args.arms_max]):
+                t2 = trace_function(args.so, int(f, 16), label, args.this,
+                                    run_init=args.init, seeds=seeds or None,
+                                    null_tokens={g['token']})
+                with open(os.path.join(args.out, f'trace_{label or f}.null{i}.txt'), 'w') as fh:
+                    fh.write(t2 + '\n')
+                print(f'{label or f}.null{i}: null @ {g["desc"]} '
+                      f'({t2.count(chr(10))} lines)')
+            if len(guards) > args.arms_max:
+                print(f'{label or f}: {len(guards) - args.arms_max} guard(s) not forked (--arms-max)')
 
 
 if __name__ == '__main__':
