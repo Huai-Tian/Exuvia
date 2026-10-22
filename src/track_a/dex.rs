@@ -167,23 +167,143 @@ pub fn parse(data: &[u8]) -> Result<Vec<MethodInfo>, String> {
             uleb(data, &mut p)?; // field_idx_diff
             uleb(data, &mut p)?; // access_flags
         }
-        let total = direct_methods + virtual_methods;
-        let mut idx: u32 = 0;
-        for _ in 0..total {
-            let diff = uleb(data, &mut p)?;
-            let access = uleb(data, &mut p)?;
-            let _code_off = uleb(data, &mut p)?;
-            idx += diff;
-            if let Some((class, name, descriptor)) = methods.get(idx as usize).cloned() {
-                out.push(MethodInfo {
-                    class,
-                    name,
-                    descriptor,
-                    access_flags: access,
-                    is_native: access & ACC_NATIVE != 0,
-                });
+        let total = [direct_methods, virtual_methods];
+        for count in total {
+            // method_idx_diff 每表归零（spec：direct/virtual 两表各自首项为绝对
+            // 索引）——跨表累加会把 virtual 表整体误归到 direct 末项之后。
+            let mut idx: u32 = 0;
+            for _ in 0..count {
+                let diff = uleb(data, &mut p)?;
+                let access = uleb(data, &mut p)?;
+                let _code_off = uleb(data, &mut p)?;
+                idx += diff;
+                if let Some((class, name, descriptor)) = methods.get(idx as usize).cloned() {
+                    out.push(MethodInfo {
+                        class,
+                        name,
+                        descriptor,
+                        access_flags: access,
+                        is_native: access & ACC_NATIVE != 0,
+                    });
+                }
             }
         }
     }
     Ok(out)
+}
+
+
+/// 测试与修复管线共用的合成 fixture（零样本纪律）：单类 LC;，direct 表一项
+/// = static native "zap"（method_ids 索引 1，名字排序在 virtual 之后），
+/// virtual 表一项 = native "onCreate"（索引 0——virtual 表首项为绝对索引，
+/// 两表各自归零是 spec 事实；跨表累加会把 onCreate 误归为 zap 的第二次出现）。
+#[cfg(test)]
+pub(crate) fn hollow_dex_fixture() -> Vec<u8> {
+    fn uleb_bytes(mut v: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let mut b = (v & 0x7f) as u8;
+            v >>= 7;
+            if v != 0 {
+                b |= 0x80;
+            }
+            out.push(b);
+            if v == 0 {
+                return out;
+            }
+        }
+    }
+    let strings = ["LC;", "V", "onCreate", "zap"];
+    let mut data = vec![0u8; 0x70];
+    data[0..8].copy_from_slice(b"dex\n035\0");
+    data[0x24..0x28].copy_from_slice(&0x70u32.to_le_bytes()); // header_size
+    data[0x28..0x2c].copy_from_slice(&0x12345678u32.to_le_bytes()); // endian_tag
+
+    let string_ids_off = 0x70usize;
+    let type_ids_off = string_ids_off + strings.len() * 4; // 0x80
+    let proto_ids_off = type_ids_off + 2 * 4; // 0x88
+    let method_ids_off = proto_ids_off + 12; // 0x94
+    let class_defs_off = method_ids_off + 2 * 8; // 0xa4
+    let class_data_off = class_defs_off + 32; // 0xc4
+
+    // class_data：0 字段；direct=1(zap, native|static)，virtual=1(onCreate, native)
+    let mut class_data = Vec::new();
+    for v in [0u32, 0, 1, 1] {
+        class_data.extend(uleb_bytes(v));
+    }
+    class_data.extend(uleb_bytes(1)); // direct: method_idx_diff=1 → zap
+    class_data.extend(uleb_bytes(0x108)); // public|static|native
+    class_data.extend(uleb_bytes(0)); // code_off=0（空心桩）
+    class_data.extend(uleb_bytes(0)); // virtual: 绝对索引 0 → onCreate（归零判别点）
+    class_data.extend(uleb_bytes(0x101)); // public|native
+    class_data.extend(uleb_bytes(0));
+
+    let mut str_offs = Vec::new();
+    let mut cursor = class_data_off + class_data.len();
+    for s in strings {
+        str_offs.push(cursor as u32);
+        cursor += uleb_bytes(s.chars().count() as u32).len() + s.len() + 1;
+    }
+    data.resize(cursor, 0);
+
+    data[0x38..0x3c].copy_from_slice(&(strings.len() as u32).to_le_bytes());
+    data[0x3c..0x40].copy_from_slice(&(string_ids_off as u32).to_le_bytes());
+    data[0x40..0x44].copy_from_slice(&2u32.to_le_bytes());
+    data[0x44..0x48].copy_from_slice(&(type_ids_off as u32).to_le_bytes());
+    data[0x48..0x4c].copy_from_slice(&1u32.to_le_bytes());
+    data[0x4c..0x50].copy_from_slice(&(proto_ids_off as u32).to_le_bytes());
+    data[0x58..0x5c].copy_from_slice(&2u32.to_le_bytes());
+    data[0x5c..0x60].copy_from_slice(&(method_ids_off as u32).to_le_bytes());
+    data[0x60..0x64].copy_from_slice(&1u32.to_le_bytes());
+    data[0x64..0x68].copy_from_slice(&(class_defs_off as u32).to_le_bytes());
+
+    for (i, off) in str_offs.iter().enumerate() {
+        data[string_ids_off + i * 4..string_ids_off + i * 4 + 4].copy_from_slice(&off.to_le_bytes());
+    }
+    // type_ids：type0 → "LC;"，type1 → "V"
+    data[type_ids_off..type_ids_off + 4].copy_from_slice(&0u32.to_le_bytes());
+    data[type_ids_off + 4..type_ids_off + 8].copy_from_slice(&1u32.to_le_bytes());
+    // proto0：shorty "V"，return type1(V)，无参数
+    data[proto_ids_off..proto_ids_off + 4].copy_from_slice(&1u32.to_le_bytes());
+    data[proto_ids_off + 4..proto_ids_off + 8].copy_from_slice(&1u32.to_le_bytes());
+    // method_ids：onCreate(name 2)、zap(name 3)，均 class0/proto0
+    for (i, name_idx) in [2u32, 3].iter().enumerate() {
+        let b = method_ids_off + i * 8;
+        data[b..b + 2].copy_from_slice(&0u16.to_le_bytes());
+        data[b + 2..b + 4].copy_from_slice(&0u16.to_le_bytes());
+        data[b + 4..b + 8].copy_from_slice(&name_idx.to_le_bytes());
+    }
+    // class_def：class_idx 0，class_data_off 在 +24
+    data[class_defs_off + 24..class_defs_off + 28]
+        .copy_from_slice(&(class_data_off as u32).to_le_bytes());
+    // class_data 与字符串数据
+    data[class_data_off..class_data_off + class_data.len()].copy_from_slice(&class_data);
+    for (s, off) in strings.iter().zip(str_offs.iter()) {
+        let mut p = *off as usize;
+        let l = uleb_bytes(s.chars().count() as u32);
+        data[p..p + l.len()].copy_from_slice(&l);
+        p += l.len();
+        data[p..p + s.len()].copy_from_slice(s.as_bytes());
+    }
+    let size = data.len() as u32;
+    data[0x20..0x24].copy_from_slice(&size.to_le_bytes());
+    data
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn method_idx_diff_resets_per_list() {
+        // 判别 fixture：direct 表独占索引 1（zap），virtual 表首项 diff=0。
+        // 跨表累加的旧读法：virtual 首项解析为 1+0=1 → onCreate 丢失、zap 重复。
+        let ms = parse(&hollow_dex_fixture()).expect("fixture parses");
+        let names: Vec<&str> = ms.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["zap", "onCreate"], "per-list reset: {names:?}");
+        assert!(ms.iter().all(|m| m.is_native));
+        let onc = ms.iter().find(|m| m.name == "onCreate").unwrap();
+        assert_eq!(onc.class, "LC;");
+        assert_eq!(onc.descriptor, "()V");
+    }
 }
