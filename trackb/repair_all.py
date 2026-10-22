@@ -355,7 +355,7 @@ def main():
         dex_written = False
         for info in zin.infolist():
             name = info.filename
-            if any(p in name for p in repair.SHELL_ASSET_PATTERNS) and name.startswith('assets/'):
+            if repair.is_shell_asset(name):
                 removed.append(name)
                 continue
             if _DEXN_RE.match(name):

@@ -161,6 +161,22 @@ SHELL_ASSET_PATTERNS = (
 )
 
 
+def is_shell_asset(name):
+    """Shell loader-machinery asset test (zero-sample).
+
+    Two generic tells, no family strings required:
+      * a native library UNDER assets/ — a legit APK ships .so only in lib/;
+        a .so in assets/ is the packer's runtime, extracted and loaded by the
+        wrapper at bootstrap (device-verified on two families: 360's
+        assets/libjiagu*.so, tosks's assets/libtosks*.so);
+      * the family pattern table above (encrypted containers and other
+        non-.so shell payloads, e.g. 360's .jgapp).
+    """
+    return name.startswith('assets/') and (
+        name.endswith('.so')
+        or any(p in name for p in SHELL_ASSET_PATTERNS))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('packed')
@@ -200,7 +216,7 @@ def main():
             if name == 'classes.dex':
                 zo.writestr(name, dex)
                 continue
-            if any(p in name for p in SHELL_ASSET_PATTERNS) and name.startswith('assets/'):
+            if is_shell_asset(name):
                 removed.append(name)
                 continue
             zo.writestr(info, zin.read(name))
