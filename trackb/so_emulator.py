@@ -429,6 +429,18 @@ def make_libc(uc, elf):
 
     def hook_svc(uc_, intno, ud):
         if intno != 2:
+            # NOT an SVC: a synchronous CPU exception (undefined insn — e.g.
+            # VMP/encrypted code executed before its runtime decrypt, or a
+            # bogus entry point). unicorn re-executes the faulting insn when
+            # the hook returns untouched, so a bare `return` spins the entry
+            # into a silent full-timeout burn (Battle-3: SecLLVM-hardened
+            # 爱加密 libexec.so — every init_array entry ate the whole
+            # --timeout with zero diagnostics). Stop loud instead; the
+            # caller raises on the marker and the run reports the scene.
+            svc_events.append({'exception': intno,
+                               'pc': '0x%x' % uc_.reg_read(UC_ARM64_REG_PC),
+                               'detail': 'sync CPU exception (not SVC) — undefined insn / encrypted code'})
+            uc_.emu_stop()
             return
         x8 = uc_.reg_read(UC_ARM64_REG_X8)
         x0, x1, x2 = (uc_.reg_read(r) for r in (UC_ARM64_REG_X0, UC_ARM64_REG_X1, UC_ARM64_REG_X2))
@@ -715,7 +727,12 @@ def main():
             uc.mem_write(r_offset, struct.pack('<Q', sa))
     for r_offset, rtype, symidx, addend in elf.relocations():
         if rtype == R_RELATIVE:
-            uc.mem_write(r_offset, struct.pack('<Q', addend))
+            # RELA addends are SIGNED int64 — apply two's-complement like a
+            # real linker (base=0 + addend mod 2^64). Hardened runtimes carry
+            # negative addends in encrypted relocation runs (Battle-3 爱加密
+            # libexec.so: 1151/4428 RELATIVE entries) — struct.pack('<Q')
+            # crashed setup outright before any emulation happened.
+            uc.mem_write(r_offset, struct.pack('<Q', addend & 0xFFFFFFFFFFFFFFFF))
     # unbound-slot defaults (shell runtime-patched slots → malloc/memcpy semantics)
     # r16 fix: each --got override gets its OWN stub slot — the old single shared
     # slot meant "a:malloc b:memcpy" silently collapsed to the last name and the
@@ -981,6 +998,16 @@ def main():
     # there (Battle-1: init[2] tail-calls the runtime-table setter; without it
     # the JNI_OnLoad SM4 decrypt degrades silently to a NULL destination).
     # The RELATIVE relocations above already materialized the fn pointers.
+    def raise_if_cpu_exc(since):
+        """hook_svc stopped emulation on a non-SVC CPU exception: emu_stop
+        makes emu_start return NORMALLY, so without this check an encrypted/
+        bogus entry would masquerade as a clean run returning x0=0."""
+        for e in svc_events[since:]:
+            if 'exception' in e:
+                raise RuntimeError(
+                    'sync CPU exception intno=%s at pc=%s (not an SVC — '
+                    'undefined insn or still-encrypted code)' % (e['exception'], e['pc']))
+
     init_ran = []
     if not args.no_init:
         try:
@@ -995,7 +1022,9 @@ def main():
                     continue
                 uc.reg_write(UC_ARM64_REG_SP, STACK + STACKSZ // 2)
                 uc.reg_write(UC_ARM64_REG_LR, SENTINEL)
+                n0 = len(svc_events)
                 uc.emu_start(fn, SENTINEL, timeout=args.timeout * 1000 * 1000)
+                raise_if_cpu_exc(n0)
                 init_ran.append('0x%x' % fn)
             except Exception:
                 # per-init best-effort: one crashing init must not starve the rest
@@ -1016,7 +1045,9 @@ def main():
     try:
         for idx, (fn_va, _entry_args) in enumerate(entries):
             setup_entry(idx)
+            n0 = len(svc_events)
             uc.emu_start(fn_va, SENTINEL, timeout=args.timeout * 1000 * 1000)
+            raise_if_cpu_exc(n0)
             returns.append('0x%x' % uc.reg_read(UC_ARM64_REG_X0))
     except Exception as e:
         # 错误路径也带上已观察到的 watch 事件——黑盒失败的现场属于证据（r10 诊断改进）
