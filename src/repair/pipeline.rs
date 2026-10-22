@@ -95,6 +95,19 @@ fn repair_all_args(args: &RepairArgs, dex_fixed: &Path) -> Vec<String> {
     cmd_args
 }
 
+/// 提取「marker: <数字>」里的计数——marker 后跳空白、连续取数字。
+/// 比 split(':') 健壮：输出行可能在数字后续接别的键值段
+/// （repair_all.py 的 "shell assets removed: 4; shipped dexes: …" 同行多段格式）。
+fn counter_after(l: &str, marker: &str) -> Option<usize> {
+    let pos = l.find(marker)? + marker.len();
+    let digits: String = l[pos..]
+        .chars()
+        .skip_while(|c| c.is_whitespace())
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse::<usize>().ok()
+}
+
 /// 执行完整修复管线。
 pub fn run_repair(args: &RepairArgs) -> RepairResult {
     let mut result = RepairResult::default();
@@ -200,9 +213,9 @@ pub fn run_repair(args: &RepairArgs) -> RepairResult {
                 l.split('"').nth(1).unwrap_or_default().to_string(),
             );
         } else if l.contains("shell assets removed") {
-            // 从 "5" 或 "5 (all entries..." 提取数字
-            if let Some(n) = l.split(':').nth(1).and_then(|s| s.split('(').next())
-                .and_then(|s| s.trim().parse::<usize>().ok()) {
+            // "shell assets removed: 4; shipped dexes: … (all entries…)" ——
+            // 数字后同行还有别的段，split(':') 取段会带出分号残渣
+            if let Some(n) = counter_after(l, "shell assets removed:") {
                 result.shell_assets_removed = n;
             }
         } else if l.contains("4-byte aligned") {
@@ -284,5 +297,20 @@ mod tests {
         assert!(extra_pos[0] < extra_pos[1]);
         // 位置参数仍是「壳 APK + doctor 产物」两件，直挂 dex 绝不混入位置参数
         assert_eq!(&cmd[..4], ["/x/packed.apk", "/x/main.doctor.dex", "-o", "/x/out.apk"]);
+    }
+
+    #[test]
+    fn test_counter_after_marker_tolerates_trailing_segments() {
+        // repair_all.py 现行格式：数字后同行接 "; shipped dexes: … (…)"。
+        // 旧实现 split(':') 取第二段得到 "4; shipped dexes"，parse 失败静默归零——
+        // 日志写 4、JSON 报 0（tosks 回归实测抓到的不一致）。
+        let l = "[repair] shell assets removed: 4; shipped dexes: classes.dex, classes2.dex (all entries 4-byte aligned)";
+        assert_eq!(counter_after(l, "shell assets removed:"), Some(4));
+        // 旧格式兼容："5" / "5 (all entries…)"
+        assert_eq!(counter_after("[repair] shell assets removed: 5", "shell assets removed:"), Some(5));
+        assert_eq!(counter_after("[repair] shell assets removed: 7 (all entries 4-byte aligned)", "shell assets removed:"), Some(7));
+        // 无 marker / 无数字 → None，不误判
+        assert_eq!(counter_after("[repair] nothing here", "shell assets removed:"), None);
+        assert_eq!(counter_after("[repair] shell assets removed: none", "shell assets removed:"), None);
     }
 }
