@@ -120,6 +120,11 @@ enum Cmd {
         /// 被壳抽取的方法从任何携带其方法体的来源还原，多来源互补
         #[arg(long = "dump", value_name = "DUMP_DEX")]
         dumps: Vec<std::path::PathBuf>,
+        /// 直挂成品 dex（原样追加为 classes2..N，不重序列化，可多次、保序）——
+        /// 脱壳阶段闸门产物等不可再序列化的成品走这里；与 --dump（只作来源、
+        /// 不进成品）是两条不可互换的通道
+        #[arg(long = "extra-dex", value_name = "DEX")]
+        extra_dex: Vec<std::path::PathBuf>,
     },
 }
 
@@ -310,7 +315,7 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Some(Cmd::Repair { packed, dex, out, reference, dumps }) => {
+        Some(Cmd::Repair { packed, dex, out, reference, dumps, extra_dex }) => {
             use exuvia::repair::{run_repair, RepairArgs};
             let args = RepairArgs {
                 packed_apk: packed,
@@ -318,6 +323,7 @@ fn main() -> ExitCode {
                 out_apk: out,
                 reference_dex: reference,
                 extra_dumps: dumps,
+                extra_dex,
                 key_pem: None,
                 cert_der: None,
             };

@@ -4,7 +4,7 @@ Exuvia: deterministic Android unpacking + repair pipeline. Two product lines in 
 
 ## 1. Actions
 
-0. REPAIR (independent of the outsourcing loop): `exuvia repair <packed.apk> <dumped.dex> -o <out.apk> [--dump <dex>]...` — §7. Skip this loop entirely.
+0. REPAIR (independent of the outsourcing loop): `exuvia repair <packed.apk> <dumped.dex> -o <out.apk> [--dump <dex>]... [--extra-dex <dex>]...` — §7. Skip this loop entirely.
 1. READ `handoff/REPORT.json` + `debt.json` (§2)
 2. WRITE `goal.json` (§3) — semantic targeting is yours; the tool executes formatted targets only
 3. SUBMIT proposal package (§4); on rejection: read error → patch → resubmit (§5)
@@ -253,8 +253,11 @@ The industry gap this closes: dumpers (third-party services, FART, frida hooks) 
 
 ```bash
 exuvia repair packed.apk dumped.dex -o restored.apk \
-  [--dump third_party_dump.dex]... [--reference original_classes.dex]
+  [--dump third_party_dump.dex]... [--extra-dex gate_product.dex]... \
+  [--reference original_classes.dex]
 ```
+
+**Ship channels — three dex roles, not interchangeable** (choosing wrong silently drops code from the output APK): the positional `dumped.dex` is triaged (doctor → clean → deweave) and repacked as `classes.dex`; `--dump <dex>` is a restore SOURCE ONLY — read for method bodies, never ships; `--extra-dex <dex>` (repeatable, order preserved) ships AS-IS as `classes2.dex..classesN.dex` with NO re-serialization — the channel for unpack-stage gate products (e.g. a merge-gate-passed `recovered.dex` / hunt hit) and any complete healthy dex that must reach the output byte-exact. A whole dex that only carries classes absent from the positional dump (the dex2c family's tail-container sub-dex is the case on record: sole `MainActivity` carrier) ships via `--extra-dex`; routing it to `--dump` produces an APK that installs but cannot launch.
 
 Stages (all embedded in the binary; output JSON reports counts per stage):
 
@@ -331,7 +334,7 @@ guidance = [
 ## 9. Version anchors
 
 ```text
-SKILL_VERSION: 1.6.0
+SKILL_VERSION: 1.7.0
 handoff_version: 1    goal_version: 1    proposal_version: 1
 ```
 
@@ -340,4 +343,5 @@ handoff_version: 1    goal_version: 1    proposal_version: 1
 - 1.4.0: §7 fourth method-body source (JNI-trace → smali synthesis) + §8 family 2 dex2c-translate entered (Battle-2 maintainer device-confirmed); no protocol change.
 - 1.5.0: §7 dex2c source automation (--init/--seed-dex/--arms/--sigs-dex + offline TLS string materialization) + verify_all acceptance gate documented; §8 family-2 guidance synced to the automated recipe; §2 TOOLKIT inventory refreshed; doctor pathology range corrected to P0–P11; no protocol change.
 - 1.6.0: hunt gains the block-chaining arm (`--aes-cbc/--aes-iv`, profile aes128cbc-tail-v1: trailer anchor, header-block length scan-verified, XOR-prefix sub-container walk) + fourth mechanical payload-debt source (parse-healthy dex with file_size vs data-section-end gap ≥0x70 — both battle families share the shape); §2 hunt entry + §8 family-2 recipe synced; no protocol change.
+- 1.7.0: repair CLI gains the `--extra-dex` ship channel (pass-through dex appended as classes2..N, no re-serialization — for unpack-stage gate products; the positional/`--dump`/`--extra-dex` three-role contract documented in §7). Found by the tosks pipeline regression: a sub-dex routed via `--dump` is source-only and silently drops from the output APK; no protocol change.
 - Before adapting to a new environment, compare `exuvia --version` against these.

@@ -32,6 +32,10 @@ pub struct RepairArgs {
     pub reference_dex: Option<PathBuf>,
     /// 额外 dump 来源（第三方 dump / 脱壳阶段产物，互补还原被抽取方法）
     pub extra_dumps: Vec<PathBuf>,
+    /// 直挂成品 dex（原样追加为 classes2..N，不重序列化，可多个、保序）。
+    /// 与 repair_all.py 的 --extra-dex 同义：脱壳阶段闸门产物等不可再序列化的
+    /// 成品 dex 走这里——--dump 只作 restore 来源、永不进成品包，两条通道不可互换。
+    pub extra_dex: Vec<PathBuf>,
     /// 签名密钥 PEM（可选，默认生成测试密钥）
     pub key_pem: Option<PathBuf>,
     /// 证书 DER（可选）
@@ -61,6 +65,34 @@ pub struct RepairResult {
     /// 成功/失败
     pub success: bool,
     pub error: Option<String>,
+}
+
+/// 组装 repair_all.py 的完整参数表（独立函数：通道语义可被单测钉死）。
+/// 三条 dex 通道各司其职，不可互换：
+///   - 位置参数（doctor 产物）       —— 分诊后重打包为 classes.dex
+///   - --dump（restore 来源，可多个）—— 只读、永不进成品
+///   - --extra-dex（直挂，可多个）   —— 原样追加为 classes2..N，不重序列化
+fn repair_all_args(args: &RepairArgs, dex_fixed: &Path) -> Vec<String> {
+    let mut cmd_args: Vec<String> = vec![
+        abs(&args.packed_apk),
+        abs(dex_fixed),
+        "-o".to_string(),
+        abs(&args.out_apk),
+    ];
+
+    if let Some(ref reference) = args.reference_dex {
+        cmd_args.push("--reference".to_string());
+        cmd_args.push(abs(reference));
+    }
+    for dump in &args.extra_dumps {
+        cmd_args.push("--dump".to_string());
+        cmd_args.push(abs(dump));
+    }
+    for dex in &args.extra_dex {
+        cmd_args.push("--extra-dex".to_string());
+        cmd_args.push(abs(dex));
+    }
+    cmd_args
 }
 
 /// 执行完整修复管线。
@@ -111,21 +143,7 @@ pub fn run_repair(args: &RepairArgs) -> RepairResult {
     // repair_all.py 内部做: doctor → clean → deweave → [repack] → [restore]
     //                        → surgery → zipalign → sign
     // 我们只需要调用它并传递正确的参数
-    let mut cmd_args: Vec<String> = vec![
-        abs(&args.packed_apk),
-        abs(&dex_fixed_path),
-        "-o".to_string(),
-        abs(&args.out_apk),
-    ];
-
-    if let Some(ref reference) = args.reference_dex {
-        cmd_args.push("--reference".to_string());
-        cmd_args.push(abs(reference));
-    }
-    for dump in &args.extra_dumps {
-        cmd_args.push("--dump".to_string());
-        cmd_args.push(abs(dump));
-    }
+    let cmd_args = repair_all_args(args, &dex_fixed_path);
 
     let arg_refs: Vec<&str> = cmd_args.iter().map(|s| s.as_str()).collect();
     let (out, err) = match embed::run_py(&tools, "repair_all.py", &arg_refs) {
@@ -227,11 +245,44 @@ mod tests {
             out_apk: PathBuf::from("/tmp/out.apk"),
             reference_dex: None,
             extra_dumps: vec![],
+            extra_dex: vec![],
             key_pem: None,
             cert_der: None,
         };
         assert_eq!(args.packed_apk, Path::new("/tmp/test.apk"));
         assert!(args.reference_dex.is_none());
         assert!(args.extra_dumps.is_empty());
+        assert!(args.extra_dex.is_empty());
+    }
+
+    #[test]
+    fn test_repair_all_args_ship_channels() {
+        // 通道语义回归（tosks 教训）：--dump 只作 restore 来源、不进成品；
+        // 唯一携带 MainActivity 的子 dex 若被塞进 --dump，重打包出的 APK 会
+        // 静默丢失整个 classes2.dex。直挂成品必须走 --extra-dex。
+        let args = RepairArgs {
+            packed_apk: PathBuf::from("/x/packed.apk"),
+            dumped_dex: PathBuf::from("/x/main.dex"),
+            out_apk: PathBuf::from("/x/out.apk"),
+            reference_dex: None,
+            extra_dumps: vec![PathBuf::from("/x/src_only.dex")],
+            extra_dex: vec![PathBuf::from("/x/sub1.dex"), PathBuf::from("/x/sub2.dex")],
+            key_pem: None,
+            cert_der: None,
+        };
+        let cmd = repair_all_args(&args, Path::new("/x/main.doctor.dex"));
+        // --dump / --extra-dex 各自恰好出现一次调用、值正确且保序
+        let dump_pos: Vec<usize> = cmd.iter().enumerate()
+            .filter(|(_, a)| *a == "--dump").map(|(i, _)| i).collect();
+        let extra_pos: Vec<usize> = cmd.iter().enumerate()
+            .filter(|(_, a)| *a == "--extra-dex").map(|(i, _)| i).collect();
+        assert_eq!(dump_pos.len(), 1);
+        assert_eq!(extra_pos.len(), 2);
+        assert_eq!(cmd[dump_pos[0] + 1], "/x/src_only.dex");
+        assert_eq!(cmd[extra_pos[0] + 1], "/x/sub1.dex");
+        assert_eq!(cmd[extra_pos[1] + 1], "/x/sub2.dex");
+        assert!(extra_pos[0] < extra_pos[1]);
+        // 位置参数仍是「壳 APK + doctor 产物」两件，直挂 dex 绝不混入位置参数
+        assert_eq!(&cmd[..4], ["/x/packed.apk", "/x/main.doctor.dex", "-o", "/x/out.apk"]);
     }
 }
