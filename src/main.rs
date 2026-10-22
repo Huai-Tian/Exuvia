@@ -107,9 +107,10 @@ enum Cmd {
         /// 加固后的（壳）APK
         #[arg(value_name = "PACKED_APK")]
         packed: std::path::PathBuf,
-        /// dump 出的 DEX 文件
+        /// dump 出的 DEX 文件（可多个：依次分诊后重打包为 classes.dex, classes2.dex…，
+        /// 与 repair_all.py 的位置参数 nargs='+' 同义）
         #[arg(value_name = "DUMPED_DEX")]
-        dex: std::path::PathBuf,
+        dex: Vec<std::path::PathBuf>,
         /// 输出 APK 路径
         #[arg(short, long)]
         out: std::path::PathBuf,
@@ -125,6 +126,11 @@ enum Cmd {
         /// 不进成品）是两条不可互换的通道
         #[arg(long = "extra-dex", value_name = "DEX")]
         extra_dex: Vec<std::path::PathBuf>,
+        /// 源头通道：自动收集 ./handoff/workspace/*/recovered.dex（存在即已过
+        /// 四层闸门）。无显式位置参数时最大者提升为主 dex（受分诊），其余按
+        /// debt_id 序直挂；与显式通道 sha256 去重
+        #[arg(long = "from-handoff")]
+        from_handoff: bool,
     },
 }
 
@@ -315,15 +321,16 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Some(Cmd::Repair { packed, dex, out, reference, dumps, extra_dex }) => {
+        Some(Cmd::Repair { packed, dex, out, reference, dumps, extra_dex, from_handoff }) => {
             use exuvia::repair::{run_repair, RepairArgs};
             let args = RepairArgs {
                 packed_apk: packed,
-                dumped_dex: dex,
+                dumped_dexes: dex,
                 out_apk: out,
                 reference_dex: reference,
                 extra_dumps: dumps,
                 extra_dex,
+                from_handoff,
                 key_pem: None,
                 cert_der: None,
             };

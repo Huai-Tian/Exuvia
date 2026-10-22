@@ -24,8 +24,9 @@ fn abs(p: &Path) -> String {
 pub struct RepairArgs {
     /// 加固后的（壳）APK
     pub packed_apk: PathBuf,
-    /// dump 出的 DEX 文件
-    pub dumped_dex: PathBuf,
+    /// dump 出的 DEX 文件（可多个：与 repair_all.py 位置参数 nargs='+' 同义，
+    /// 依次分诊后重打包为 classes.dex, classes2.dex…）
+    pub dumped_dexes: Vec<PathBuf>,
     /// 输出 APK 路径
     pub out_apk: PathBuf,
     /// 参照 DEX（原包，仅内部测试用，可选）
@@ -36,6 +37,9 @@ pub struct RepairArgs {
     /// 与 repair_all.py 的 --extra-dex 同义：脱壳阶段闸门产物等不可再序列化的
     /// 成品 dex 走这里——--dump 只作 restore 来源、永不进成品包，两条通道不可互换。
     pub extra_dex: Vec<PathBuf>,
+    /// 源头通道：自动收集 ./handoff/workspace/*/recovered.dex（存在即已过四层
+    /// 闸门）。无显式位置参数时最大者提升为主 dex，其余按 debt_id 序直挂。
+    pub from_handoff: bool,
     /// 签名密钥 PEM（可选，默认生成测试密钥）
     pub key_pem: Option<PathBuf>,
     /// 证书 DER（可选）
@@ -69,16 +73,16 @@ pub struct RepairResult {
 
 /// 组装 repair_all.py 的完整参数表（独立函数：通道语义可被单测钉死）。
 /// 三条 dex 通道各司其职，不可互换：
-///   - 位置参数（doctor 产物）       —— 分诊后重打包为 classes.dex
+///   - 位置参数（doctor 产物，可多个）—— 分诊后重打包为 classes.dex, classes2…
 ///   - --dump（restore 来源，可多个）—— 只读、永不进成品
-///   - --extra-dex（直挂，可多个）   —— 原样追加为 classes2..N，不重序列化
-fn repair_all_args(args: &RepairArgs, dex_fixed: &Path) -> Vec<String> {
-    let mut cmd_args: Vec<String> = vec![
-        abs(&args.packed_apk),
-        abs(dex_fixed),
-        "-o".to_string(),
-        abs(&args.out_apk),
-    ];
+///   - --extra-dex（直挂，可多个）   —— 原样追加为 classesN+1..，不重序列化
+fn repair_all_args(args: &RepairArgs, positionals: &[PathBuf], extras: &[PathBuf]) -> Vec<String> {
+    let mut cmd_args: Vec<String> = vec![abs(&args.packed_apk)];
+    for p in positionals {
+        cmd_args.push(abs(p));
+    }
+    cmd_args.push("-o".to_string());
+    cmd_args.push(abs(&args.out_apk));
 
     if let Some(ref reference) = args.reference_dex {
         cmd_args.push("--reference".to_string());
@@ -88,11 +92,76 @@ fn repair_all_args(args: &RepairArgs, dex_fixed: &Path) -> Vec<String> {
         cmd_args.push("--dump".to_string());
         cmd_args.push(abs(dump));
     }
-    for dex in &args.extra_dex {
+    for dex in extras {
         cmd_args.push("--extra-dex".to_string());
         cmd_args.push(abs(dex));
     }
     cmd_args
+}
+
+/// handoff 闸门产物收集：workspace/<debt_id>/recovered.dex（存在即已过四层
+/// 闸门——语法/格式 → 对账 → 语义双锚 → 销账，gate.rs 落盘约定）。
+/// 返回按 debt_id 字典序（确定性）。
+fn collect_handoff_products(handoff_dir: &Path) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = match std::fs::read_dir(handoff_dir.join("workspace")) {
+        Ok(rd) => rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect(),
+        Err(_) => return Vec::new(),
+    };
+    dirs.sort();
+    dirs.into_iter()
+        .map(|d| d.join("recovered.dex"))
+        .filter(|f| f.is_file())
+        .collect()
+}
+
+fn file_sha256(p: &Path) -> Option<String> {
+    use sha2::Digest as _;
+    let data = std::fs::read(p).ok()?;
+    Some(sha2::Sha256::digest(&data).iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// 源头解析：显式位置参数 ∪ --from-handoff 收集 → (位置参数集, 直挂集)。
+/// 规则：
+/// - 收集集先对显式通道（位置参数 + 直挂）做 sha256 去重——同一闸门产物
+///   显式给了又被收集到，不重复挂包；
+/// - 有显式位置参数：收集集全部直挂（跟在显式 --extra-dex 之后）；
+/// - 无显式位置参数：收集集中最大者提升为主 dex（受分诊），其余按
+///   debt_id 序直挂——主 dex 承载应用体量、享受分诊（两战验证的行为），
+///   卫星 dex 原样进包（闸门已验证字节，不再重序列化）；
+/// - 位置参数集为空 = 结构化错误（repair_all 至少需要一个主 dex）。
+fn resolve_ship_inputs(args: &RepairArgs) -> Result<(Vec<PathBuf>, Vec<PathBuf>), String> {
+    resolve_ship_inputs_at(args, Path::new("handoff"))
+}
+
+fn resolve_ship_inputs_at(args: &RepairArgs, handoff_dir: &Path) -> Result<(Vec<PathBuf>, Vec<PathBuf>), String> {
+    let mut positionals = args.dumped_dexes.clone();
+    let mut extras = args.extra_dex.clone();
+    if args.from_handoff {
+        let collected = collect_handoff_products(handoff_dir);
+        if collected.is_empty() {
+            return Err(format!("--from-handoff: {}/workspace/*/recovered.dex 无产物 —— 先跑脱壳循环（first_pass → goal → merge）", handoff_dir.display()));
+        }
+        let have: std::collections::HashSet<String> = positionals.iter()
+            .chain(extras.iter())
+            .filter_map(|p| file_sha256(p))
+            .collect();
+        let mut fresh: Vec<PathBuf> = collected.into_iter()
+            .filter(|p| file_sha256(p).map(|h| !have.contains(&h)).unwrap_or(true))
+            .collect();
+        if positionals.is_empty() && !fresh.is_empty() {
+            // 最大者提升为主 dex
+            let main_idx = fresh.iter().enumerate()
+                .max_by_key(|(_, p)| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            positionals.push(fresh.remove(main_idx));
+        }
+        extras.extend(fresh);
+    }
+    if positionals.is_empty() {
+        return Err("no input dex: 位置参数 <DUMPED_DEX> 或 --from-handoff 至少其一".into());
+    }
+    Ok((positionals, extras))
 }
 
 /// 提取「marker: <数字>」里的计数——marker 后跳空白、连续取数字。
@@ -123,40 +192,60 @@ pub fn run_repair(args: &RepairArgs) -> RepairResult {
     };
     logs.push("[tools] python toolchain extracted".to_string());
 
-    // 1. 修复 DEX 的校验和和病理（dexdoctor.py --fix）
-    let dex_fixed_path = args.dumped_dex.with_extension("doctor.dex");
-    let (out, err) = match embed::run_py(
-        &tools,
-        "dexdoctor.py",
-        &[
-            &abs(&args.dumped_dex),
-            "--fix",
-            "-o",
-            &abs(&dex_fixed_path),
-        ],
-    ) {
+    // 0.5 源头解析：显式位置参数 ∪ --from-handoff 闸门产物 → (位置集, 直挂集)
+    let (positionals, extras) = match resolve_ship_inputs(args) {
         Ok(v) => v,
         Err(e) => {
-            result.error = Some(format!("dexdoctor: {}", e));
+            result.error = Some(e);
             result.logs = logs;
             return result;
         }
     };
-    for line in out.lines() {
-        if line.contains("FIXED") {
-            result.doctor_fixes.push(line.trim().to_string());
-        }
-        logs.push(format!("[doctor] {}", line));
+    for p in &positionals {
+        logs.push(format!("[input] positional: {}", p.display()));
     }
-    if !err.is_empty() {
-        logs.push(format!("[doctor:stderr] {}", err.trim()));
+    for p in &extras {
+        logs.push(format!("[input] extra-dex (ship as-is): {}", p.display()));
+    }
+
+    // 1. 修复每个位置参数 DEX 的校验和和病理（dexdoctor.py --fix，逐文件）
+    let mut dex_fixed_paths: Vec<PathBuf> = Vec::with_capacity(positionals.len());
+    for dex in &positionals {
+        let dex_fixed_path = dex.with_extension("doctor.dex");
+        let (out, err) = match embed::run_py(
+            &tools,
+            "dexdoctor.py",
+            &[
+                &abs(dex),
+                "--fix",
+                "-o",
+                &abs(&dex_fixed_path),
+            ],
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                result.error = Some(format!("dexdoctor: {}", e));
+                result.logs = logs;
+                return result;
+            }
+        };
+        for line in out.lines() {
+            if line.contains("FIXED") {
+                result.doctor_fixes.push(line.trim().to_string());
+            }
+            logs.push(format!("[doctor] {}", line));
+        }
+        if !err.is_empty() {
+            logs.push(format!("[doctor:stderr] {}", err.trim()));
+        }
+        dex_fixed_paths.push(dex_fixed_path);
     }
 
     // 2. 织入恢复 + 修复管线（repair_all.py 一条命令）
     // repair_all.py 内部做: doctor → clean → deweave → [repack] → [restore]
     //                        → surgery → zipalign → sign
     // 我们只需要调用它并传递正确的参数
-    let cmd_args = repair_all_args(args, &dex_fixed_path);
+    let cmd_args = repair_all_args(args, &dex_fixed_paths, &extras);
 
     let arg_refs: Vec<&str> = cmd_args.iter().map(|s| s.as_str()).collect();
     let (out, err) = match embed::run_py(&tools, "repair_all.py", &arg_refs) {
@@ -230,7 +319,9 @@ pub fn run_repair(args: &RepairArgs) -> RepairResult {
     }
 
     // 3. 清理中间文件
-    let _ = std::fs::remove_file(&dex_fixed_path);
+    for p in &dex_fixed_paths {
+        let _ = std::fs::remove_file(p);
+    }
 
     // 4. 验证输出
     if args.out_apk.exists() {
@@ -250,22 +341,28 @@ pub fn run_repair(args: &RepairArgs) -> RepairResult {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_repair_args_default() {
-        let args = RepairArgs {
+    fn base_args() -> RepairArgs {
+        RepairArgs {
             packed_apk: PathBuf::from("/tmp/test.apk"),
-            dumped_dex: PathBuf::from("/tmp/test.dex"),
+            dumped_dexes: vec![PathBuf::from("/tmp/test.dex")],
             out_apk: PathBuf::from("/tmp/out.apk"),
             reference_dex: None,
             extra_dumps: vec![],
             extra_dex: vec![],
+            from_handoff: false,
             key_pem: None,
             cert_der: None,
-        };
+        }
+    }
+
+    #[test]
+    fn test_repair_args_default() {
+        let args = base_args();
         assert_eq!(args.packed_apk, Path::new("/tmp/test.apk"));
         assert!(args.reference_dex.is_none());
         assert!(args.extra_dumps.is_empty());
         assert!(args.extra_dex.is_empty());
+        assert!(!args.from_handoff);
     }
 
     #[test]
@@ -274,16 +371,11 @@ mod tests {
         // 唯一携带 MainActivity 的子 dex 若被塞进 --dump，重打包出的 APK 会
         // 静默丢失整个 classes2.dex。直挂成品必须走 --extra-dex。
         let args = RepairArgs {
-            packed_apk: PathBuf::from("/x/packed.apk"),
-            dumped_dex: PathBuf::from("/x/main.dex"),
-            out_apk: PathBuf::from("/x/out.apk"),
-            reference_dex: None,
             extra_dumps: vec![PathBuf::from("/x/src_only.dex")],
-            extra_dex: vec![PathBuf::from("/x/sub1.dex"), PathBuf::from("/x/sub2.dex")],
-            key_pem: None,
-            cert_der: None,
+            ..base_args()
         };
-        let cmd = repair_all_args(&args, Path::new("/x/main.doctor.dex"));
+        let extras = vec![PathBuf::from("/x/sub1.dex"), PathBuf::from("/x/sub2.dex")];
+        let cmd = repair_all_args(&args, &[PathBuf::from("/x/main.doctor.dex")], &extras);
         // --dump / --extra-dex 各自恰好出现一次调用、值正确且保序
         let dump_pos: Vec<usize> = cmd.iter().enumerate()
             .filter(|(_, a)| *a == "--dump").map(|(i, _)| i).collect();
@@ -296,7 +388,7 @@ mod tests {
         assert_eq!(cmd[extra_pos[1] + 1], "/x/sub2.dex");
         assert!(extra_pos[0] < extra_pos[1]);
         // 位置参数仍是「壳 APK + doctor 产物」两件，直挂 dex 绝不混入位置参数
-        assert_eq!(&cmd[..4], ["/x/packed.apk", "/x/main.doctor.dex", "-o", "/x/out.apk"]);
+        assert_eq!(&cmd[..4], ["/tmp/test.apk", "/x/main.doctor.dex", "-o", "/tmp/out.apk"]);
     }
 
     #[test]
@@ -312,5 +404,72 @@ mod tests {
         // 无 marker / 无数字 → None，不误判
         assert_eq!(counter_after("[repair] nothing here", "shell assets removed:"), None);
         assert_eq!(counter_after("[repair] shell assets removed: none", "shell assets removed:"), None);
+    }
+
+    /// 唯一临时目录（无 tempfile 依赖的测试纪律：std-only + 进程号 + 计数器）。
+    fn scratch(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let d = std::env::temp_dir().join(format!(
+            "exuvia-pipeline-test-{}-{}-{}", std::process::id(), tag,
+            N.fetch_add(1, Ordering::Relaxed)));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn test_resolve_from_handoff_promotes_largest_and_ships_rest() {
+        // handoff 收集语义：workspace/*/recovered.dex 按 debt_id 序收集；
+        // 无显式位置参数时最大者提升为主 dex，其余保序直挂。
+        let dir = scratch("handoff");
+        let ws = dir.join("handoff").join("workspace");
+        std::fs::create_dir_all(ws.join("debt-0003")).unwrap();
+        std::fs::create_dir_all(ws.join("debt-0007")).unwrap();
+        std::fs::write(ws.join("debt-0003").join("recovered.dex"), b"small-sub-dex").unwrap();
+        std::fs::write(ws.join("debt-0007").join("recovered.dex"), vec![0u8; 4096]).unwrap();
+
+        let args = RepairArgs { dumped_dexes: vec![], from_handoff: true, ..base_args() };
+        let (pos, ext) = resolve_ship_inputs_at(&args, &dir.join("handoff")).unwrap();
+
+        assert_eq!(pos.len(), 1);
+        assert!(pos[0].ends_with("debt-0007/recovered.dex"));  // 大者为主
+        assert_eq!(ext.len(), 1);
+        assert!(ext[0].ends_with("debt-0003/recovered.dex"));  // 小者直挂
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_resolve_from_handoff_dedups_explicit_channels() {
+        // 同一闸门产物显式 --extra-dex 给了、又被 --from-handoff 收集到 → 不重复挂
+        let dir = scratch("dedup");
+        let ws = dir.join("handoff").join("workspace").join("debt-0001");
+        std::fs::create_dir_all(&ws).unwrap();
+        let product = ws.join("recovered.dex");
+        std::fs::write(&product, b"same-bytes").unwrap();
+
+        let args = RepairArgs {
+            extra_dex: vec![product.clone()],
+            from_handoff: true,
+            ..base_args()
+        };
+        let (pos, ext) = resolve_ship_inputs_at(&args, &dir.join("handoff")).unwrap();
+
+        assert_eq!(pos, vec![PathBuf::from("/tmp/test.dex")]);
+        assert_eq!(ext, vec![product]);  // 仅显式那一份
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_resolve_empty_inputs_is_structured_error() {
+        let dir = scratch("empty");
+        let args = RepairArgs { dumped_dexes: vec![], from_handoff: true, ..base_args() };
+        let err = resolve_ship_inputs_at(&args, &dir.join("handoff")).unwrap_err();
+        assert!(err.contains("--from-handoff"), "got: {err}");
+
+        let args2 = RepairArgs { dumped_dexes: vec![], ..base_args() };
+        let err2 = resolve_ship_inputs_at(&args2, &dir.join("handoff")).unwrap_err();
+        assert!(err2.contains("no input dex"), "got: {err2}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

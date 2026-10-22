@@ -4,7 +4,7 @@ Exuvia: deterministic Android unpacking + repair pipeline. Two product lines in 
 
 ## 1. Actions
 
-0. REPAIR (independent of the outsourcing loop): `exuvia repair <packed.apk> <dumped.dex> -o <out.apk> [--dump <dex>]... [--extra-dex <dex>]...` — §7. Skip this loop entirely.
+0. REPAIR (independent of the outsourcing loop): `exuvia repair <packed.apk> [dumped.dex]... -o <out.apk> [--dump <dex>]... [--extra-dex <dex>]... [--from-handoff]` — §7. Skip this loop entirely. `--from-handoff` is the loop's EXIT: gate products feed repair directly.
 1. READ `handoff/REPORT.json` + `debt.json` (§2)
 2. WRITE `goal.json` (§3) — semantic targeting is yours; the tool executes formatted targets only
 3. SUBMIT proposal package (§4); on rejection: read error → patch → resubmit (§5)
@@ -252,12 +252,14 @@ Documented error codes (this set is authoritative; do not rely on others):
 The industry gap this closes: dumpers (third-party services, FART, frida hooks) produce DEX, but nobody repairs the APK so the dumped DEX actually LAUNCHES — the shell's markers (wrapper Application in the manifest, stub dex, native loader assets, woven bytecode, frozen native stubs) are still in the APK. `exuvia repair` removes the shell's protection and rebuilds an installable, v2-signed APK in one command:
 
 ```bash
-exuvia repair packed.apk dumped.dex -o restored.apk \
+exuvia repair packed.apk [dumped.dex]... -o restored.apk \
   [--dump third_party_dump.dex]... [--extra-dex gate_product.dex]... \
-  [--reference original_classes.dex]
+  [--reference original_classes.dex] [--from-handoff]
 ```
 
 **Ship channels — three dex roles, not interchangeable** (choosing wrong silently drops code from the output APK): the positional `dumped.dex` is triaged (doctor → clean → deweave) and repacked as `classes.dex`; `--dump <dex>` is a restore SOURCE ONLY — read for method bodies, never ships; `--extra-dex <dex>` (repeatable, order preserved) ships AS-IS as `classes2.dex..classesN.dex` with NO re-serialization — the channel for unpack-stage gate products (e.g. a merge-gate-passed `recovered.dex` / hunt hit) and any complete healthy dex that must reach the output byte-exact. A whole dex that only carries classes absent from the positional dump (the dex2c family's tail-container sub-dex is the case on record: sole `MainActivity` carrier) ships via `--extra-dex`; routing it to `--dump` produces an APK that installs but cannot launch.
+
+**Source channel — `--from-handoff`** (closes the unpack→repair loop, no manual file plumbing): collects every merge-gate product `handoff/workspace/*/recovered.dex` (presence there means the four-layer gate passed, §5) straight into the ship channels. Rules, in order: sha256-dedup against the explicit channels — a gate product already given as positional or `--extra-dex` never ships twice; explicit positionals present → every collected dex appends to `--extra-dex` in debt_id order (gate products ship as-is, never re-triaged); no explicit positional → the LARGEST collected dex promotes to the positional (doctor triage, repacked as classes.dex — the main-dex heuristic: the dex carrying the app's entry classes dwarfs the sub-dexes) and the rest append to `--extra-dex`; no positional AND nothing collected → structured error naming both channels. The one-command form: `exuvia repair packed.apk --from-handoff -o restored.apk` — gate products to a signed APK.
 
 **Completeness precondition (device-earned, tosks 2026-10-22)**: whatever ships must be BODY-COMPLETE for every class the runtime touches. A raw container-recovered dex whose methods are still `native` hollow stubs is NOT shippable as-is — after surgery the shell runtime (`StubApp` + `assets/lib*.so` carrying the translated JNI bodies) is gone, and ART dies with `UnsatisfiedLinkError` on the first lifecycle call. Family-2 translated classes must first pass through the dex2c source (jnitrace → trace2smali synthesis, below); only the synthesized, all-Dalvik dex goes to `--extra-dex`. Container recovery hands you the class/method skeleton and the untranslated classes — the translated bodies come from the trace, never from the container.
 
@@ -336,7 +338,7 @@ guidance = [
 ## 9. Version anchors
 
 ```text
-SKILL_VERSION: 1.7.1
+SKILL_VERSION: 1.8.0
 handoff_version: 1    goal_version: 1    proposal_version: 1
 ```
 
@@ -347,4 +349,5 @@ handoff_version: 1    goal_version: 1    proposal_version: 1
 - 1.6.0: hunt gains the block-chaining arm (`--aes-cbc/--aes-iv`, profile aes128cbc-tail-v1: trailer anchor, header-block length scan-verified, XOR-prefix sub-container walk) + fourth mechanical payload-debt source (parse-healthy dex with file_size vs data-section-end gap ≥0x70 — both battle families share the shape); §2 hunt entry + §8 family-2 recipe synced; no protocol change.
 - 1.7.0: repair CLI gains the `--extra-dex` ship channel (pass-through dex appended as classes2..N, no re-serialization — for unpack-stage gate products; the positional/`--dump`/`--extra-dex` three-role contract documented in §7). Found by the tosks pipeline regression: a sub-dex routed via `--dump` is source-only and silently drops from the output APK; no protocol change.
 - 1.7.1: §7 ship-channel completeness precondition (device-earned, tosks crash 2026-10-22): a raw container-recovered dex with `native` hollow stubs is not shippable — after surgery the shell runtime carrying the translated JNI bodies is gone and ART dies with UnsatisfiedLinkError on the first lifecycle call; family-2 translated classes must pass through the dex2c source (jnitrace → trace2smali) first, only the all-Dalvik synthesized dex goes to `--extra-dex`; no protocol change.
+- 1.8.0: repair CLI gains the `--from-handoff` source channel — collects merge-gate products (`handoff/workspace/*/recovered.dex`) straight into the ship channels (sha256-dedup vs explicit channels; explicit positionals present → collected all go to `--extra-dex` in debt_id order; none → the largest collected dex promotes to the triaged positional, rest to `--extra-dex`; empty inputs = structured error). Closes the unpack→repair loop without manual file plumbing; §0/§7 usage synced; no protocol change.
 - Before adapting to a new environment, compare `exuvia --version` against these.
