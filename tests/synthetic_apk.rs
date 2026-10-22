@@ -72,6 +72,46 @@ fn first_pass_inventories_synthetic_apk() {
 }
 
 #[test]
+fn first_pass_flags_tail_container_gap() {
+    // 第四机械来源：表结构良性的 classes.dex 抬高 file_size、把 payload 接在
+    // data 段终点之后（两族实测共用形态）→ encrypted-payload 卡点 + 尾区头切片
+    use std::io::Write as _;
+    let dir = std::env::temp_dir().join("exuvia_test_tailgap");
+    std::fs::create_dir_all(&dir).unwrap();
+    let apk = dir.join("tailgap.apk");
+    let mut dex = common::build_minimal_dex();
+    let data_end = dex.len() as u32; // 良性部分终点 = data_off+data_size（fixture 已诚实自述）
+    let tail = common::prng_bytes(0x7A11, 0x200); // 模拟容器字节（≥0x70 → 过噪声地板）
+    let declared = data_end + tail.len() as u32;
+    dex[0x20..0x24].copy_from_slice(&declared.to_le_bytes()); // 抬高 file_size 纳入声明区域
+    dex.extend_from_slice(&tail);
+    {
+        let file = std::fs::File::create(&apk).unwrap();
+        let mut w = zip::ZipWriter::new(file);
+        let opts = zip::write::SimpleFileOptions::default();
+        w.start_file("AndroidManifest.xml", opts).unwrap();
+        w.write_all(&[0x03, 0x00, 0x08, 0x00]).unwrap();
+        w.start_file("classes.dex", opts).unwrap();
+        w.write_all(&dex).unwrap();
+        w.finish().unwrap();
+    }
+
+    let (report, debt, groups) = first_pass(&apk).expect("first pass");
+    let payloads: Vec<_> = debt.entries.iter().filter(|e| e.kind == exuvia::report::DebtKind::EncryptedPayload).collect();
+    assert_eq!(payloads.len(), 1, "exactly one tail-gap payload debt (stub methods still book separately)");
+    let e = payloads[0];
+    assert!(e.facts[0].contains("undeclared trailing bytes"), "headline states the mechanical fact: {}", e.facts[0]);
+    assert!(e.facts[0].contains(&format!("0x{data_end:x}")), "headline carries the data-end coordinate");
+    assert!(e.facts[0].contains(&tail.len().to_string()), "headline carries the gap size");
+    let g = groups.iter().find(|g| g.debt_id == e.debt_id).expect("evidence group");
+    let sl = g.slices.iter().find(|s| s.file_offset == data_end as u64).expect("tail head slice at data_end");
+    assert_eq!(sl.bytes, tail[..sl.bytes.len()].to_vec(), "slice bytes = tail head (hunt carrier coordinate)");
+    // 良性侧不受扰：原有 method-native-stub 卡点仍在
+    assert!(debt.entries.iter().any(|e| e.kind == exuvia::report::DebtKind::MethodNativeStub));
+    assert_eq!(report.debt.total as usize, debt.entries.len());
+}
+
+#[test]
 fn dex_parser_reads_native_flag_and_descriptor() {
     let dex = common::build_minimal_dex();
     let methods = exuvia::track_a::dex::parse(&dex).expect("parse minimal dex");

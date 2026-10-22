@@ -191,3 +191,206 @@ fn hunt_finds_variant_rc4_payload_in_ocean() {
     assert!(std_hits.is_empty(), "standard RC4 must NOT decrypt the variant stream");
     assert_eq!(std_negs.len(), 1);
 }
+
+// ── AES-128-CBC tail 容器谓词（剖面 aes128cbc-tail-v1，第二战族知识）──────────
+// 双锚纪律：解密方向由 NIST SP 800-38A 已知答案独立锚定（不依赖本 crate 加密）；
+// fixture 加密方向用本 crate 构造（容器格式本身由 trackb/dexcontainer.py 锚定）。
+
+/// NIST SP 800-38A F.2.1 CBC-AES128 已知答案：hunt 的解密原语必须逐字节
+/// 复现明文向量——解密方向由外部权威锚定，而非本 crate 加密方向的自证。
+#[test]
+fn aes_cbc_decrypt_nist_kat() {
+    let key = hunt::hex_to_bytes("2b7e151628aed2a6abf7158809cf4f3c").unwrap();
+    let iv = hunt::hex_to_bytes("000102030405060708090a0b0c0d0e0f").unwrap();
+    let pt = hunt::hex_to_bytes(concat!(
+        "6bc1bee22e409f96e93d7e117393172a",
+        "ae2d8a571e03ac9c9eb76fac45af8e51",
+        "30c81c46a35ce411e5fbc1191a0a52ef",
+        "f69f2445df4f9b17ad2b417be66c3710"
+    ))
+    .unwrap();
+    let ct = hunt::hex_to_bytes(concat!(
+        "7649abac8119b246cee98e9b12e9197d",
+        "5086cb9b507219ee95db113a917678b2",
+        "73bed6b8e3c1743b7116e69e22229516",
+        "3ff1caa1681fac09120eca307586e1a7"
+    ))
+    .unwrap();
+    assert_eq!(hunt::aes128_cbc_decrypt(&key, &iv, &ct).unwrap(), pt, "decrypt must reproduce NIST SP 800-38A F.2.1 plaintext");
+    // 畸形输入契约：非 16 对齐 / 非 16B key-iv → None（负事实路径，不 panic）
+    assert!(hunt::aes128_cbc_decrypt(&key, &iv, &ct[..17]).is_none());
+    assert!(hunt::aes128_cbc_decrypt(&key[..8], &iv, &ct).is_none());
+}
+
+/// fixture 构造器：AES-128-CBC 加密（手工链接，与 hunt 解密同 crate 对向）。
+fn aes128_cbc_encrypt_blocks(key: &[u8], iv: &[u8], data: &[u8]) -> Vec<u8> {
+    use aes::cipher::{generic_array::GenericArray, BlockEncrypt, KeyInit};
+    assert_eq!(key.len(), 16);
+    assert_eq!(iv.len(), 16);
+    assert_eq!(data.len() % 16, 0);
+    let cipher = aes::Aes128::new_from_slice(key).unwrap();
+    let mut out = data.to_vec();
+    let mut prev: [u8; 16] = iv.try_into().unwrap();
+    for chunk in out.chunks_exact_mut(16) {
+        for (b, p) in chunk.iter_mut().zip(prev.iter()) {
+            *b ^= p;
+        }
+        cipher.encrypt_block(GenericArray::from_mut_slice(chunk));
+        prev = chunk.try_into().unwrap();
+    }
+    out
+}
+
+/// 合成 aes128cbc-tail-v1 容器：[stub][加密头块][dex#1 明文体][子容器]*[BE32 trailer]。
+/// enc_len 显式给定（≠ 族默认 0x210 时即演练头块长度扫描路径）；
+/// subs 的 bool = 是否按族默认（0x70/0x66）XOR 剥离存放。
+fn build_tail_container(
+    stub: &[u8],
+    name: &str,
+    dex1: &[u8],
+    subs: &[(&[u8], bool)],
+    key: &[u8],
+    iv: &[u8],
+    enc_len: usize,
+) -> Vec<u8> {
+    let hdr_off = name.len() + 5;
+    let frag_len = dex1.len().min(enc_len - hdr_off - 16);
+    let pad = enc_len - hdr_off - frag_len;
+    assert!((1..=16).contains(&pad), "fixture enc_len leaves no room for pkcs7 pad");
+    let mut pt = Vec::with_capacity(enc_len);
+    pt.push(name.len() as u8);
+    pt.extend_from_slice(name.as_bytes());
+    pt.push(0);
+    pt.extend_from_slice(&(dex1.len() as u32).to_be_bytes()[1..]); // 3B BE fsize
+    pt.extend_from_slice(&dex1[..frag_len]);
+    pt.extend(std::iter::repeat(pad as u8).take(pad));
+    assert_eq!(pt.len(), enc_len);
+
+    let mut carrier = stub.to_vec();
+    carrier.extend_from_slice(&aes128_cbc_encrypt_blocks(key, iv, &pt));
+    carrier.extend_from_slice(&dex1[frag_len..]);
+    for (sub, strip) in subs {
+        let mut p = sub.to_vec();
+        if *strip {
+            for b in p.iter_mut().take(0x70) {
+                *b ^= 0x66;
+            }
+        }
+        carrier.extend_from_slice(&(p.len() as u32).to_be_bytes());
+        carrier.extend_from_slice(&p);
+    }
+    carrier.extend_from_slice(&(stub.len() as u32).to_be_bytes()); // trailer = BE32 容器起点
+    carrier
+}
+
+#[test]
+fn hunt_finds_aes_tail_container_trailer_anchor() {
+    let dex1 = common::build_minimal_dex();
+    let sub_raw = common::build_minimal_dex();
+    let sub_stripped = common::build_minimal_dex();
+    let key = b"0123456789abcdef";
+    let iv = b"fedcba9876543210";
+    let stub = common::prng_bytes(0x5A1E, 0x123); // 非 16 对齐 stub：块边界相对容器起点
+    let enc_len = 0x50; // ≠ 族默认 → 头块长度扫描路径
+    let carrier = build_tail_container(
+        &stub,
+        "com.test.App",
+        &dex1,
+        &[(&sub_raw, false), (&sub_stripped, true)],
+        key,
+        iv,
+        enc_len,
+    );
+
+    let (hits, dexes, negs) = hunt::hunt(
+        &carrier,
+        &[Predicate::AesCbc { key: key.to_vec(), iv: iv.to_vec(), params: hunt::AesCbcTailParams::default() }],
+    );
+
+    assert_eq!(hits.len(), 3, "dex#1 + raw sub + stripped sub");
+    assert!(negs.is_empty());
+    let frag_len = dex1.len().min(enc_len - ("com.test.App".len() + 5) - 16);
+    let body_len = dex1.len() - frag_len;
+    let h0 = &hits[0];
+    assert_eq!(h0.offset, stub.len());
+    assert_eq!(h0.cipher_len, enc_len + body_len);
+    assert_eq!(
+        h0.chain,
+        vec![
+            "cbc-anchor-trailer".to_string(),
+            format!("cbc-header-decrypt(enc_len=0x{enc_len:x})"),
+            "dex-magic".to_string(),
+            "dex-parse-ok".to_string(),
+            "sub-walk(2 dex, 0 non-dex skipped)".to_string(),
+        ]
+    );
+    assert_eq!(&dexes[0], &dex1, "dex#1 round-trips (header fragment + plaintext body)");
+
+    let sub1_off = stub.len() + enc_len + body_len;
+    let h1 = &hits[1];
+    assert_eq!(h1.offset, sub1_off);
+    assert_eq!(h1.cipher_len, 4 + sub_raw.len());
+    assert!(h1.chain.contains(&"raw-payload".to_string()));
+    assert_eq!(&dexes[1], &sub_raw);
+
+    let h2 = &hits[2];
+    assert_eq!(h2.offset, sub1_off + 4 + sub_raw.len());
+    assert!(h2.chain.contains(&"xor-prefix-strip".to_string()));
+    assert_eq!(&dexes[2], &sub_stripped, "XOR prefix strip restores the stored sub dex");
+}
+
+#[test]
+fn hunt_aes_tail_scan_anchor_when_trailer_absent() {
+    // 载体为切片（trailer 失真）→ 全范围锚点扫描路径必须同样命中
+    let dex1 = common::build_minimal_dex();
+    let key = b"0123456789abcdef";
+    let iv = b"fedcba9876543210";
+    let stub = common::prng_bytes(0x0CEA, 0x87);
+    let mut carrier = build_tail_container(&stub, "com.test.App", &dex1, &[], key, iv, 0x50);
+    let n = carrier.len();
+    carrier[n - 4..].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]); // trailer 失真
+
+    let (hits, dexes, negs) = hunt::hunt(
+        &carrier,
+        &[Predicate::AesCbc { key: key.to_vec(), iv: iv.to_vec(), params: hunt::AesCbcTailParams::default() }],
+    );
+
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].offset, stub.len());
+    assert_eq!(hits[0].chain[0], "cbc-anchor-scan");
+    assert_eq!(&dexes[0], &dex1);
+    assert!(negs.is_empty());
+}
+
+#[test]
+fn hunt_aes_tail_wrong_key_is_negative_not_hallucination() {
+    let dex1 = common::build_minimal_dex();
+    let key = b"0123456789abcdef";
+    let iv = b"fedcba9876543210";
+    let stub = common::prng_bytes(0xBAD, 0x40);
+    let carrier = build_tail_container(&stub, "com.test.App", &dex1, &[], key, iv, 0x50);
+
+    let (hits, dexes, negs) = hunt::hunt(
+        &carrier,
+        &[Predicate::AesCbc {
+            key: b"0000000000000000".to_vec(),
+            iv: iv.to_vec(),
+            params: hunt::AesCbcTailParams::default(),
+        }],
+    );
+    assert!(hits.is_empty());
+    assert!(dexes.is_empty());
+    assert_eq!(negs.len(), 1);
+    assert!(negs[0].contains("aes128cbc-tail-v1"), "negative fact must state the container model");
+    assert!(negs[0].contains("no container hit"));
+}
+
+#[test]
+fn key_spec_hex_or_ascii_contract() {
+    assert_eq!(hunt::key_spec_bytes("deadbeefdeadbeefdeadbeefdeadbeef").unwrap().len(), 16);
+    assert_eq!(hunt::key_spec_bytes("bajk3b4j3bvuoa3h").unwrap(), b"bajk3b4j3bvuoa3h");
+    // 16 字符全 hex 数字的 ASCII key：hex 先得 8B ≠ 16B → 回落 ASCII（无歧义）
+    assert_eq!(hunt::key_spec_bytes("0123456789abcdef").unwrap(), b"0123456789abcdef");
+    assert!(hunt::key_spec_bytes("short").is_err());
+    assert!(hunt::key_spec_bytes("deadbeef").is_err(), "8B hex is not a key");
+}

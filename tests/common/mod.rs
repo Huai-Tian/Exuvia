@@ -127,6 +127,10 @@ pub fn build_minimal_dex() -> Vec<u8> {
 
     let n = out.len() as u32;
     out[0x20..0x24].copy_from_slice(&n.to_le_bytes());
+    // data 段自述（spec 良性形态：file_size == data_off + data_size）——
+    // header(0x70) 之后全部视为 data；尾部容器检测（apk.rs 第四来源）以此字段对为信号
+    out[0x68..0x6c].copy_from_slice(&112u32.to_le_bytes());
+    out[0x6c..0x70].copy_from_slice(&(n - 112).to_le_bytes());
     out
 }
 

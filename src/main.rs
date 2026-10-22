@@ -66,7 +66,7 @@ enum Cmd {
         #[arg(long, default_value = "handoff-2")]
         out: std::path::PathBuf,
     },
-    /// L2 参数空间搜索：已知算法（rc4/xor + key）× 未知密文段参数 → 机械命中
+    /// L2 参数空间搜索：已知算法（rc4/xor/aes-cbc + key）× 未知密文段参数 → 机械命中
     /// （轨道 C 桌面化：算法与 key 来自 facts/LLM 复现，段起点/长度由判据链自决）
     Hunt {
         /// 密文载体文件（evidence 切片 / so 内嵌段 / 任意字节流）
@@ -85,6 +85,18 @@ enum Cmd {
         /// 循环 XOR key（hex；可重复）
         #[arg(long = "xor", value_name = "HEX")]
         xor: Vec<String>,
+        /// AES-128-CBC tail 容器 key（hex 或 16 字节 ASCII；可重复；剖面 aes128cbc-tail-v1，
+        /// 起点 trailer 自述 / 头块长度扫描自决 / 子容器长度前缀走查）
+        #[arg(long = "aes-cbc", value_name = "KEY")]
+        aes_cbc: Vec<String>,
+        /// AES-128-CBC IV（hex 或 16 字节 ASCII；修饰所有 --aes-cbc）
+        #[arg(long = "aes-iv", value_name = "IV", requires = "aes_cbc")]
+        aes_iv: Option<String>,
+        /// 子容器前缀 XOR 参数（族默认 0x70/0x66；--aes-xor-prefix 0 = 子容器明文存放）
+        #[arg(long = "aes-xor-prefix", default_value = "0x70")]
+        aes_xor_prefix: String,
+        #[arg(long = "aes-xor-key", default_value = "0x66")]
+        aes_xor_key: String,
         /// 输出目录（hunt.json + hits/<n>.dex；默认 hunt/）
         #[arg(long, default_value = "hunt")]
         out: std::path::PathBuf,
@@ -207,8 +219,15 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Some(Cmd::Hunt { carrier, rc4, rc4_stride, rc4_seed, rc4_jbias, xor, out }) => {
-            use exuvia::track_a::hunt::{hex_to_bytes, run, Predicate, Rc4Params};
+        Some(Cmd::Hunt { carrier, rc4, rc4_stride, rc4_seed, rc4_jbias, xor, aes_cbc, aes_iv, aes_xor_prefix, aes_xor_key, out }) => {
+            use exuvia::track_a::hunt::{hex_to_bytes, key_spec_bytes, run, AesCbcTailParams, Predicate, Rc4Params};
+            // 0x.. / 十进制自适解析（dexcontainer.py 的 int(s, 0) 同款 CLI 习惯）
+            fn int_auto(s: &str) -> Result<usize, String> {
+                match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                    Some(h) => usize::from_str_radix(h, 16).map_err(|_| format!("bad int {s}")),
+                    None => s.parse::<usize>().map_err(|_| format!("bad int {s}")),
+                }
+            }
             // 变体参数解析（失败 = 结构化错误；默认值 = 标准 RC4）
             let parse_params = || -> Result<Rc4Params, String> {
                 let stride = rc4_stride.parse::<u32>().map_err(|_| format!("bad --rc4-stride {rc4_stride}"))?;
@@ -242,6 +261,40 @@ fn main() -> ExitCode {
                     Err(e) => {
                         eprintln!("{{\"error\":\"{}\"}}", e.replace('"', "'"));
                         return ExitCode::FAILURE;
+                    }
+                }
+            }
+            // AES-CBC tail 容器谓词（--aes-iv 由 clap requires 保证与 --aes-cbc 配对）
+            if !aes_cbc.is_empty() {
+                let iv = match key_spec_bytes(aes_iv.as_deref().unwrap_or("")) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("{{\"error\":\"{}\"}}", e.replace('"', "'"));
+                        return ExitCode::FAILURE;
+                    }
+                };
+                let (xor_prefix, xor_key) = match (int_auto(&aes_xor_prefix), int_auto(&aes_xor_key)) {
+                    (Ok(p), Ok(k)) if k <= 0xff => (p, k as u8),
+                    (Ok(_), Ok(_)) => {
+                        eprintln!("{{\"error\":\"--aes-xor-key {aes_xor_key} > 0xff\"}}");
+                        return ExitCode::FAILURE;
+                    }
+                    (Err(e), _) | (_, Err(e)) => {
+                        eprintln!("{{\"error\":\"{e}\"}}");
+                        return ExitCode::FAILURE;
+                    }
+                };
+                for k in &aes_cbc {
+                    match key_spec_bytes(k) {
+                        Ok(key) => predicates.push(Predicate::AesCbc {
+                            key,
+                            iv: iv.clone(),
+                            params: AesCbcTailParams { xor_prefix, xor_key },
+                        }),
+                        Err(e) => {
+                            eprintln!("{{\"error\":\"{}\"}}", e.replace('"', "'"));
+                            return ExitCode::FAILURE;
+                        }
                     }
                 }
             }

@@ -25,6 +25,8 @@ sha2 = "0.11.1"
 libc = "0.2.191"
 # hunt 判据链的 zlib 环节（L2 参数空间搜索器；rust_backend = miniz_oxide 纯 Rust，musl 静态友好）
 flate2 = "1"
+# hunt 的 aes-128-cbc-tail 容器谓词块原语（第二战挣得的族知识；纯 Rust，CBC 手工链接无填充库）
+aes = "0.8"
 
 [profile.release]
 lto = true

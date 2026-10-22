@@ -129,6 +129,8 @@ pub fn first_pass(apk_path: &Path) -> Result<(Report, DebtFile, Vec<EvidenceGrou
     // 坏 DEX 字节（encrypted-payload 卡点切片来源；同样在内存可承受范围）
     // parse 失败原因一并保留——事实不吞错，外部 LLM 诊断需要
     let mut bad_dex: Vec<(String, Vec<u8>, bool, Option<String>)> = Vec::new(); // (name, bytes, magic_ok, parse_err)
+    // 表结构良性但自述区域有未申报尾区的 DEX（尾部容器形态；data 段终点 < file_size）
+    let mut gap_dex: Vec<(String, Vec<u8>, u64, u64)> = Vec::new(); // (name, bytes, file_size, data_end)
     let mut assets = Vec::new();
     let mut manifest_present = false;
     let mut other: u64 = 0;
@@ -158,18 +160,34 @@ pub fn first_pass(apk_path: &Path) -> Result<(Report, DebtFile, Vec<EvidenceGrou
             let magic_ok = bytes.starts_with(b"dex\n") && bytes.get(7) == Some(&0);
             let mut parse_ok = false;
             let mut parse_err: Option<String> = None;
+            // 尾部容器信号（第四机械来源）：(file_size, data_end) 字段对——
+            // 良性 dex 自述 file_size == data_off + data_size（spec 形态）；
+            // 缺口 ≥ 0x70（dex 头最小量 = 噪声地板，小于此按对齐填充处理）= 声明区域内未申报尾区。
+            // 实测两族共用此形态：360 整包加密族与 dex2c 翻译族的 stub classes.dex
+            // 均把 payload 接在 data 段终点之后、靠抬高 file_size 纳入声明区域。
+            let mut tail_gap: Option<(u64, u64)> = None;
             if magic_ok {
                 // 表结构损坏 = 敌意输入常态：事实标注（含失败原因），不让单个 dex 失败拖垮整次剖析
                 match crate::track_a::dex::parse(&bytes) {
                     Ok(methods) => {
                         native_methods.extend(methods.into_iter().filter(|m| m.is_native));
                         parse_ok = true;
+                        if bytes.len() >= 0x70 {
+                            let u32le = |o: usize| u32::from_le_bytes(bytes[o..o + 4].try_into().unwrap());
+                            let (fsize, data_off, data_size) = (u32le(0x20) as u64, u32le(0x68) as u64, u32le(0x6c) as u64);
+                            let data_end = data_off + data_size;
+                            if fsize > data_end && fsize - data_end >= 0x70 {
+                                tail_gap = Some((fsize, data_end));
+                            }
+                        }
                     }
                     Err(e) => parse_err = Some(e),
                 }
             }
             if !magic_ok || !parse_ok {
                 bad_dex.push((name.clone(), bytes, magic_ok, parse_err.clone()));
+            } else if let Some((fsize, data_end)) = tail_gap {
+                gap_dex.push((name.clone(), bytes, fsize, data_end));
             }
             dex.push(DexEntry { name, size_bytes: size, magic_ok, parse_ok });
         } else if let Some(rest) = name.strip_prefix("lib/") {
@@ -303,7 +321,7 @@ pub fn first_pass(apk_path: &Path) -> Result<(Report, DebtFile, Vec<EvidenceGrou
         }
     }
 
-    // 2) encrypted-payload（来源三型，全机械事实：坏 DEX 文件 / so 内明文 DEX / assets ELF 零命中）
+    // 2) encrypted-payload（来源四型，全机械事实：坏 DEX 文件 / 声明区域内未申报尾区 / so 内明文 DEX / assets ELF 零命中）
     {
         // 2a) 预扫全部 so 的明文 DEX（修正案 #2；与 so_cache 同序）
         let so_hits: Vec<Vec<(u64, u32, Vec<u8>)>> =
@@ -332,6 +350,30 @@ pub fn first_pass(apk_path: &Path) -> Result<(Report, DebtFile, Vec<EvidenceGrou
                 bytes: bytes.iter().copied().take(PAYLOAD_HEAD).collect(),
             };
             cands.push((name.clone(), headline, Some((head, bytes.len() as u64)), Vec::new(), None));
+        }
+
+        // 2b2) 声明区域内未申报尾区（尾部容器形态；表结构良性 + data 段终点 < file_size）
+        // 切片 = 尾区头部（hunt 的载体坐标）；尾区越界（敌意字段）时如实无切片
+        for (name, bytes, fsize, data_end) in &gap_dex {
+            let gap = fsize - data_end;
+            let headline = format!(
+                "{name}: declared file_size {fsize} but data section ends at 0x{data_end:x} — {gap} undeclared trailing bytes inside the declared region (tail-container payload — mechanical fact)"
+            );
+            let start = (*data_end).min(bytes.len() as u64) as usize;
+            let take = (bytes.len() - start).min(PAYLOAD_HEAD);
+            let mut extra = Vec::new();
+            if take > 0 {
+                extra.push(SliceBytes {
+                    name: format!("{}--tail", name.replace('/', "-")),
+                    source: name.clone(),
+                    symbol: None,
+                    st_value: None,
+                    st_size: None,
+                    file_offset: *data_end,
+                    bytes: bytes[start..start + take].to_vec(),
+                });
+            }
+            cands.push((format!("{name}-tail"), headline, None, extra, None));
         }
 
         // 2c) so 内明文 DEX 命中（修正案 #2 正事实：机械扫描命中即提取，卡点即成果）
