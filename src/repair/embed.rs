@@ -17,6 +17,12 @@ const PY_FILES: &[(&str, &[u8])] = &[
     ("repair.py", include_bytes!("../../trackb/repair.py")),
     ("repair_all.py", include_bytes!("../../trackb/repair_all.py")),
     ("sign2.py", include_bytes!("../../trackb/sign2.py")),
+    // 空壳填体四步链（族 2 dex2c：locate → trace → synth → assemble）——
+    // hollowfill.py 编排，jnitrace.py 经 importlib 同目录装载 so_emulator.py
+    ("hollowfill.py", include_bytes!("../../trackb/hollowfill.py")),
+    ("jnitrace.py", include_bytes!("../../trackb/jnitrace.py")),
+    ("trace2smali.py", include_bytes!("../../trackb/trace2smali.py")),
+    ("so_emulator.py", include_bytes!("../../trackb/so_emulator.py")),
 ];
 
 /// 工具链整体 SHA-256（版本指纹——内容变更自动换目录）。
@@ -88,11 +94,19 @@ pub fn run_py(
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
     if !output.status.success() {
+        // 结构化错误走 stdout（hollowfill 等工具的 JSON 错误面）——stderr 为空
+        // 时把 stdout 尾巴带上，调用方拿到的不再是裸退出码
+        let tail = if stderr.trim().is_empty() && !stdout.trim().is_empty() {
+            format!("\nstdout: {}", stdout.trim())
+        } else {
+            String::new()
+        };
         return Err(format!(
-            "python3 {} failed (exit={}):\n{}",
+            "python3 {} failed (exit={}):\n{}{}",
             script,
             output.status.code().unwrap_or(-1),
-            stderr
+            stderr,
+            tail
         ));
     }
 

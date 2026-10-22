@@ -27,7 +27,7 @@ Exuvia 是一个**面向 AI Agent 的 Android 通用脱壳 / 修复流水线**�
 - **修复战役**：**v12 产物真机双双成功**（12 轮交付、11 个根因、2 个产物、2 次真机成功）——两个不同脱壳器的 dump（56.al 紧凑重排 1.85MB / fulldump 内存展开 4.5MB）经同一修复管线产出均正常运行（Oppo/Android 15+/targetSdk 36）。五重验收门（verify_all.py）+ 修复工具链产品化。
 - **第二战（dex2c 翻译族）**：**闭环 APK 维护者真机确认（2026-10-21/22）**——无 dump、无参照，从 JNI 语义重建方法体。工具链自动化已收官：dexcontainer.py 尾容器重建、jnitrace.py（`--init` 运行时预热 / `--seed-dex` clinit 静态域播种 / `--arms` 空值守卫双臂枚举）、TLS 字符串离线物化（so_emulator emutls 契约仿真）、trace2smali.py（`--sigs-dex` 空心 stub 签名自动提取）、verify_all V4 多 dex 并集修正。SKILL §8 族 2 入册。
 - **产品化**：`exuvia repair` 子命令上线（Rust 壳 + 内嵌 Python——不重写 12 轮真机验证的工具链）；方法体**四来源体系**：`--dump`（第三方 dump，多来源互补，**生产主路径**）/ `--reference`（原包，**内部测试专用**）/ StubSafe **框架契约兜底** / dex2c 源（jnitrace→trace2smali，无 dump 可恢复，SKILL §7）。
-- **契约层**：六协议物 fixture 双向锚定、SKILL_VERSION 1.8.0、CI 全绿。**锚点纪律（血泪教训）**：SKILL_VERSION 升版必须**同一 commit** 改 `src/version.rs`——1e5b601 只改文档导致锚点漂移、CI 连红（1fdc8df 修复）。
+- **契约层**：六协议物 fixture 双向锚定、SKILL_VERSION 1.9.0、CI 全绿。**锚点纪律（血泪教训）**：SKILL_VERSION 升版必须**同一 commit** 改 `src/version.rs`——1e5b601 只改文档导致锚点漂移、CI 连红（1fdc8df 修复）。
 - 产品线 a 契约面：卡点两类（method-native-stub：ACC_NATIVE stub + JNI 符号定位 + 方法体切片；encrypted-payload：坏 DEX 文件 / 声明区域内未申报尾区 / so 内明文 DEX 扫描命中 / assets ELF 零命中负事实四机械来源）+ 解密例程候选机械定位（JNI_OnLoad / init_array 双路径：PT_DYNAMIC 运行时视角优先）。
 - 外循环闭合且留痕：`exuvia packed.apk → next --goal → [LLM 解卡点] → unpack merge（四层闸门 + 沙箱双锚 + 销账）→ validate`；merge 拒绝时 attempts.log 记 merge-rejected + 被认领卡点 attempts 递增；recovered DEX 形状产物归档 workspace/<debt_id>/recovered.dex；洋葱二次分析 `analyze --dex` 回注解卡产物 → 下一层欠账地图。
 - CLI 契约表全兑现：--version / --profile / --goal / --json / --resume、next、schema --dump、unpack validate / merge、analyze --dex、hunt（含变体 RC4 参数）、repair。
@@ -219,7 +219,7 @@ release = 两个平台二进制 + SKILL.md + checksums。**纯文件，无目录
 
 **trackb/ 工具总表**（21 个 + protocol.md；工具本体随仓库分发 = 产品的一部分，重依赖用户侧安装）：
 
-内嵌修复链（`include_bytes!` 随二进制发行，`exuvia repair` 运行时提取）：
+内嵌修复链（`include_bytes!` 随二进制发行，`exuvia repair` 运行时提取；含空壳填体四件 hollowfill/jnitrace/trace2smali/so_emulator）：
 
 | 工具 | 职责 |
 |---|---|
@@ -230,6 +230,7 @@ release = 两个平台二进制 + SKILL.md + checksums。**纯文件，无目录
 | repair.py | 外科 + 装配（Manifest wrapper Application 移除、壳资产剥离、classes.dex 置换） |
 | axmltool.py | 二进制 AXML 解析（Manifest 手术的基础件） |
 | sign2.py | 最小 APK v2 签名器（RSASSA-PKCS1 + SHA2-256，python-cryptography） |
+| hollowfill.py | 空壳自动填体编排（静态 JNI 表定位 → jnitrace → trace2smali → baksmali 拼接重组；jnitrace/trace2smali/so_emulator 随同内嵌） |
 
 用户侧脱壳/分析工具：
 
@@ -375,7 +376,7 @@ OS 沙箱按平台分文件实现（单一接口 `run_sandboxed(code, args)`）�
 | `exuvia schema --dump <name>` | 按需派生机器可读格式（handoff/goal/proposal；handoff = report/debt/workpackage/evidence 联合视图；无静态 schema 文件） |
 | `exuvia analyze --dex <file> [--out <dir>]` | 洋葱二次分析：解卡产物回注 → 下一层欠账地图（与 first_pass 协议同构；默认 handoff-2/） |
 | `exuvia hunt --carrier <file> [--rc4 <hex>]... [--xor <hex>]... [--rc4-stride N --rc4-seed A:B --rc4-jbias N] [--aes-cbc <key>]... --aes-iv <iv> [--aes-xor-prefix 0x70 --aes-xor-key 0x66] [--out <dir>]` | L2 参数空间搜索：已知算法族 × 未知密文段参数 → 机械命中（hunt.json + hits/；变体 PRGA 参数修饰所有 --rc4 谓词；--aes-cbc 走 aes128cbc-tail-v1 容器臂：trailer 锚点 + 头块长度扫描自决 + 子容器走查，key/iv 支持 hex 或 16 字节 ASCII；负事实按谓词族诚实） |
-| `exuvia repair <packed.apk> [dumped.dex]... -o <out.apk> [--dump <dex>]... [--extra-dex <dex>]... [--reference <dex>] [--from-handoff]` | **产品线 b**：单命令 dump→可运行 APK 修复管线（SKILL §7）——doctor→clean→deweave→restore→stubsafe→surgery→zipalign→sign v2；JSON 输出全阶段统计；`--from-handoff` 源头通道把闸门产物（handoff/workspace/*/recovered.dex）直接收进发货通道 |
+| `exuvia repair <packed.apk> [dumped.dex]... -o <out.apk> [--dump <dex>]... [--extra-dex <dex>]... [--reference <dex>] [--from-handoff] [--allow-hollow]` | **产品线 b**：单命令 dump→可运行 APK 修复管线（SKILL §7）——doctor→clean→deweave→restore→stubsafe→surgery→zipalign→sign v2；JSON 输出全阶段统计；`--from-handoff` 源头通道把闸门产物（handoff/workspace/*/recovered.dex）直接收进发货通道；发货 dex 检出 native 生命周期桩（族 2 空壳）自动填体发货（hollowfill 四步：表定位→jnitrace→trace2smali→重组），`--allow-hollow` 仅分诊调试 |
 | `unpack validate <dir>` | 下游自检 handoff |
 | `unpack merge <dir>` | proposal 回流（四层闸门） |
 
@@ -491,7 +492,7 @@ OS 沙箱按平台分文件实现（单一接口 `run_sandboxed(code, args)`）�
 
 - **v0.1**：一代壳脚手架打通全协议（next / merge / resume / validate）+ 闸门沙箱（双平台）+ `ci/verify` 原包对账 + 语料生成脚本 ✅
 - **已落地（v0.1 内追加）**：洋葱二次分析（`analyze --dex`）、轨道 C 桌面化第一级（`hunt` L2 参数空间搜索器，含变体 RC4 参数）
-- **已落地（修复战役 + 产品化，2026-10）**：修复工具链（trackb/ 内嵌七件：repair_all/dexdoctor/dexclean/deweave/repair/axmltool/sign2）+ 五重验收门 + `exuvia repair` 子命令（SKILL §7，--dump 多来源 / StubSafe 契约兜底）——**12 轮真机反馈闭环，v12 双产物真机成功**
+- **已落地（修复战役 + 产品化，2026-10）**：修复工具链（trackb/ 内嵌十一件：repair_all/dexdoctor/dexclean/deweave/repair/axmltool/sign2 + 空壳填体四件 hollowfill/jnitrace/trace2smali/so_emulator）+ 五重验收门 + `exuvia repair` 子命令（SKILL §7，--dump 多来源 / StubSafe 契约兜底）——**12 轮真机反馈闭环，v12 双产物真机成功**
 - **已落地（第二战 dex2c，2026-10）**：dex2c 翻译族全链桌面工具链——dexcontainer（尾容器重建）/ jnitrace（--init/--seed-dex/--arms）/ so_emulator emutls TLS 物化 / trace2smali（--sigs-dex，ART 校验三规则）/ verify_all V4 多 dex 并集；闭环 APK 真机确认；SKILL §8 族 2 入册
 - **其后**：轨道 B 工程化（qiling 适配 JNI 环境）、轨道 C 桌面化第二级（L3 桌面 mini-loader：Unicorn 模拟 linker + JNIEnv 桩）、L2/L3 主交付物化、多 Android 版本适配、evasion、指纹 diff 工具化、更多壳样本回归（修复管线的零样本泛化）、dex2c 多路径枚举增强（--arms 递归化）、容器解密（低优先级增强）
 - **永久不做**：MCP（社区 contrib）、经验传递机制（哲学级取消）、指纹库自动增长（显式配置 only）、`--baseline` 产品接口、真机/模拟器进验收链（桌面化拍板，2026-10——真机只做最终确认）

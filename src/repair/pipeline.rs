@@ -40,6 +40,9 @@ pub struct RepairArgs {
     /// 源头通道：自动收集 ./handoff/workspace/*/recovered.dex（存在即已过四层
     /// 闸门）。无显式位置参数时最大者提升为主 dex，其余按 debt_id 序直挂。
     pub from_handoff: bool,
+    /// 逃生门：检出空壳 native 桩仍原样发货（外科后首个生命周期调用必崩——
+    /// 只用于分诊调试，生产路径永远让自动填体跑完）。
+    pub allow_hollow: bool,
     /// 签名密钥 PEM（可选，默认生成测试密钥）
     pub key_pem: Option<PathBuf>,
     /// 证书 DER（可选）
@@ -60,6 +63,8 @@ pub struct RepairResult {
     pub surgery_removed: Option<String>,
     /// 移除的壳资产条目数
     pub shell_assets_removed: usize,
+    /// 空壳填体记录（每条 "dex 路径: N 个 native 已填"——族 2 自动合成）
+    pub hollow_filled: Vec<String>,
     /// 4 字节对齐的条目数
     pub entries_aligned: usize,
     /// 签名后的 APK 大小
@@ -177,6 +182,168 @@ fn counter_after(l: &str, marker: &str) -> Option<usize> {
     digits.parse::<usize>().ok()
 }
 
+/// 框架模板方法名（tools/dexlib/StubSafe.java 的 LIFECYCLE 表逐字镜像——
+/// 空壳触发集与契约兜底的判定集必须同源，两处漂移 = 口径分裂）。
+/// native + 生命周期名 = 壳抽取铁证：模板方法契约要求 super 链，合法的
+/// native 生命周期覆写不可能存在。
+const LIFECYCLE: &[&str] = &[
+    "onCreate", "onStart", "onResume", "onPause", "onStop", "onRestart",
+    "onDestroy", "onDestroyView", "onDetach", "onAttach", "onViewCreated",
+    "onSaveInstanceState", "onRestoreInstanceState", "onNewIntent",
+    "onBackPressed", "onActivityResult", "onRequestPermissionsResult",
+    "onConfigurationChanged", "onLowMemory", "onTrimMemory",
+    "onWindowFocusChanged", "onAttachedToWindow", "onDetachedFromWindow",
+    "onCreateOptionsMenu", "onPrepareOptionsMenu", "onOptionsItemSelected",
+    "onContextItemSelected", "onCreateContextMenu", "onCreatePanelView",
+    "onCreatePanelMenu", "onPreparePanel", "onMenuOpened", "onPanelClosed",
+    "onContextMenuClosed", "onMultiWindowModeChanged",
+    "onPictureInPictureModeChanged", "onTopResumedActivityChanged",
+    "attachBaseContext", "onStartCommand", "onBind", "onUnbind", "onRebind",
+];
+
+/// 单个发货 dex 的空壳诊断。
+#[derive(Debug)]
+struct HollowHit {
+    path: PathBuf,
+    /// 该 dex 全部 native 方法（填充集——翻译族整类翻译，只补生命周期名会
+    /// 留下次崩点）；报告形态 "Lcls;->name(desc)"
+    suspects: Vec<String>,
+    /// 其中命中 LIFECYCLE 的子集（触发依据）
+    lifecycle: Vec<String>,
+}
+
+/// 空壳检测（SKILL §7 完整性前提的机器执行）：发货通道每个 dex 过
+/// dex::parse，native 方法名命中 LIFECYCLE 即触发。解析失败的 dex 不拦——
+/// 病理分诊是 doctor 的职责面，这里只做触发判断。
+fn detect_hollow(dex_paths: &[PathBuf]) -> Vec<HollowHit> {
+    let mut hits = Vec::new();
+    for p in dex_paths {
+        let data = match std::fs::read(p) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        let methods = match crate::track_a::dex::parse(&data) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let suspects: Vec<String> = methods
+            .iter()
+            .filter(|m| m.is_native)
+            .map(|m| format!("{}->{}{}", m.class, m.name, m.descriptor))
+            .collect();
+        let lifecycle: Vec<String> = methods
+            .iter()
+            .filter(|m| m.is_native && LIFECYCLE.contains(&m.name.as_str()))
+            .map(|m| format!("{}->{}{}", m.class, m.name, m.descriptor))
+            .collect();
+        if !lifecycle.is_empty() {
+            hits.push(HollowHit { path: p.clone(), suspects, lifecycle });
+        }
+    }
+    hits
+}
+
+/// 壳 .so 挑选（族 2 翻译体载体）：packed apk 内 assets/ 下、ELF64、
+/// e_machine==183（AArch64——模拟执行臂是 aarch64）的 .so 取最大者。
+/// lib/ 下的是 App 合法 JNI 库（repair.py 外科只剥 assets/），永不入选。
+fn pick_shell_so(packed_apk: &Path, extract_dir: &Path) -> Result<Option<(String, PathBuf)>, String> {
+    use std::io::Read as _;
+    let f = std::fs::File::open(packed_apk)
+        .map_err(|e| format!("open packed apk {}: {e}", packed_apk.display()))?;
+    let mut zip = zip::ZipArchive::new(f)
+        .map_err(|e| format!("packed apk zip: {e}"))?;
+    let mut best: Option<(String, u64)> = None;
+    for i in 0..zip.len() {
+        let mut e = zip.by_index(i).map_err(|e2| format!("zip entry #{i}: {e2}"))?;
+        let name = match e.name() {
+            Ok(n) => n.to_string(),
+            Err(_) => continue,
+        };
+        if !(name.starts_with("assets/") && name.ends_with(".so")) {
+            continue;
+        }
+        // ELF64 + AArch64：头 20B 足够判（magic / e_ident[EI_CLASS]=2 /
+        // e_machine @18 LE == 183）
+        let mut head = [0u8; 20];
+        if e.read_exact(&mut head).is_err() {
+            continue;
+        }
+        if &head[0..4] != b"\x7fELF" || head[4] != 2 {
+            continue;
+        }
+        if u16::from_le_bytes([head[18], head[19]]) != 183 {
+            continue;
+        }
+        let size = e.size();
+        if best.as_ref().map(|(_, s)| size > *s).unwrap_or(true) {
+            best = Some((name, size));
+        }
+    }
+    let (name, _size) = match best {
+        Some(b) => b,
+        None => return Ok(None),
+    };
+    let mut e = zip.by_name(&name).map_err(|e2| format!("zip entry {name}: {e2}"))?;
+    let mut buf = Vec::with_capacity(e.size() as usize);
+    e.read_to_end(&mut buf).map_err(|e2| format!("read {name}: {e2}"))?;
+    std::fs::create_dir_all(extract_dir).map_err(|e2| format!("mkdir: {e2}"))?;
+    let out = extract_dir.join("hollowfill-shell.so");
+    std::fs::write(&out, &buf).map_err(|e2| format!("write {}: {e2}", out.display()))?;
+    Ok(Some((name, out)))
+}
+
+/// 单 dex 空壳填体（hollowfill.py 四步编排：静态表定位 → jnitrace →
+/// trace2smali → baksmali 拼接 smali 重组）。依赖缺席 / 定位失败 =
+/// 结构化错误 + 嫌疑方法清单——绝不静默带壳发货（tosks 真机闪退教训的
+/// 机器执行）。seeds = 同包其余发货 dex（jnitrace --seed-dex 的 clinit
+/// 静态域播种来源）。
+fn fill_hollow(
+    tools: &Path,
+    hit: &HollowHit,
+    so: &Path,
+    out: &Path,
+    seeds: &[PathBuf],
+) -> Result<usize, String> {
+    let mut argv: Vec<String> = vec![
+        abs(&hit.path),
+        "--so".to_string(),
+        abs(so),
+        "--out".to_string(),
+        abs(out),
+    ];
+    for s in seeds {
+        argv.push("--seed-dex".to_string());
+        argv.push(abs(s));
+    }
+    let refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+    let (stdout, _stderr) = embed::run_py(tools, "hollowfill.py", &refs).map_err(|e| {
+        format!(
+            "hollowfill {}: {e}\nhollow suspects ({}): {}",
+            hit.path.display(),
+            hit.suspects.len(),
+            hit.suspects.join(", ")
+        )
+    })?;
+    // 成功 = stdout 末行 JSON 报告；回读完整性（remaining_hollow）也在其中
+    let line = stdout.lines().last().unwrap_or("").trim().to_string();
+    let v: serde_json::Value = serde_json::from_str(&line)
+        .map_err(|e| format!("hollowfill report parse: {e} (stdout tail: {line})"))?;
+    if let Some(rem) = v.get("remaining_hollow") {
+        if !rem.is_null() {
+            return Err(format!(
+                "hollowfill {}: 填后仍有 native 残留 {rem}",
+                hit.path.display()
+            ));
+        }
+    }
+    let filled = v
+        .get("classes")
+        .and_then(|c| c.as_object())
+        .map(|o| o.values().filter_map(|n| n.as_u64()).sum::<u64>() as usize)
+        .unwrap_or(0);
+    Ok(filled)
+}
+
 /// 执行完整修复管线。
 pub fn run_repair(args: &RepairArgs) -> RepairResult {
     let mut result = RepairResult::default();
@@ -193,7 +360,7 @@ pub fn run_repair(args: &RepairArgs) -> RepairResult {
     logs.push("[tools] python toolchain extracted".to_string());
 
     // 0.5 源头解析：显式位置参数 ∪ --from-handoff 闸门产物 → (位置集, 直挂集)
-    let (positionals, extras) = match resolve_ship_inputs(args) {
+    let (positionals, mut extras) = match resolve_ship_inputs(args) {
         Ok(v) => v,
         Err(e) => {
             result.error = Some(e);
@@ -239,6 +406,82 @@ pub fn run_repair(args: &RepairArgs) -> RepairResult {
             logs.push(format!("[doctor:stderr] {}", err.trim()));
         }
         dex_fixed_paths.push(dex_fixed_path);
+    }
+
+    // 1.5 空壳检测 + 自动填体（SKILL §7 完整性前提的机器执行：族 2 翻译族
+    // 的 native 空心桩在填体前不可发货——外科剥壳后 ART 首个生命周期调用
+    // 即 UnsatisfiedLinkError。触发 = native 方法名命中 LIFECYCLE；
+    // 填充集 = 该 dex 全部 native 方法）
+    let ship_all: Vec<PathBuf> = dex_fixed_paths
+        .iter()
+        .chain(extras.iter())
+        .cloned()
+        .collect();
+    let hits = detect_hollow(&ship_all);
+    if !hits.is_empty() {
+        if args.allow_hollow {
+            for h in &hits {
+                logs.push(format!(
+                    "[hollow] allow-hollow: {} 带 {} 个 native 桩原样发货（触发: {}）",
+                    h.path.display(),
+                    h.suspects.len(),
+                    h.lifecycle.join(", ")
+                ));
+            }
+        } else {
+            let work = tools.join("hollowfill-work");
+            let (so_name, so_path) = match pick_shell_so(&args.packed_apk, &work) {
+                Ok(Some(v)) => v,
+                Ok(None) => {
+                    result.error = Some(format!(
+                        "hollow native stubs detected but no shell .so (assets/*.so, ELF64 aarch64) in packed apk; suspects: {}",
+                        hits.iter()
+                            .flat_map(|h| h.suspects.iter().cloned())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                    result.logs = logs;
+                    return result;
+                }
+                Err(e) => {
+                    result.error = Some(e);
+                    result.logs = logs;
+                    return result;
+                }
+            };
+            logs.push(format!("[hollow] shell so: {so_name}"));
+            for (i, h) in hits.iter().enumerate() {
+                let out = work.join(format!("filled_{i}.dex"));
+                let seeds: Vec<PathBuf> = ship_all
+                    .iter()
+                    .filter(|p| **p != h.path)
+                    .cloned()
+                    .collect();
+                match fill_hollow(&tools, h, &so_path, &out, &seeds) {
+                    Ok(n) => {
+                        logs.push(format!(
+                            "[hollow] {}: {n} 个 native 已填体",
+                            h.path.display()
+                        ));
+                        result
+                            .hollow_filled
+                            .push(format!("{}: {n} 个 native 已填体", h.path.display()));
+                        // 通道内原位替换（位置参数通道 / 直挂通道各归各位，
+                        // 序号与保序承诺不变）
+                        for slot in dex_fixed_paths.iter_mut().chain(extras.iter_mut()) {
+                            if *slot == h.path {
+                                *slot = out.clone();
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        result.error = Some(e);
+                        result.logs = logs;
+                        return result;
+                    }
+                }
+            }
+        }
     }
 
     // 2. 织入恢复 + 修复管线（repair_all.py 一条命令）
@@ -318,9 +561,11 @@ pub fn run_repair(args: &RepairArgs) -> RepairResult {
         logs.push(format!("[stderr] {}", err.trim()));
     }
 
-    // 3. 清理中间文件
-    for p in &dex_fixed_paths {
-        let _ = std::fs::remove_file(p);
+    // 3. 清理中间文件（doctor 产物按源头路径推导——填体替换后
+    // dex_fixed_paths 已指向填体产物，不能拿它当清理清单；填体产物留在
+    // 工具链临时目录，随系统临时区回收）
+    for p in &positionals {
+        let _ = std::fs::remove_file(p.with_extension("doctor.dex"));
     }
 
     // 4. 验证输出
@@ -350,6 +595,7 @@ mod tests {
             extra_dumps: vec![],
             extra_dex: vec![],
             from_handoff: false,
+            allow_hollow: false,
             key_pem: None,
             cert_der: None,
         }
@@ -470,6 +716,81 @@ mod tests {
         let args2 = RepairArgs { dumped_dexes: vec![], ..base_args() };
         let err2 = resolve_ship_inputs_at(&args2, &dir.join("handoff")).unwrap_err();
         assert!(err2.contains("no input dex"), "got: {err2}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_detect_hollow_trigger_precision() {
+        // 触发 = native ∩ LIFECYCLE；填充集 = 该 dex 全部 native。
+        // fixture（dex.rs::hollow_dex_fixture）：native onCreate（触发）+
+        // native static zap（非生命周期名——进嫌疑清单但不作触发依据）。
+        let dir = scratch("hollow");
+        let dex = dir.join("sub.dex");
+        std::fs::write(&dex, crate::track_a::dex::hollow_dex_fixture()).unwrap();
+        let garbage = dir.join("garbage.dex");
+        std::fs::write(&garbage, b"not a dex at all").unwrap();
+
+        let hits = detect_hollow(&[dex.clone(), garbage]);
+        assert_eq!(hits.len(), 1, "garbage 不触发、fixture 触发: {hits:?}");
+        let h = &hits[0];
+        assert_eq!(h.path, dex);
+        assert!(h.suspects.iter().any(|s| s.contains("->onCreate()V")));
+        assert!(h.suspects.iter().any(|s| s.contains("->zap()V")));
+        assert_eq!(h.lifecycle.len(), 1);
+        assert!(h.lifecycle[0].contains("->onCreate()V"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_pick_shell_so_assets_aarch64_largest() {
+        // 挑选规则：assets/ 下 + ELF64 + e_machine==183(AArch64) + 最大者。
+        // 干扰项：x86_64 变体、lib/ 下的合法 JNI 库（再大也不入选）、非 .so。
+        fn elf_head(machine: u16, total: usize) -> Vec<u8> {
+            let mut v = vec![0u8; total.max(20)];
+            v[0..4].copy_from_slice(b"\x7fELF");
+            v[4] = 2; // ELFCLASS64
+            v[18..20].copy_from_slice(&machine.to_le_bytes());
+            v
+        }
+        let dir = scratch("sopick");
+        let apk = dir.join("packed.apk");
+        {
+            let f = std::fs::File::create(&apk).unwrap();
+            let mut zw = zip::ZipWriter::new(f);
+            let opt = zip::write::SimpleFileOptions::default();
+            zw.start_file("assets/libshell_x86.so", opt).unwrap();
+            std::io::Write::write_all(&mut zw, &elf_head(62, 9000)).unwrap();
+            zw.start_file("assets/libshell_a64.so", opt).unwrap();
+            std::io::Write::write_all(&mut zw, &elf_head(183, 4000)).unwrap();
+            zw.start_file("assets/libshell_a64_small.so", opt).unwrap();
+            std::io::Write::write_all(&mut zw, &elf_head(183, 500)).unwrap();
+            // lib/ 下的合法 JNI 库：格式全对但路径不对——永不入选
+            zw.start_file("lib/arm64-v8a/libreal.so", opt).unwrap();
+            std::io::Write::write_all(&mut zw, &elf_head(183, 99999)).unwrap();
+            zw.start_file("assets/readme.txt", opt).unwrap();
+            std::io::Write::write_all(&mut zw, b"junk").unwrap();
+            zw.finish().unwrap();
+        }
+        let (name, path) = pick_shell_so(&apk, &dir.join("x")).unwrap().unwrap();
+        assert_eq!(name, "assets/libshell_a64.so");
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 4000);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_pick_shell_so_no_candidate_is_none() {
+        // 无候选 = None（调用方转结构化错误，不静默带壳发货）
+        let dir = scratch("sopick0");
+        let apk = dir.join("packed.apk");
+        {
+            let f = std::fs::File::create(&apk).unwrap();
+            let mut zw = zip::ZipWriter::new(f);
+            let opt = zip::write::SimpleFileOptions::default();
+            zw.start_file("classes.dex", opt).unwrap();
+            std::io::Write::write_all(&mut zw, b"dex\n035\0").unwrap();
+            zw.finish().unwrap();
+        }
+        assert!(pick_shell_so(&apk, &dir.join("x")).unwrap().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

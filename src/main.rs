@@ -131,6 +131,11 @@ enum Cmd {
         /// debt_id 序直挂；与显式通道 sha256 去重
         #[arg(long = "from-handoff")]
         from_handoff: bool,
+        /// 逃生门：检出空壳 native 桩仍原样发货（外科后首个生命周期调用必崩，
+        /// 只用于分诊调试；默认自动填体：静态表定位 → jnitrace → trace2smali
+        /// → 拼接重组，SKILL §7）
+        #[arg(long = "allow-hollow")]
+        allow_hollow: bool,
     },
 }
 
@@ -321,7 +326,7 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Some(Cmd::Repair { packed, dex, out, reference, dumps, extra_dex, from_handoff }) => {
+        Some(Cmd::Repair { packed, dex, out, reference, dumps, extra_dex, from_handoff, allow_hollow }) => {
             use exuvia::repair::{run_repair, RepairArgs};
             let args = RepairArgs {
                 packed_apk: packed,
@@ -331,6 +336,7 @@ fn main() -> ExitCode {
                 extra_dumps: dumps,
                 extra_dex,
                 from_handoff,
+                allow_hollow,
                 key_pem: None,
                 cert_der: None,
             };
@@ -343,6 +349,7 @@ fn main() -> ExitCode {
                 "stubsafe_count": result.stubsafe_count,
                 "surgery_removed": result.surgery_removed,
                 "shell_assets_removed": result.shell_assets_removed,
+                "hollow_filled": result.hollow_filled,
                 "final_size": result.final_size,
                 "output": args.out_apk,
                 "error": result.error,
