@@ -29,6 +29,8 @@ Scope & honesty boundaries (format facts, not aspirations):
 Usage:
   python3 trace2smali.py traces_dir/ --class Ldetect/screenshot/MainActivity; \
       --super Lyg; --out synthesized.smali.inc
+  python3 trace2smali.py traces_dir/ --class Lx; --super Ly; \
+      --sigs-dex hollow.dex --out synthesized.smali.inc   # sigs from stubs
 Output: one '.method' block per traced method, splice-ready over baksmali
 hollow stubs (same name+signature).
 """
@@ -36,6 +38,7 @@ hollow stubs (same name+signature).
 import argparse
 import os
 import re
+import struct
 import sys
 
 WIDE = ('J', 'D')
@@ -455,12 +458,96 @@ def render(mname, msig, res, super_cls):
     return '\n'.join(lines)
 
 
+def extract_native_sigs(dex, cls_desc):
+    """DEX bytes -> {name: descriptor} for native methods of cls_desc.
+
+    The hollow stub dex carries the translated methods as native stubs with
+    their original protos — exactly the signature set jnitrace can have
+    traced. Zero-sample: no hardcoded names; overloads (same name, several
+    protos) keep the first — the {name: sig} map shape can't hold more.
+    """
+    if dex[:4] != b'dex\n':
+        return {}
+    ssz, soff = struct.unpack_from('<II', dex, 0x38)
+    tsz, toff = struct.unpack_from('<II', dex, 0x40)
+    psz, poff = struct.unpack_from('<II', dex, 0x48)
+    msz, moff = struct.unpack_from('<II', dex, 0x58)
+    csz, coff = struct.unpack_from('<II', dex, 0x60)
+
+    def string(i):
+        o = struct.unpack_from('<I', dex, soff + i * 4)[0]
+        p = o
+        while dex[p] & 0x80:
+            p += 1
+        p += 1
+        e = dex.index(b'\x00', p)
+        return dex[p:e].decode('utf-8', 'replace')
+
+    def tname(i):
+        return string(struct.unpack_from('<I', dex, toff + i * 4)[0])
+
+    def proto_desc(i):
+        _shorty, ret, params_off = struct.unpack_from('<III', dex, poff + i * 12)
+        out = ['(']
+        if params_off:
+            n = struct.unpack_from('<I', dex, params_off)[0]
+            for k in range(n):
+                out.append(tname(struct.unpack_from('<H', dex, params_off + 4 + k * 2)[0]))
+        out.append(')')
+        out.append(tname(ret))
+        return ''.join(out)
+
+    def uleb(p):
+        r = s = 0
+        while True:
+            b = dex[p]
+            p += 1
+            r |= (b & 0x7F) << s
+            if not b & 0x80:
+                return r, p
+            s += 7
+
+    for ci in range(csz):
+        cidx = struct.unpack_from('<I', dex, coff + ci * 32)[0]
+        if tname(cidx) != cls_desc:
+            continue
+        cdata = struct.unpack_from('<I', dex, coff + ci * 32 + 24)[0]
+        if not cdata:
+            break
+        p = cdata
+        nsf, p = uleb(p)
+        nif, p = uleb(p)
+        ndm, p = uleb(p)
+        nvm, p = uleb(p)
+        for _ in range(nsf + nif):
+            _, p = uleb(p)
+            _, p = uleb(p)
+        out = {}
+        for nm_ in (ndm, nvm):
+            midx = 0  # each method list restarts with an absolute index diff
+            for _ in range(nm_):
+                d_, p = uleb(p)
+                midx += d_
+                flags, p = uleb(p)
+                _code, p = uleb(p)
+                if flags & 0x100 and midx < msz:  # ACC_NATIVE
+                    _c, proto_i, name_i = struct.unpack_from('<HHI', dex, moff + midx * 8)
+                    out.setdefault(string(name_i), proto_desc(proto_i))
+        return out
+    return {}
+
+
 def main():
     ap = argparse.ArgumentParser(description='Compile jnitrace JNI traces into smali bodies')
     ap.add_argument('traces', help='directory with trace_<name>.txt files')
     ap.add_argument('--class', dest='cls', required=True)
     ap.add_argument('--super', dest='sup', required=True)
     ap.add_argument('--sigs', help='JSON {name: signature}; defaults cover the lifecycle set')
+    ap.add_argument('--sigs-dex', action='append', default=[], metavar='DEX',
+                    help='hollow stub dex(es): import {name: descriptor} of the '
+                    'native methods of --class (translated methods keep their '
+                    'original protos in the stubs). Merges over the built-in '
+                    'defaults; --sigs JSON still wins on conflicts; repeatable')
     ap.add_argument('--out', required=True)
     args = ap.parse_args()
 
@@ -470,6 +557,11 @@ def main():
         'onMultiWindowModeChanged': '(ZLandroid/content/res/Configuration;)V',
         'onPictureInPictureModeChanged': '(ZLandroid/content/res/Configuration;)V',
     }
+    for dex_path in args.sigs_dex:
+        got = extract_native_sigs(open(dex_path, 'rb').read(), args.cls)
+        sigs.update(got)
+        print(f'[sigs-dex] {dex_path}: {len(got)} native signature(s) of {args.cls}',
+              file=sys.stderr)
     if args.sigs:
         import json
         sigs.update(json.load(open(args.sigs)))
