@@ -8,7 +8,7 @@ bench, before anything ships:
 
   V1 zip layer    — zipfile integrity, entry-set sanity, 4-byte alignment,
                     resources.arsc STORED+aligned (the R+ install gate)
-  V2 DEX container— dexdoctor's full pathology audit P0..P10 must be CLEAN
+  V2 DEX container— dexdoctor's full pathology audit P0..P11 must be CLEAN
   V3 DEX strict   — apktool/dexlib2 full decode (the strictest offline DEX
                     judge; anything ART's verifier would trip on shows here)
   V4 DEX content  — shell-weaving residue must be 0 (woven invokes restored),

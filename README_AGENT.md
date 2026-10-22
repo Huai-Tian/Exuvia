@@ -3,7 +3,7 @@
 > **本文档的读者是 AI（LLM Agent），不是人类。**
 > 用途：当你在本仓库进行二次开发、续写、重构或修 bug 时，先读完本文档。
 > 它记录了项目的全貌、进度、已拍板的决定、以及**故意反直觉的设计**——后者尤其重要：
-> 有些设计看起来像缺陷或可以"顺手优化"，实际上是用数轮讨论换来的结论。破坏它们 = 破坏项目。
+> 有些设计看起来像缺陷或可以"顺手优化"，实际上是用数轮讨论（或真机事故）换来的结论。破坏它们 = 破坏项目。
 >
 > 本文档本身是协议的一部分（与三条协议数据流同级）。**修改本文档需要人类维护者确认**，
 > 尤其是第 7、8 节（原则与决策日志）。
@@ -21,85 +21,76 @@ Exuvia 是一个**面向 AI Agent 的 Android 通用脱壳 / 修复流水线**�
 - **名字**：Exuvia（蝉蜕）——壳留在原地，代码恢复生命
 - **口号**：*"Separate the shell from what lives inside."*
 
-**项目当前状态（2026-10-21，GitHub `c0e56cd`）：**
-- **脱壳战役**：语料壳（360 技术族）解密链已全解（变体 RC4 / SM4-CFB / 密钥派生 / 运行时表置换——全链坐标见 §0.5 事实表）；classes.dex 尾容器（1MB 原始 App 代码）的 key 确认为**运行时构造**——静态穷尽（588 RC4 参数组合 + SM4 全模式 + 材料格点全扫 = 0 命中）。这是脱壳线唯一剩余卡点，优先级低：修复线已绕过此需求。
-- **修复战役**：**v12 产物真机双双成功**（12 轮交付、11 个根因、2 个产物、2 次真机成功）——两个不同脱壳器的 dump（56.al 紧凑重排 1.85MB / fulldump 内存展开 4.5MB）经同一修复管线产出均正常运行（Oppo/Android 15+/targetSdk 36）。五重验收门（verify_all.py）+ 修复工具链（trackb/ 十件套）产品化。
-- **产品化**：`exuvia repair` 子命令上线（Rust 壳 + 内嵌 Python——不重写 12 轮真机验证的工具链）；方法体**三来源体系**：`--dump`（第三方 dump，可多来源互补还原，**生产主路径**）/ `--reference`（原包，**内部测试专用**——生产场景没有原包）/ 无来源时 StubSafe **框架契约兜底**。三场景实测全绿。
-- 契约层：六协议物 fixture 双向锚定、SKILL_VERSION 1.3.0（§7 修复管线文档入册）、CI 全绿。
-- 产品线 a 契约面：卡点两类（method-native-stub：ACC_NATIVE stub + JNI 符号定位 + 方法体切片；encrypted-payload：坏 DEX 文件 / so 内明文 DEX 扫描命中 / assets ELF 零命中负事实三机械来源）+ 解密例程候选机械定位（JNI_OnLoad / init_array 双路径：PT_DYNAMIC 运行时视角优先）；
-- 外循环闭合且留痕：`exuvia packed.apk → next --goal → [LLM 解卡点] → unpack merge（四层闸门 + 沙箱双锚 + 销账）→ validate`；merge 拒绝时 attempts.log 记 merge-rejected + 被认领卡点 attempts 递增；recovered DEX 形状产物归档 workspace/<debt_id>/recovered.dex；
-- 实战修正（真实样本驱动，全部机械规则、零厂商特判）：#1 DEX 解析器按规范对齐（method_id 8B / type_list u16）；#2 assets ELF 纳入清点与符号查表；#3 so 内明文 DEX 机械扫描；#4 PT_DYNAMIC 运行时视角双路径 + ELF64 全架构符号 + 导出符号清单进 facts；
-- 洋葱二次分析已落地：`exuvia analyze --dex`（解卡产物回注 → 下一层欠账地图，与 first_pass 协议同构，同一外包循环复用）；
-- CLI 契约表全兑现：--version / --profile / --goal / --json / --resume、next、schema --dump、unpack validate / merge、analyze --dex、hunt；
-- handoff 结构落盘完整：REPORT.json + REPORT.md、debt.json、evidence/<debt_id>/{manifest.json, <name>.bin}、attempts.log、workspace/；
-- ci/verify（cargo workspace member，不进发行物）：register 语料登记 + check 原包对账——比对逻辑公开、样本私有；
-- 终点定义已拍板（2026-10 桌面化修订）：桌面三重验收（结构对账 + DEX 全量可解析 + 语义复原判定，§2.1）+ 忠实还原原则；
-- 脱壳战役的 r 轮过程记录（r10-r31）已蒸馏：最终事实进下方全链技术事实表，方法论教训进 §7/§8，过程细节见 git 提交信息与 handoff/HANDOFF_r15_entry.md；
+**项目当前状态（2026-10-22，GitHub `1fdc8df`）：**
 
-## 0.5 第一战交接视图（战役终态——技术事实坐标 + 方法论结晶，接手 Agent 从这里继续）
+- **第一战（脱壳线，360 技术族）**：解密链已全解（变体 RC4 / SM4-CFB / 密钥派生 / 运行时表置换——全链坐标见 §0.5 事实表）；classes.dex 尾容器（1MB 原始 App 代码）的 key 确认为**运行时构造**——静态穷尽（588 RC4 参数组合 + SM4 全模式 + 材料格点全扫 = 0 命中）。这是脱壳线唯一剩余卡点，优先级低：修复线已绕过此需求。
+- **修复战役**：**v12 产物真机双双成功**（12 轮交付、11 个根因、2 个产物、2 次真机成功）——两个不同脱壳器的 dump（56.al 紧凑重排 1.85MB / fulldump 内存展开 4.5MB）经同一修复管线产出均正常运行（Oppo/Android 15+/targetSdk 36）。五重验收门（verify_all.py）+ 修复工具链产品化。
+- **第二战（dex2c 翻译族）**：**闭环 APK 维护者真机确认（2026-10-21/22）**——无 dump、无参照，从 JNI 语义重建方法体。工具链自动化已收官：dexcontainer.py 尾容器重建、jnitrace.py（`--init` 运行时预热 / `--seed-dex` clinit 静态域播种 / `--arms` 空值守卫双臂枚举）、TLS 字符串离线物化（so_emulator emutls 契约仿真）、trace2smali.py（`--sigs-dex` 空心 stub 签名自动提取）、verify_all V4 多 dex 并集修正。SKILL §8 族 2 入册。
+- **产品化**：`exuvia repair` 子命令上线（Rust 壳 + 内嵌 Python——不重写 12 轮真机验证的工具链）；方法体**四来源体系**：`--dump`（第三方 dump，多来源互补，**生产主路径**）/ `--reference`（原包，**内部测试专用**）/ StubSafe **框架契约兜底** / dex2c 源（jnitrace→trace2smali，无 dump 可恢复，SKILL §7）。
+- **契约层**：六协议物 fixture 双向锚定、SKILL_VERSION 1.5.0、CI 全绿。**锚点纪律（血泪教训）**：SKILL_VERSION 升版必须**同一 commit** 改 `src/version.rs`——1e5b601 只改文档导致锚点漂移、CI 连红（1fdc8df 修复）。
+- 产品线 a 契约面：卡点两类（method-native-stub：ACC_NATIVE stub + JNI 符号定位 + 方法体切片；encrypted-payload：坏 DEX 文件 / so 内明文 DEX 扫描命中 / assets ELF 零命中负事实三机械来源）+ 解密例程候选机械定位（JNI_OnLoad / init_array 双路径：PT_DYNAMIC 运行时视角优先）。
+- 外循环闭合且留痕：`exuvia packed.apk → next --goal → [LLM 解卡点] → unpack merge（四层闸门 + 沙箱双锚 + 销账）→ validate`；merge 拒绝时 attempts.log 记 merge-rejected + 被认领卡点 attempts 递增；recovered DEX 形状产物归档 workspace/<debt_id>/recovered.dex；洋葱二次分析 `analyze --dex` 回注解卡产物 → 下一层欠账地图。
+- CLI 契约表全兑现：--version / --profile / --goal / --json / --resume、next、schema --dump、unpack validate / merge、analyze --dex、hunt（含变体 RC4 参数）、repair。
+- 实战修正（真实样本驱动，全部机械规则、零厂商特判）：DEX 解析器按规范对齐（method_id 8B / type_list u16）；assets ELF 纳入清点与符号查表；so 内明文 DEX 机械扫描；PT_DYNAMIC 运行时视角双路径 + ELF64 全架构符号。
+- ci/verify（cargo workspace member，不进发行物）：register 语料登记 + check 原包对账——比对逻辑公开、样本私有。
+- 终点定义已拍板（2026-10 桌面化修订）：桌面三重验收（结构对账 + DEX 全量可解析 + 语义复原判定，§2.1）+ 忠实还原原则；真机只做最终确认，不进验收链。
 
-> **🏁 里程碑：v12 修复产物真机双双成功（2026-10-21 20:41-20:45）**——
-> **v2 (fulldump) ✓**：安装 → MainActivity 启动 (result code=0) → App 正常运行 → 无 FATAL/crash/died；
-> **v1 (56.al) ✓**：安装 → MainActivity 启动 (result code=0) → App 正常运行 → 无 FATAL/crash/died。
-> **跨脱壳器通用性验证通过**：两个不同脱壳器（56.al 紧凑重排 1.85MB vs fulldump 内存展开 4.5MB）的 dump
-> 经同一修复管线产出的两个 APK 均在真机（Oppo/Android 15+，targetSdk 36）上正常运行。
-> 从 v1 首次交付到 v12 双双成功：**12 轮交付、11 个根因、2 个产物、2 次真机成功**。
-> 产品化后 GitHub 提交至 `c0e56cd`（v12 战役 + `exuvia repair` 子命令 + StubSafe 三来源体系）。
+## 0.5 战役档案（终态事实底座——接手 Agent 从这里继续）
 
-### 0.5.1 修复战役根因清单（12 轮真机反馈的方法论结晶——每一行都是一次交付事故的根因闭环）
+> **🏁 里程碑：v12 修复产物真机双双成功（2026-10-21）**——两个不同脱壳器的 dump 经同一修复管线产出的 APK 均安装→启动→正常运行→无 crash（Oppo/Android 15+，targetSdk 36），跨脱壳器通用性验证通过。第二战 dex2c 闭环 APK 同月真机确认。
 
-| # | 症状（真机反馈） | 根因 | 修复 / 入库 |
-|---|---|---|---|
-| 1 | 签名无法识别 / 重签后闪退 | **交付管道二进制污染**（沙箱文本化机制把 ≥0x80 字节替换为 U+FFFD；非管线缺陷） | 二进制交付物一律 tar.gz + SHA256SUMS；第三方判官（androguard/apksigtool）验证闭环——签名层无辜 |
-| 2 | 安装报 `-124 Failed parse` | **R+ 安装门**：resources.arsc 必须 STORED 且 4 字节对齐，Python zipfile 从不保证 | repair_all 写出循环内嵌 zipalign（extra 替换为纯 padding）+ arsc 强制 STORED |
-| 3 | 验签失败（装得上但签名无效） | **签名器三 bug**：算法 ID 错标（0x0101 PSS vs 0x0103 PKCS1v15）、顶层摘要缺 0x5a 前缀、section 切分违规 | 修复后 apksigtool 第三方闭环；**方法论：签名/摘要类代码的验收判官必须是第三方独立实现**（同源互证三 bug 全存活过） |
-| 4 | 安装成功但闪退 `Duplicate map section` | **P8**：56.al 的重排 writer 把 type_list 拆两段写两条 map 条目，ART 要求每类型恰好一条 | doctor P8 合并修复（物理相邻验证 + 结构宽度 walk） |
-| 5 | `Section end should be within file size` | **P9**：截短文件后 data_size 未同步 | **终态不变量清单**：任何改变文件长度的修复后统一 `data_size := file_size - data_off` |
-| 6 | `Bogus encoded_value value_type 8` | **P10**：壳把 annotation 区改写为工作态数据，dump 冻结 | 全注解链审计 + 外科式解除引用（off:=0 规范合法）；**教训：encoded_value 存在于 static_values+annotations 两处，修一处不等于修完** |
-| 7 | 同款报错复发 | **P11**：ART 第三条扫描路径（map 声明区逐条 walk）暴露——P10/dexlib2 只覆盖引用链 | map 条目**删除式**修复（缺失合法、清零非法——"对刚性判官，绕过要选最接近其原生容忍的形态"） |
-| 8 | `NoClassDefFoundError: StubApp` | **壳织入字节码**：12 桥 + 2 探针织入 app 代码 | deweave.py 字节级原位恢复（桥→原框架调用 opcode 翻转、探针→nop；**否决合成 StubApp 桥接类方案**——还原包不得引入原包没有的类） |
-| 9 | `Non-zero padding 2 before section` | **内存态 dump 的 map 布局修补不可收敛**——单点修复总撞下一层检查 | **方法论定案：布局错误必须整体重建**——dexlib2 DexPool 标准布局重序列化（repack） |
-| 10 | `Unknown map item type 2004` | P11 初版用了"count 清零"（ART 不认空壳条目） | 改条目删除式（同根因 7 的方法论） |
-| 11 | `UnsatisfiedLinkError: MainActivity.onCreate` | **壳的 native-stub 入口钩子**：onCreate access_flags 加 native 位 + code_off 清零，dump 冻结 stub 态；原始字节码不在 dump 中（方法级惰性解密不回填，32 个 fulldump dex 零命中） | Restore.java（dexlib2 语义级 merge，从参照 DEX 搬运方法体+清 native 位）→ 后演进为三来源体系（--dump/--reference/StubSafe 契约兜底） |
+### 0.5.1 修复战役：12 轮真机反馈的根因 → 不变量（每一行都是一次交付事故的闭环）
 
-**五重验收门**（verify_all.py，ALL GREEN 才 ship）：V1 zip 层（完整/对齐/arsc）→ V2 病理层（doctor 全 audit CLEAN）→ V3 严格层（apktool/dexlib2 完整反编译）→ V4 内容层（deweave 幂等 + 组件自包含）→ V5 签名层（apksigtool 全验签）。**修复一次、本地全量验收、真机只做最终确认**——逐轮真机打地鼠不可规模化。
+| # | 根因 | 结晶（工具已吸收；方法论留档） |
+|---|---|---|
+| 1 | 交付管道二进制污染（文本化机制把 ≥0x80 字节替换为 U+FFFD；非管线缺陷） | **二进制交付物一律 tar.gz + SHA256SUMS**；签名层无辜时先怀疑传输 |
+| 2 | R+ 安装门：resources.arsc 必须 STORED 且 4 字节对齐，Python zipfile 从不保证 | 写出循环内嵌 zipalign（extra 替换为纯 padding）+ arsc 强制 STORED |
+| 3 | 签名器三 bug（算法 ID 错标 0x0101/0x0103、顶层摘要缺 0x5a 前缀、section 切分违规） | **签名/摘要类代码的验收判官必须是第三方独立实现**（同源互证三 bug 全存活过） |
+| 4 | P8：重排 writer 把 type_list 拆两段写两条 map 条目 | ART 要求每类型恰好一条 map 条目；doctor P8 物理相邻验证 + 结构宽度 walk 合并 |
+| 5 | P9：截短文件后 data_size 未同步 | **终态不变量**：任何改变文件长度的修复后统一 `data_size := file_size - data_off` |
+| 6 | P10：壳把 annotation 区改写为工作态数据，dump 冻结 | **encoded_value 存在于 static_values + annotations 两处，修一处不等于修完**；外科式解除引用（off:=0 规范合法） |
+| 7 | P11：ART 第三条扫描路径（map 声明区逐条 walk） | map 条目**删除式**修复（缺失合法、清零非法）——**对刚性判官，绕过要选最接近其原生容忍的形态** |
+| 8 | 壳织入字节码（12 桥 + 2 探针）致 NoClassDefFoundError | deweave 字节级原位恢复；**否决合成 StubApp 桥接类**——还原包不得引入原包没有的类 |
+| 9 | 内存态 dump 的 map 布局修补不可收敛（单点修复总撞下一层检查） | **布局错误必须整体重建**——dexlib2 DexPool 标准布局重序列化 |
+| 10 | P11 初版用"count 清零"（ART 不认空壳条目） | 同 #7：改条目删除式 |
+| 11 | 壳 native-stub 入口钩子：onCreate access_flags 加 native 位 + code_off 清零 | 方法级惰性解密不回填（32 个 fulldump dex 零命中实证）；Restore 语义级 merge → 方法体来源体系 |
 
-### 0.5.2 产品化阶段（修复战役收官 → `exuvia repair` 子命令）
+**五重验收门**（trackb/verify_all.py，ALL GREEN 才 ship）：V1 zip 层（完整/对齐/arsc STORED）→ V2 病理层（doctor P0–P11 全 audit CLEAN）→ V3 严格层（dexlib2 完整反编译）→ V4 内容层（织入残留=0 + 组件自包含，多 dex 并集）→ V5 签名层（apksigtool 全验签）。**修复一次、本地全量验收、真机只做最终确认**——逐轮真机打地鼠不可规模化。
 
-- **形态拍板**：Rust 壳 + `include_bytes!` 嵌入 Python 工具链（编译时嵌入/运行时提取临时目录/幂等）——**不重写 12 轮真机验证的工具链**（重写引入新 bug 的风险 > 语言统一的收益）；重依赖（dexlib2 jar/apktool.jar）用户侧安置、git 只发源码（apktool 政策）。
-- **方法体三来源体系**（`--dump` 多来源互补还原 = 生产主路径；`--reference` 原包 = 内部测试专用——生产场景没有原包；无来源时 StubSafe 框架契约兜底：native + 生命周期名 = 壳抽取铁证 → 合成 `invoke-super` 契约等价体并清 native 位；其余 native 保留 = lib/*.so 支撑的合法 JNI，**必要且无副作用的残留直接复用，不为等义而等义**）。
-- **三场景实测**：A 无来源（契约体，native 集合与原包一致）、B 第三方 dump（完整方法体搬运）、C reference（同 B）；五重门全绿。
-- **已知语义边界（如实）**：契约体保证"可安装、可启动、不崩"，但不含业务逻辑——onCreate 被抽取且无任何来源携带其方法体时，产物白屏（logcat 实证：无异常栈、Activity 正常显示、DecorView 空白）。该信息不在任何可得载体中（信息论边界）；恢复依赖 --dump 来源。
+### 0.5.2 产品化拍板（修复战役收官 → `exuvia repair`）
 
-### 0.5.3 脱壳线当前状态（容器 key = 唯一剩余卡点，低优先级）
+- **形态**：Rust 壳 + `include_bytes!` 嵌入 Python 工具链（编译时嵌入/运行时提取 `<temp>/exuvia-repair/<hash>/`，幂等）——**不重写 12 轮真机验证的工具链**（重写引入新 bug 的风险 > 语言统一的收益）。
+- **方法体来源体系**：`--dump` 多来源互补 = 生产主路径；`--reference` 原包 = 内部测试专用；无来源时 StubSafe 契约兜底（native + 生命周期名 = 壳抽取铁证 → 合成 `invoke-super` 契约等价体并清 native 位；其余 native 保留 = lib/*.so 支撑的合法 JNI，**必要且无副作用的残留直接复用，不为等义而等义**）；dex2c 族走第四来源（JNI trace → smali 合成，SKILL §7/§8 族 2）。
+- **已知语义边界（如实）**：契约体保证"可安装、可启动、不崩"，但不含业务逻辑——onCreate 被抽取且无任何来源携带其方法体时产物白屏（信息论边界：该信息不在任何可得载体中）；恢复依赖来源。
+
+### 0.5.3 脱壳线终态（360 技术族；容器 key = 唯一剩余卡点，低优先级）
 
 - **壳形态（双 blob 架构）**：so 内嵌 blob（VA 0x30138, 836KB）= stage-2 interpreter 引擎（**已解密**：静态 key 变体 RC4 → inflate → 1.9MB 载荷）；classes.dex 尾容器（[0x4000:]，1MB）= 原始 App 代码（**未解密**：key 运行时构造）。
-- **Stage-2 定位与布局**：stage2_elf.so = payload[0x27d01:]（1.75MB 剥离 magic 的 ELF64）；payload 头部 163KB（ELF 前）= XOR 0xCC 方法/符号映射表（24B/条，指向运行时数据区）；代码区 [0x31000,0x1ab320) = ~1.5MB 全明文（标准 PLT/GOT，GOT 运行时由 Stage-1 微型 linker 填充）；真加密区 [0x9470,0x31000) = 162KB（熵 7.999，无静态 ADRP 引用）；interpreter_wrap_* 六签名 JNI 桥。
-- **容器解密链已定位**：SM4-ECB（Stage-2 VA：wrapper 0xd69b8 / init 0xd6d60 / crypt 0xd6e34 / block 0xd6e8c / key_exp 0xd6c1c）+ ZSTD 压缩导入实锤（容器格式大概率 [u32 len][ZSTD(DEX)]）；容器双段结构（[0:8] XOR C6 头；段1 952,740B + 段2 51,280B，段2 @32 引用段1 头部 4B——密钥/校验/索引候选）。
-- **容器 key = 纯运行时构造（终局负空间）**：静态穷尽全维度 0 命中——SM4-ECB/CFB × {MD5(cert)/MD5(pkg)/组合/hex}、RC4 变体全参数、rc4mat 4 材料源、壳工作区/RK/轮密钥/尾部全扫（3 个 zlib magic 碰撞已排除）。**key 不存在于 dump/静态容器/壳工作区的任何位置。**
-- **触发矩阵负空间**：容器解密不发生在 JNI_OnLoad/Workers 阶段——发生在后续 Java 方法调用（attachBaseContext）中，需先经 RegisterNatives 注册。获取 key = 完整模拟 attachBaseContext 生命周期（工程量大）或真机运行时捕获。
+- **Stage-2 布局**：stage2_elf.so = payload[0x27d01:]（1.75MB 剥离 magic 的 ELF64）；payload 头部 163KB = XOR 0xCC 方法/符号映射表（24B/条）；代码区 [0x31000,0x1ab320) ≈ 1.5MB 全明文（GOT 由 Stage-1 微型 linker 运行时填充）；真加密区 [0x9470,0x31000) = 162KB（熵 7.999）；interpreter_wrap_* 六签名 JNI 桥。
+- **容器解密链已定位**：SM4-ECB（Stage-2 VA：wrapper 0xd69b8 / init 0xd6d60 / crypt 0xd6e34 / block 0xd6e8c / key_exp 0xd6c1c）+ ZSTD 导入实锤（容器格式大概率 [u32 len][ZSTD(DEX)]）；容器双段结构（[0:8] XOR C6 头；段1 952,740B + 段2 51,280B，段2 @32 引用段1 头部 4B——密钥/校验/索引候选）。
+- **容器 key = 纯运行时构造（终局负空间）**：静态穷尽全维度 0 命中——SM4-ECB/CFB × {MD5(cert)/MD5(pkg)/组合/hex}、RC4 变体全参数、rc4mat 4 材料源、壳工作区/RK/轮密钥/尾部全扫。**key 不存在于 dump/静态容器/壳工作区的任何位置。** 触发矩阵负空间：解密发生在 attachBaseContext（需先 RegisterNatives），不在 JNI_OnLoad/Workers 阶段——获取 key = 完整模拟 attachBaseContext 生命周期（工程量大）或真机运行时捕获。
 - **模拟环境已固化**（so_emulator，unicorn 2.1.4）：`--chain '0x2c5b88;x0=VM,0x2c55fc,0x2c55ac' --java --utf8-file <pkgname> --sig-file <cert> --fs <apk> --load so_reloc_image:0x70000000 --poke 0x2e40d0:<base> --poke 0x2e4008:0x1234` → JNI_OnLoad 0x10004 ✓ + workers 生成 ✓ + init_array ✓ + SM4-CFB 运行时表自然解密 ✓（IV=MD5(pkg) 逐字节实证）。
 - **战略决策（已拍板）**：修复线已闭环——容器解密是"追求字节级完美"的增强功能。优先级：产品化（已完成）> 更多壳样本 > 容器解密。
 
-**语料**：`/workspace/corpus/`——`ssd-free-r1.orig.apk`（原包，v2 签名）、`ssd-free-r1.packed.apk`（加固包）、`extracted/`（壳 APK 解包：classes.dex + assets/libjiagu*.so 四架构）、`handoff/`（attempts.log——**先读它**：r1-r14 原始行随沙箱丢失，bootstrap 条目诚实留痕，r 轮摘要以 git 提交信息与本文档为准；接手 HANDOFF 副本在 handoff/HANDOFF_r15_entry.md）。
+**语料**：`/workspace/corpus/`——`ssd-free-r1.orig.apk`（原包，v2 签名）、`ssd-free-r1.packed.apk`（加固包）、`extracted/`（壳 APK 解包：classes.dex + assets/libjiagu*.so 四架构）、`handoff/`（attempts.log——**先读它**；r 轮摘要以 git 提交信息与本文档为准）。
 
 **全链技术事实表**（全部已验证；地址均为 libjiagu_a64.so VA）：
 
 | 层 | 坐标 | 语义 | 状态 |
 |---|---|---|---|
-| Java 壳层 | com.tianyu.util.a.a(String) | per-char XOR-0x10 字符串解密 | 已解（r5） |
-| JNI 入口 | attachBaseContext→interface5/99/21 | RegisterNatives 动态注册 | 已测绘（r5） |
-| 签名验证 | 0x2c8f34（s2=MD5(证书) @0x2c8fec 输入 674B；s1=MD5(包名) @0x2c9000） | 运行时哈希 vs 内嵌期望 = 加固时原包签名 | **黑盒贯通**（喂真证书+包名，r10） |
+| Java 壳层 | com.tianyu.util.a.a(String) | per-char XOR-0x10 字符串解密 | 已解 |
+| JNI 入口 | attachBaseContext→interface5/99/21 | RegisterNatives 动态注册 | 已测绘 |
+| 签名验证 | 0x2c8f34（s2=MD5(证书) @0x2c8fec 输入 674B；s1=MD5(包名) @0x2c9000） | 运行时哈希 vs 内嵌期望 = 加固时原包签名 | **黑盒贯通**（喂真证书+包名） |
 | MD5 | 0x2c5cfc | 标准 MD5 | hashlib 逐字节验证 |
 | 变体 RC4（DynCryptor） | 0x7984（PRGA 0x6b7c，KSA 0x6a54） | i/j 种子 3/5、i+=2、j+=S[i]+1；静态 10B key `76565734239123535674`（so 偏移 0x1cc44+0x7456 锚） | **全解**（KSA 与 unicorn 快照逐字节双验证） |
-| 第二 cryptor | __arm_c_1 @0x6f90 | 同款变体 PRGA + **动态 key**：[this+0x28] 材料、[this+0x30] 长度 | 消费侧全测绘（r10） |
+| 第二 cryptor | __arm_c_1 @0x6f90 | 同款变体 PRGA + **动态 key**：[this+0x28] 材料、[this+0x30] 长度 | 消费侧全测绘 |
 | key 材料格式 | 0x7184 预处理 | 14B 头：[6..7] keylen、[8..9] 旗标、[0xe] 移位；KSA key = 载荷+0x28 | 已解码 |
-| **第二引擎** | 0x2c7298 = **国密 SM4 CFB（IV=s1=MD5(包名)，key 材料=s2=MD5(证书)）** | S-box @0x2caf00（与 GB/T 32907 标准表逐字节一致）；RK 由 0x2c677c 展开（s2 XOR 模板 @0x2e4010）；**标准 CFB 解密语义（反馈=输入块）**：块1=E(s1)、块n=E(前输入块)；r12 的 "IV=0" 是 calloc 清零区观测巧合（r15 修正） | **完全破解**（r12 引擎层 + r15 IV 层；python 80B 全对） |
-| IV（r15） | s1 = MD5(包名)，经 arg x1 从调用者栈 [sp+0x70] 拷入引擎 | `--watch-write` 取证写入者 0x2c6138-0x2c61a4（MD5 存储循环）；canary 理论证伪（GLOB_DAT `__stack_chk_guard` 序列，非 TLS） | **钉死** |
+| **第二引擎** | 0x2c7298 = **国密 SM4 CFB（IV=s1=MD5(包名)，key 材料=s2=MD5(证书)）** | S-box @0x2caf00（与 GB/T 32907 标准表逐字节一致）；RK 由 0x2c677c 展开（s2 XOR 模板 @0x2e4010）；**标准 CFB 语义（反馈=输入块）**：块1=E(s1)、块n=E(前输入块) | **完全破解**（python 80B 全对） |
+| IV 来源 | s1 = MD5(包名)，经 arg x1 从调用者栈 [sp+0x70] 拷入引擎 | `--watch-write` 取证写入者 0x2c6138-0x2c61a4（MD5 存储循环） | 钉死 |
 | RK 固化 | s2 材料 → `--fn 0x2c677c --dump-mem` | 黑盒产物 128B（LE u32[32]），sm4recon 消耗时 `struct.unpack('<32I')` | 可直接复用 |
-| 结构表落点 | [0x2e40d0] | interpreter 结构表指针；SM4 输出 memcpy 于此（0x2c584c）；后置 0x2c78fc = base64 解码；**运行时表 = 置换指针表**（[t+0x18]=值池偏移/[t+0x20]=count/表+0x24=索引字节/`pool[i]=pool[idx[i]]` 原地置换）；静态 0x2e8d00 区 = 模板（≠ 运行时表） | **已解**（r29 影子副本装载 → 引擎自然解密，dladdr 桥 + AUTO-INIT-ARRAY 入产品） |
-| 分发器 | 0x2c566c | [t+0x50]=count、[t+0x54+i*8]=偏移+基址重定位 | 已测绘（r13） |
-| interface 初始化 | __arm_a_1 @0xa94c | 0x9008→0x9140→0x9284→0x9bdc→0x9f84→0x9470 序列 | **已解**（r28 dlopen 桥后装载链自然全通） |
+| 结构表落点 | [0x2e40d0] | interpreter 结构表指针；SM4 输出 memcpy 于此（0x2c584c）；后置 0x2c78fc = base64 解码；**运行时表 = 置换指针表**（[t+0x18]=值池偏移/[t+0x20]=count/表+0x24=索引字节/`pool[i]=pool[idx[i]]` 原地置换）；静态 0x2e8d00 区 = 模板（≠ 运行时表） | **已解**（影子副本装载 → 引擎自然解密） |
+| 分发器 | 0x2c566c | [t+0x50]=count、[t+0x54+i*8]=偏移+基址重定位 | 已测绘 |
+| interface 初始化 | __arm_a_1 @0xa94c | 0x9008→0x9140→0x9284→0x9bdc→0x9f84→0x9470 序列 | **已解**（dlopen 桥后装载链自然全通） |
 | dlopen 遍历 | 0x567c（0x9008 内） | 微型 linker 自实现 dlopen 遍历 stage-2 的 6 个 DT_NEEDED 库；模拟器 dlopen stub 返 0 曾致 fallback 假象 | **已解**（dlopen/dlsym/dlclose 桥入产品） |
 | **容器解密链**（stage-2 VA） | wrapper 0xd69b8 / init 0xd6d60 / crypt 0xd6e34 / block 0xd6e8c / key_exp 0xd6c1c | **SM4-ECB** 16 字节块循环 + ZSTD 解压导入；触发点在 attachBaseContext（需 RegisterNatives 先行） | 链路全测绘；**key = 运行时构造**（静态穷尽 0 命中） |
 
@@ -107,26 +98,24 @@ Exuvia 是一个**面向 AI Agent 的 Android 通用脱壳 / 修复流水线**�
 
 ```bash
 # 1. 提取签名材料（sigx 与手工提取逐字节一致）
-trackb/sigx.py ssd-free-r1.orig.apk --out sigs/          # cert_1.der（MD5 = 514711d4...）
-printf 'detect.screenshot\0' > pkgname.txt               # packageName（orig dex 类路径 detect/screenshot/）
+trackb/sigx.py ssd-free-r1.orig.apk --out sigs/          # cert_1.der
+printf 'detect.screenshot\0' > pkgname.txt               # packageName
 
 # 2. JNI_OnLoad 黑盒全链（签名验证贯通 → 返回 0x10004）
 trackb/so_emulator.py extracted/assets/libjiagu_a64.so --fn 0x2c5b88 --java \
   --arg x0=0x620000030000 --sig-file sigs/cert_1.der --utf8-file pkgname.txt
 
-# 3. SM4 离线解密（RK 先经黑盒固化；IV=s1=MD5(包名) —— r15 钉死，`--iv` 参数化）
+# 3. SM4 离线解密（RK 先经黑盒固化；IV=s1=MD5(包名)，--iv 参数化）
 trackb/so_emulator.py ... --fn 0x2c677c --arg x0=<out> --arg x1=<MD5(cert) 区> --dump-mem ...
-trackb/so_emulator.py ... --fn 0x2c5b88 --java --sig-file <cert> --utf8-file <pkgname> \
-  --watch-write <调用者 sp+0x70>:0x20     # 两个哈希落点的写入者取证（s1/s2 逐字节捕获）
 trackb/sm4recon.py dec <密文> --rk rk.bin --iv <s1 hex>          # CFB 解密（反馈=输入块）
 trackb/sm4recon.py scan <容器> --rk rk.bin --iv <s1 hex> --form all   # 块 1 常量 = E(s1) 全偏移扫描
 
 # 4. 变体 RC4 参数空间搜索（第一战形态一行命令）
-cargo run -- hunt --carrier <切片> --rc4 76565734239123535674 --rc4-stride 2 --rc4-seed 3:5 --rc4-jbias 1
+exuvia hunt --carrier <切片> --rc4 76565734239123535674 --rc4-stride 2 --rc4-seed 3:5 --rc4-jbias 1
 
 # 5. 内存写/调用现场取证
 --watch-write 2e40a0:100     # 写入者 PC+值
---watch 2c5830                # x0-x7 调用现场
+--watch 2c5830               # x0-x7 调用现场
 ```
 
 ---
@@ -190,6 +179,7 @@ Exuvia 的终点：**桌面可判定的代码恢复完成度**（桌面三重验
 **校验二分条款（维护者 2026-10-20 拍板，补充上一条款的归属范围）**：签名/环境校验按**归属层**二分——
 - **App 层校验**（原包自己带的签名校验/环境校验）：App 自己的代码，**忠实还原对象**（上条款原文适用：自签退出是正确表现）；
 - **壳层校验**（壳自身的签名校验/环境校验——第一战形态即此类：s1/s2 签名哈希喂壳内密钥派生）：**属于壳、不属于 App**。脱壳输出同功能 APK 时**随壳剥离**，不计入忠实还原范围，也无需等义复刻——壳的防御死在壳上，这是脱壳的定义而非 patch 行为。
+
 终端交付物由此钉死：**同功能 APK**（repack 终点段产物）。原理上不可还原的方法（四代壳/VMP：原始字节码不存在），交付**等义判定**——从汇编反推功能相同的代码（L3 路径），"是否等义"与还原代码同为一等输出（工具不做语义终审，判定走下游 LLM 证据审）。
 
 ---
@@ -202,6 +192,7 @@ Exuvia 的终点：**桌面可判定的代码恢复完成度**（桌面三重验
 躯体  = exuvia 单二进制（Linux musl + Windows exe）
         · 轨道 A 引擎、闸门与判定、编排
         · 内嵌 Python 胶水 runner（字符串资源，stdin 喂给系统 python3，零落盘）
+        · 内嵌修复工具链（include_bytes!，repair 子命令运行时提取）
 灵魂  = SKILL.md 单文件
         · 方法论 · 格式示例（示例 = CI fixture）· profile fence · 族知识 guidance
 接口  = 三条协议数据流：handoff / goal / proposal
@@ -209,24 +200,55 @@ Exuvia 的终点：**桌面可判定的代码恢复完成度**（桌面三重验
         · 机器可读形式按需派生：exuvia schema --dump
 ```
 
-release = 两个平台二进制 + SKILL.md + checksums。**纯文件，无目录**。仓库同构：`src/`（Rust 单工程）、`SKILL.md`、`trackb/`（轨道 B 用户侧 Python 工具）、`ci/`、`README_AGENT.md`、`LICENSE`。
+release = 两个平台二进制 + SKILL.md + checksums。**纯文件，无目录**。仓库同构：`src/`（Rust 单工程）、`SKILL.md`、`trackb/`（轨道 B 用户侧 Python 工具）、`tools/dexlib/`（Restore/StubSafe Java 源码）、`ci/`、`README_AGENT.md`、`LICENSE`。
 
 **零发行纪律（结构三次法则）**：生态已有的东西一概不发行——系统有 python3 就不捆运行时；PyPI 有 qiling/frida 就不打包依赖；serde 类型能定义格式就不放 schema 文件；单文件装得下的判断就不拆目录。任何新结构元素（文件/目录/发行物）需要"同一需要出现过三次"的实证，不接受"将来可能有用"。
 
-### 3.1 三轨道（2026-10 桌面化修订：真机/模拟器全面摒弃）
+### 3.1 三轨道（2026-10 桌面化修订：真机/模拟器全面摒弃出验收链）
 
 ```
 轨道A 静态分析   —— 解包、指纹、so 切片、解密例程定位与离线复现
-轨道B 模拟执行   —— qiling/Unicorn 离线跑 so 里的解密函数（桌面级，trackb/ 工具）
+轨道B 模拟执行   —— Unicorn 离线跑 so 里的解密函数（桌面级，trackb/ 工具）
 轨道C 定点动态   —— 桌面级 mini-loader：Unicorn 模拟 linker + JNIEnv 桩跑 JNI_OnLoad，
                     截获 RegisterNatives 注册表（替代真机 hook 的运行时事实获取）
 ```
 
-优先级永远 A > B > C。**新代壳战略下，轨道 B/C 是主路径而非推迟项**（roadmap 期工程化），L2/L3 从"可选层"升格为主交付物。轨道 B/C 的重依赖（qiling、unicorn、capstone）不进发行物，用户侧安装，缺席 = `unavailable`（功能级语义，与 jadx/ghidra 同类）；**核心闸门依赖的系统 python3 缺失 = `installation-broken`（拒绝运行）**。
+优先级永远 A > B > C。**新代壳战略下，轨道 B/C 是主路径而非推迟项**，L2/L3 从"可选层"升格为主交付物。轨道 B/C 的重依赖（unicorn、capstone）不进发行物，用户侧安装，缺席 = `unavailable`（功能级语义，与 jadx/ghidra 同类）；**核心闸门依赖的系统 python3 缺失 = `installation-broken`（拒绝运行）**。
 
-**轨道 C 桌面化的第一级已内置**：`exuvia hunt`（L2 参数空间搜索器）——算法与 key 已知时（facts / LLM 复现），密文段起点/长度是机械可搜的有限空间（keystream 从零对齐模型 × 全空间 offset × 判据链自决长度：zlib 流边界 / DEX file_size）。真机 frida hook 从主路径移除；**fence 族知识里的 hook 剧本重定义为桌面 Unicorn 桩剧本**（同一份截获逻辑，两种执行环境——真机执行不再是非它不可）。
+**轨道 C 桌面化的第一级已内置**：`exuvia hunt`（L2 参数空间搜索器）——算法与 key 已知时（facts / LLM 复现），密文段起点/长度是机械可搜的有限空间（keystream 从零对齐模型 × 全空间 offset × 判据链自决长度：zlib 流边界 / DEX file_size）。真机 frida hook 从主路径移除；**fence 族知识里的 hook 剧本重定义为桌面 Unicorn 桩剧本**（同一份截获逻辑，两种执行环境）。
 
-**轨道 B 工具已落地（`trackb/`，用户侧 Python 工具——第一战实战催生）**：`so_emulator.py`（so 黑盒执行器：ELF64 映射 + RELATIVE/GOT 重定位 + bionic libc 语义层 + zlib 跨模拟器桥 + 文件系统桥 --fs + JNI 假世界（ExceptionCheck/数组语义/SDK 喂值/RegisterNatives 捕获）+ --poke/--load 跨文件黑盒，零样本参数全 CLI 化）、`crypto_recon.py`（容器熵定位 / ECB 指纹 / AES 指令扫描 / **hash-scan 指令级哈希 IV 扫描** / RC4 变体族双过滤扫描 / **dxor Dalvik 字符串解密**）、`disasm.py`（**L2 evidence：符号/偏移→汇编流**——PT_DYNAMIC 运行时视角符号解析，evidence 附件标准生产器，capstone 用户侧）、`repack.py`（终点合成段 v0：恢复 DEX + 原 Manifest + 基准资源 → 未签名 APK；zipalign/apksigner 按零发行纪律留用户侧 SDK；整块加密族豁免 DEX writer）、`selftest.py`（合成 fixture 自检，零样本纪律）。工具本体是产品的一部分随仓库分发；unicorn/capstone 由使用侧安装（缺席 = unavailable 语义）。
+**trackb/ 工具总表**（21 个 + protocol.md；工具本体随仓库分发 = 产品的一部分，重依赖用户侧安装）：
+
+内嵌修复链（`include_bytes!` 随二进制发行，`exuvia repair` 运行时提取）：
+
+| 工具 | 职责 |
+|---|---|
+| repair_all.py | 单命令管线编排：doctor → clean → deweave → restore → stubsafe → surgery → zipalign → sign |
+| dexdoctor.py | dump 病理分诊与急救（P0–P11：校验和/截断/map 布局/注解污染/type_list 分裂…） |
+| dexclean.py | 壳/异源 class_def 清除（manifest 组件可达性，R8 混淆感知） |
+| deweave.py | 壳织入字节码原位恢复（桥 invoke → 原框架调用 opcode 翻转；探针 → nop） |
+| repair.py | 外科 + 装配（Manifest wrapper Application 移除、壳资产剥离、classes.dex 置换） |
+| axmltool.py | 二进制 AXML 解析（Manifest 手术的基础件） |
+| sign2.py | 最小 APK v2 签名器（RSASSA-PKCS1 + SHA2-256，python-cryptography） |
+
+用户侧脱壳/分析工具：
+
+| 工具 | 职责 |
+|---|---|
+| so_emulator.py | so 黑盒执行器（unicorn：ELF64 映射 + RELATIVE/GOT 重定位 + bionic libc 语义层 + JNI 假世界（RegisterNatives 捕获/SDK 喂值）+ --fs/--poke/--load 跨文件桥 + --sig-file/--utf8-file 喂值通道 + **emutls 契约仿真**（TLS 字符串离线物化）） |
+| jnitrace.py | JNI 语义追踪器（fake JNIEnv + token world：`--init` 运行时预热 / `--seed-dex` clinit 静态域播种 / `--arms`/`--arms-max` 空值守卫双臂枚举）——dex2c 族方法体恢复的前半 |
+| trace2smali.py | trace → smali 编译器（`--sigs`/`--sigs-dex` 签名来源；ART 校验三规则内建：hex jvalue=字面量、check-cast 对齐 receiver、4-bit 寄存器低刮擦带+invoke-interface）——dex2c 族的后半 |
+| dexcontainer.py | 尾部容器 dex 重建（profile 驱动：[stub dex][加密头][dex 体][子容器]；per-dex sha1+adler 自校验 oracle，不可能假阳性） |
+| disasm.py | 反汇编流生产器（PT_DYNAMIC 运行时视角符号解析，L2 evidence 标准附件，capstone 用户侧） |
+| crypto_recon.py | 密文侦察（熵定位 / ECB 指纹 / AES 指令扫描 / hash-scan IV 扫描 / RC4 变体族扫描 / dxor Dalvik 字符串解密） |
+| sigx.py | APK 签名链证书提取（喂 so_emulator --sig-file） |
+| sm4recon.py | SM4 侦察/解密（GB/T 32907：CFB dec/enc、材料格点/zlib/dex 全偏移扫描、textbook rkexp） |
+| elfrecon.py | 内嵌 ELF 恢复（从 dump/容器里捞完整 ELF） |
+| fidelity.py | dump-vs-reference 保真报告（L0–L5；内部校准用"产业问题"度量） |
+| verify_all.py | **五重验收门**（V1 zip / V2 病理 P0–P11 / V3 dexlib2 严格反编译 / V4 内容残留·多 dex 并集 / V5 apksigtool 验签） |
+| repack.py | 终点合成装配器 v0（§2.1：恢复 DEX + 原 Manifest + 基准资源 → 未签名 APK） |
+| exuvia_repair.py | task.json 协议版修复入口（protocol.md：unpacker ↔ repairer ↔ agent 交换格式 v1.0，pending_decisions 由 agent 填答续跑） |
+| selftest.py | 合成 fixture 自检（零样本纪律） |
 
 ### 3.2 分层交付（每个方法声明它到达的层级）
 
@@ -264,6 +286,7 @@ release = 两个平台二进制 + SKILL.md + checksums。**纯文件，无目录
 ```json
 {
   "$schema": "exuvia.goal",
+  "goal_version": 1,
   "targets": [
     { "kind": "method", "class": "com.example.LoginManager", "method": "sign" },
     { "kind": "category", "profile": "network-entrypoints" }
@@ -343,27 +366,29 @@ OS 沙箱按平台分文件实现（单一接口 `run_sandboxed(code, args)`）�
 
 | 参数 / 命令 | 语义 |
 |---|---|
-| `--version` | 版本 + 支持的协议版本 |
+| `--version` | 版本 + 支持的协议版本（skill/handoff/goal/proposal 四锚点） |
 | `--profile <file>` | **覆盖** SKILL fence 内嵌的默认判断（判断外置通道；默认判断长在 SKILL.md 的 profile fence 里） |
 | `--goal <file>` | 格式化目标文件（goal.json，见 4.1）。**自然语言 goal 已被推翻，勿改回** |
 | `--json` | CLI 就是 API（不做 MCP 的代价） |
 | `--resume` | 幂等、可断点续跑 |
 | `exuvia next --goal <file>` | 打包当前最值得外包的卡点工作包（按 goal 相关性建议排序，工具不做终审） |
-| `exuvia schema --dump <name>` | 按需派生机器可读格式（handoff/goal/proposal；无静态 schema 文件） |
-| `exuvia analyze --dex <file>` | 洋葱二次分析：解卡产物回注 → 下一层欠账地图（与 first_pass 协议同构） |
-| `exuvia hunt --carrier <file> --rc4 <hex> [--xor <hex>]` | L2 参数空间搜索：已知算法族 × 未知密文段参数 → 机械命中（hunt.json + hits/；负事实诚实） |
-| `exuvia repair <packed.apk> <dumped.dex> -o <out.apk> [--dump <dex>]... [--reference <dex>]` | **产品线 b**：单命令 dump→可运行 APK 修复管线（SKILL §7）——doctor→clean→deweave→restore→stubsafe→surgery→sign v2；JSON 输出全阶段统计 |
+| `exuvia schema --dump <name>` | 按需派生机器可读格式（handoff/goal/proposal；handoff = report/debt/workpackage/evidence 联合视图；无静态 schema 文件） |
+| `exuvia analyze --dex <file> [--out <dir>]` | 洋葱二次分析：解卡产物回注 → 下一层欠账地图（与 first_pass 协议同构；默认 handoff-2/） |
+| `exuvia hunt --carrier <file> [--rc4 <hex>]... [--xor <hex>]... [--rc4-stride N --rc4-seed A:B --rc4-jbias N] [--out <dir>]` | L2 参数空间搜索：已知算法族 × 未知密文段参数 → 机械命中（hunt.json + hits/；变体 PRGA 参数修饰所有 --rc4 谓词；负事实诚实） |
+| `exuvia repair <packed.apk> <dumped.dex> -o <out.apk> [--dump <dex>]... [--reference <dex>]` | **产品线 b**：单命令 dump→可运行 APK 修复管线（SKILL §7）——doctor→clean→deweave→restore→stubsafe→surgery→zipalign→sign v2；JSON 输出全阶段统计 |
 | `unpack validate <dir>` | 下游自检 handoff |
 | `unpack merge <dir>` | proposal 回流（四层闸门） |
 
-**不存在 `--baseline`**：原包对账是仓库内 CI 工具（`ci/verify/`），不是产品功能。产品面上永远只有加固包这一个输入——用户手里不需要有任何他不该有的东西。（repair 的 `--reference`/`--dump` 是方法体**还原来源**，不是对账基准——来源由用户自愿提供，来源缺失时 StubSafe 契约兜底，产物如实标注统计。）
+`ci/verify/`（workspace member，不进发行物）：`ci-verify register <corpus-dir>` 语料登记 / `ci-verify check <orig.apk> <packed.apk> <handoff-dir>` 原包对账——内部开发指标，比对逻辑公开、样本私有。
+
+**不存在 `--baseline`**：原包对账是仓库内 CI 工具，不是产品功能。产品面上永远只有加固包这一个输入——用户手里不需要有任何他不该有的东西。（repair 的 `--reference`/`--dump` 是方法体**还原来源**，不是对账基准——来源由用户自愿提供，来源缺失时 StubSafe 契约兜底，产物如实标注统计。）
 
 **repair 的启动校验例外**：`exuvia repair` 跳过 SKILL fence 启动校验（`install::check`）——它是独立修复工具，不消费外包循环协议；系统 python3 仍是硬前提（内嵌工具链的运行时）。
 
 **退出码二分语义**：
 
 - `installation-broken`：系统 python3 缺失 / 版本不符 / probe 失败、SKILL.md fence 不可提取或不可解析——**拒绝运行**。自身组件没有"缺席"状态，只有"装坏了"状态；**不存在降级模式**。
-- `unavailable`：jadx / ghidra / qiling 等外部能力缺席——降级标注进 REPORT，相关层级照常标注，不 fail。这个词只属于外部工具。
+- `unavailable`：jadx / ghidra / unicorn 等外部能力缺席——降级标注进 REPORT，相关层级照常标注，不 fail。这个词只属于外部工具。
 - 有 L1 即返回 0（欠账是正常产出不是失败）；只有连 L1 骨架都产不出来才非零。**别用退出码惩罚架构上鼓励的行为。**
 
 **Agent 人体工学**：`--json` 全覆盖、稳定退出码、无 TTY 假设、幂等、机器可读的错误输出（报错是给 Agent 看的）、格式文档与示例随 SKILL.md 分发。
@@ -375,10 +400,12 @@ OS 沙箱按平台分文件实现（单一接口 `run_sandboxed(code, args)`）�
 **第一个 commit 是 spec，不是源码**：
 
 1. **SKILL.md**：30 秒版 → 工作流决策树 → 格式章节与示例（**示例 = CI golden fixture**）→ profile fence（TOML 代码块，info string 为 `toml profile`）→ 族知识 guidance → 版本锚点。SKILL 版本 = 文档内容 + fence 快照的联合版本。
-2. **三条协议**（handoff / goal / proposal）：格式的初始事实源 = SKILL 格式章节，实现期翻译为 serde 类型，此后**双向锚定**——SKILL 示例必须能被 serde 类型解析通过，CI 强制执行。
+2. **三条协议**（handoff / goal / proposal）：格式的初始事实源 = SKILL 格式章节，实现期翻译为 serde 类型，此后**双向锚定**——SKILL 示例必须能被 serde 类型解析通过，CI 强制执行（tests/skill_doc.rs）。
 3. **默认 profile**：就在 SKILL fence 里（判断外置 = fence + `--profile` 覆盖通道）。
 
 **schema 文件不存在（勿新增）**：schema 是视图不是实体——格式的机器事实源是 serde 类型，语义解释在 SKILL 格式章节，`--dump` 按需派生。两份独立描述必然漂移；**文档即测试**（SKILL 示例 = CI fixture）比 schema 文件的单向声明强得多。
+
+**版本锚点三向绑定**：SKILL.md §9 锚点节 ↔ src/version.rs 常量 ↔ `exuvia --version` 输出。**升版纪律：SKILL_VERSION 变更必须同一 commit 修改 version.rs**（1e5b601 漂移致 CI 连红的教训——测试替文档站岗，红得正确）。
 
 ---
 
@@ -435,11 +462,13 @@ OS 沙箱按平台分文件实现（单一接口 `run_sandboxed(code, args)`）�
 | 目标壳从一代壳起步 = 产品定位 | 一代壳 = 协议自检脚手架 | **主攻方向（新代企业壳）与工程第一步（便宜壳打通协议）是两件事**；验收语料直接用真实"原包+加固包"对 |
 | 终点 = 字节级一致（隐含理解） | 行为一致的可运行 APK（§2.1） | 字节只是手段，行为才是验收；recover 是最可靠手段，equivalent 是直接实现；原包字节对账降为 ci/verify 内部指标 |
 | 真机/模拟器为轨道 C 运行时事实的主路径 | 桌面化：L2 参数搜索内置（`exuvia hunt`）+ L3 桌面 mini-loader 候选 | 真机成本高且企业壳反检测使其在主战场不可行；算法与 key 已知时密文段参数是机械可搜的有限空间（判据链自决长度，零猜测） |
-| 装机运行对比为验收线 | 桌面三重验收（结构对账 + DEX 全量可解析 + 语义复原判定） | 摆脱真机依赖；沙箱双锚哲学不变；装机降为用户自愿的可选增强档 |
+| 装机运行对比为验收线 | 桌面三重验收（结构对账 + DEX 全量可解析 + 语义复原判定） | 摆脱真机依赖；沙箱双锚哲学不变；装机降为用户自愿的可选增强档（真机只做最终确认，不做调试器） |
 | 修复管线用 Rust 重写（候选立场之一） | **Rust 壳 + `include_bytes!` 嵌入 Python 工具链** | 12 轮真机验证的 Python 工具链重写 = 引入新 bug 的风险 > 语言统一收益；"不发行 Python"纪律不破（发行物是单二进制，工具链是其内嵌资源） |
 | `--reference` 作为生产还原来源 | **`--reference` 内部测试专用；生产主路径 = `--dump`（第三方 dump/脱壳产物，多来源互补）** | 维护者拍板：生产场景没有原包；第三方 dump 是还原被抽取方法的最大助力（时机对了就携带解密后的方法体） |
 | 无原包时"等义生成一切壳痕迹" | **契约兜底 + 必要残留直接复用** | 第一优先 = 移除壳的保护（hook 织入/签名检测/被抽取方法）；无生命周期契约的 native = lib/*.so 支撑的合法 JNI，无副作用复用即可——**不为等义而等义**（维护者拍板） |
 | 契约等价体 = 完整还原 | **契约体只保证框架契约（可安装/可启动/不崩），不含业务逻辑——白屏边界如实标注** | 无来源时被抽取方法体不在任何可得载体（信息论边界）；伪造业务逻辑比白屏更糟（宁可白屏不可崩） |
+| dex2c 翻译族"无 dump 不可恢复"（初判） | **JNI 语义即行为骨架：模拟执行原生函数记录 JNI 调用序列 → 直线 smali 体重建（jnitrace→trace2smali），全程桌面、无 dump、无参照** | 第二战实证毕业（维护者真机确认 2026-10-21/22）；方法体翻译出包≠信息消失，它活在 .so 的 JNI 边界的调用序列里 |
+| SKILL 版本锚点只靠人工同步 | **SKILL_VERSION 升版必须同一 commit 改 src/version.rs**（CI 锚点测试强制执行） | 1e5b601 只升文档锚点（1.4.0）漏改常量（1.3.0）→ 每次 push 皆红；测试替文档站岗站得对，纪律写死 |
 
 **语义等效还原（通用恢复策略，非四代壳专属）**：每个方法有两条产出路径——`recovered`（还原原始字节）与 `equivalent`（读 L2 反编译的机器码，写出功能等效实现）。路径选择按**成本比较**，判断者是下游 LLM（工具只给难度事实，不做终审）；goal 的 `accepts_equivalent` 字段声明目标是否接受等效销账，proposal 的 `claims[].kind` 路由闸门验证（recovered → 结构断言×字节测试；equivalent → 行为差分）。**差分证明的是覆盖行为上的等价，不是全面等价**——audit trail 只记事实。
 
@@ -448,22 +477,23 @@ OS 沙箱按平台分文件实现（单一接口 `run_sandboxed(code, args)`）�
 ## 9. 范围边界（诚实清单，勿过度承诺）
 
 静态/模拟**解决不了**的（进 debt 清单，标注 out-of-scope / 需轨道C）：
-- key 从设备环境派生（IMEI、build fingerprint——模拟可伪造枚举但组合爆炸）
+- key 从设备环境派生（IMEI、build fingerprint——模拟可伪造枚举但组合爆炸；第一战容器 key 即此类运行时构造的实证案例）
 - 网络拉取的 payload
 - 流式拼装的 DEX
 - VMP 的完整语义还原（轨道 C 定点动态 + L3"等价语义"范畴）
 
-**四代壳（VMP/dex2c）处理原则**：原始字节码从不存在于内存，dump 原理上无解。"汇编分析还原同等功能"不是退而求其次，是换了一个正确的问题定义：交付物从"原始字节"变成"等价语义"（.NET 的 OldRod 反虚拟化是先例）。残留物是机器翻译的汇编，有固定习语（JNI 边界调用、寄存器约定、模板化控制流）——精度可以很高，且"同等功能"对分析场景是低标准（要的是 API 序列和逻辑，不是指令级一致）。
+**四代壳处理原则**：原始字节码从不存在于内存，dump 原理上无解。两个亚型分别已有出路——**dex2c 翻译亚型**：方法体以 JNI C++ 形态活在壳 .so 里，JNI 调用序列 = 行为骨架，桌面模拟执行即可重建直线 smali 体（jnitrace→trace2smali，第二战毕业，SKILL §8 族 2）；**VMP 亚型**："汇编分析还原同等功能"不是退而求其次，是换了一个正确的问题定义——交付物从"原始字节"变成"等价语义"（.NET 的 OldRod 反虚拟化是先例）。残留物是机器翻译的汇编，有固定习语（JNI 边界调用、寄存器约定、模板化控制流）——精度可以很高，且"同等功能"对分析场景是低标准（要的是 API 序列和逻辑，不是指令级一致）。
 
 ---
 
 ## 10. Roadmap（工程顺序）
 
-- **v0.1**：一代壳脚手架打通全协议（next / merge / resume / validate）+ 闸门沙箱（双平台）+ `ci/verify` 原包对账 + 语料生成脚本
-- **已落地（v0.1 内追加）**：洋葱二次分析（`analyze --dex`）、轨道 C 桌面化第一级（`hunt` L2 参数空间搜索器）
-- **已落地（修复战役 + 产品化，2026-10）**：修复工具链（trackb/ 十件套：doctor/clean/deweave/axmltool/repair/sign2/sigx/sm4recon/verify_all/repair_all）+ 五重验收门 + `exuvia repair` 子命令（SKILL §7，--dump 多来源/StubSafe 契约兜底）——**12 轮真机反馈闭环，v12 双产物真机成功**
-- **其后**：轨道 B 工程化（qiling 适配 JNI 环境）、轨道 C 桌面化第二级（L3 桌面 mini-loader：Unicorn 模拟 linker + JNIEnv 桩）、L2/L3 主交付物化、多 Android 版本适配、evasion、指纹 diff 工具化、更多壳样本回归（修复管线的零样本泛化）、容器解密（低优先级增强）
-- **永久不做**：MCP（社区 contrib）、经验传递机制（哲学级取消）、指纹库自动增长（显式配置 only）、`--baseline` 产品接口、真机/模拟器依赖（桌面化拍板，2026-10）
+- **v0.1**：一代壳脚手架打通全协议（next / merge / resume / validate）+ 闸门沙箱（双平台）+ `ci/verify` 原包对账 + 语料生成脚本 ✅
+- **已落地（v0.1 内追加）**：洋葱二次分析（`analyze --dex`）、轨道 C 桌面化第一级（`hunt` L2 参数空间搜索器，含变体 RC4 参数）
+- **已落地（修复战役 + 产品化，2026-10）**：修复工具链（trackb/ 内嵌七件：repair_all/dexdoctor/dexclean/deweave/repair/axmltool/sign2）+ 五重验收门 + `exuvia repair` 子命令（SKILL §7，--dump 多来源 / StubSafe 契约兜底）——**12 轮真机反馈闭环，v12 双产物真机成功**
+- **已落地（第二战 dex2c，2026-10）**：dex2c 翻译族全链桌面工具链——dexcontainer（尾容器重建）/ jnitrace（--init/--seed-dex/--arms）/ so_emulator emutls TLS 物化 / trace2smali（--sigs-dex，ART 校验三规则）/ verify_all V4 多 dex 并集；闭环 APK 真机确认；SKILL §8 族 2 入册
+- **其后**：轨道 B 工程化（qiling 适配 JNI 环境）、轨道 C 桌面化第二级（L3 桌面 mini-loader：Unicorn 模拟 linker + JNIEnv 桩）、L2/L3 主交付物化、多 Android 版本适配、evasion、指纹 diff 工具化、更多壳样本回归（修复管线的零样本泛化）、dex2c 多路径枚举增强（--arms 递归化）、容器解密（低优先级增强）
+- **永久不做**：MCP（社区 contrib）、经验传递机制（哲学级取消）、指纹库自动增长（显式配置 only）、`--baseline` 产品接口、真机/模拟器进验收链（桌面化拍板，2026-10——真机只做最终确认）
 
 ---
 
@@ -483,16 +513,23 @@ OS 沙箱按平台分文件实现（单一接口 `run_sandboxed(code, args)`）�
 | installation-broken / unavailable | 自身组件损坏（拒绝运行）/ 外部能力缺席（降级标注）——严格二分 |
 | 卡点外包 | 把智能缺口压缩成工作包交给外部 LLM 的循环模式；全流程唯一烧 token 处 |
 | 语义等效还原 | 产出路径 `equivalent`：读机器码写功能等效实现，按成本比较选择；差分验证覆盖行为等价 |
-| 行为一致 | 旧终点标准（装机运行对比）→ 2026-10 桌面化修订为桌面三重验收（§2.1）；装机降为可选增强档 |
+| 桌面三重验收 | 终点标准（§2.1）：结构对账 + DEX 全量可解析 + 语义复原判定；装机降为可选增强档 |
 | hunt / L2 参数空间搜索 | `exuvia hunt`：已知算法族（rc4/xor）+ key × 未知密文段参数 → 全空间机械搜索；判据链（zlib magic → inflate → DEX magic → 全表 parse）自决段长；命中 = 机械事实（不销账），负事实按谓词诚实落盘 |
 | repack | 终点合成阶段：方法体 → DEX → 重组 → 自签 → 可运行 APK；四组件按三次法则生长（dexlib2 DexPool 标准布局重序列化已落地为 stubsafe/restore 阶段的序列化器） |
-| repair / 修复管线 | 产品线 b（SKILL §7）：`exuvia repair` 单命令 dump→可运行 APK——doctor→clean→deweave→restore→stubsafe→surgery→sign |
-| 方法体来源 | 被壳抽取方法的还原载体：--dump（第三方 dump，生产主路径，多来源互补）/ --reference（原包，内部测试专用）/ StubSafe 契约兜底 |
+| repair / 修复管线 | 产品线 b（SKILL §7）：`exuvia repair` 单命令 dump→可运行 APK——doctor→clean→deweave→restore→stubsafe→surgery→zipalign→sign |
+| 方法体来源 | 被壳抽取方法的还原载体：--dump（第三方 dump，生产主路径，多来源互补）/ --reference（原包，内部测试专用）/ StubSafe 契约兜底 / dex2c 源（JNI trace → smali） |
 | StubSafe | 无来源时的兜底等义生成器（tools/dexlib/StubSafe.java）：native+框架生命周期名 = 壳抽取铁证 → 合成 invoke-super 契约体并清 native 位；其余 native 保留（合法 JNI 复用）；兼作最终 DexPool 标准布局重序列化 |
-| 五重验收门 | verify_all.py：V1 zip / V2 病理 / V3 严格反编译 / V4 内容幂等 / V5 签名——ALL GREEN 才 ship |
+| 五重验收门 | trackb/verify_all.py：V1 zip / V2 病理 P0–P11 / V3 dexlib2 严格反编译 / V4 内容残留·多 dex 并集 / V5 apksigtool 验签——ALL GREEN 才 ship |
+| dex2c 翻译族 | 四代壳亚型：方法体被翻译为 JNI C++（常加 OLLVM 平坦化），原 Dalvik 不在包内；恢复 = JNI 语义 trace → smali 合成（第二战毕业，SKILL §8 族 2） |
+| jnitrace / trace2smali | dex2c 恢复前后半：fake-Emulator JNI 调用序列追踪器（--init/--seed-dex/--arms）/ trace→smali 编译器（--sigs/--sigs-dex） |
+| --seed-dex / --arms | jnitrace 自动化：`--seed-dex` 从任意 dump 扫描 clinit sput-object 目标并预置非空（设备真相，可推导）；`--arms`/`--arms-max` 枚举 token 空值守卫（CBZ/CBNZ——设备上环境相关的 JNI 结果）并对每个守卫产出一条强制翻臂 trace（单翻 v1，不递归） |
+| emutls 契约仿真 | so_emulator 对 `__emutls_get_address`/`__cxa_thread_atexit` 的契约级模拟：TLS 编码字符串离线物化，不再依赖设备 |
+| dexcontainer | 尾容器 dex 重建器（profile 驱动；per-dex sha1+adler oracle，不可能假阳性） |
+| fidelity | dump 与参照的保真报告（L0–L5；内部校准度量） |
+| task.json 协议 | trackb/protocol.md v1.0：unpacker ↔ repairer ↔ agent 的交换格式；pending_decisions 由 agent 填答后续跑（exuvia_repair.py 为入口） |
 | 零学习曲线 | 不依赖历史积累，性能从第一次即峰值 |
 | 结构三次法则 | 新文件/目录/发行物需"同一需要出现三次"的实证 |
-| 躯体 / 灵魂 / 接口 | 二进制（含内嵌 runner）/ SKILL.md 单文件 / 三条协议数据流 |
+| 躯体 / 灵魂 / 接口 | 二进制（含内嵌 runner 与修复工具链）/ SKILL.md 单文件 / 三条协议数据流 |
 | 轨道 A/B/C | 静态 / 模拟执行 / 定点动态 |
 | L1/L2/L3 | 骨架 DEX / 伪代码还原 / 可重编译源码 |
 | 技术族命名 | 按加固技术特征（而非厂商）命名指纹与 SOP |
@@ -507,5 +544,7 @@ OS 沙箱按平台分文件实现（单一接口 `run_sandboxed(code, args)`）�
 3. **想加东西时**：参数过三次法则；**结构也过三次法则**（新文件/目录/发行物）；先问"这是不是接口或灵魂的变更"——是的话先改 SKILL.md 再写代码。
 4. **想"优化"时**：对照第 7 节 ⚠️ 条目。如果你觉得某条原则"明显更好"，大概率它已经在第 8 节被推翻过一次。
 5. **涉及 Python 时**：不发行（发行物是单二进制）、不判定（"通过"只有 Rust 有资格说）。两类内嵌 Python 语义不同：merge 闸门的沙箱 runner = stdin 喂入 `python3 -I` **零落盘**；修复管线的工具链 = `include_bytes!` 内嵌、运行时提取到 `<temp>/exuvia-repair/<hash>/`（幂等）——两者的共同点是不随发行物携带任何 Python 发行物。
-6. **修改本文档**：可以补充事实和进度；修改原则/决策日志需要人类维护者确认。
-7. **交付给下一个 Agent 时**：更新本文档的"当前状态"，像 debt.json 一样诚实记录你做了什么、什么没做完、为什么。
+6. **改 SKILL.md 时**：fixture 与版本锚点是活契约（tests/skill_doc.rs 三向锚定）——改示例先想 serde 类型，**升 SKILL_VERSION 必须同一 commit 改 src/version.rs**（漂移 = 每次 push 皆红，1e5b601 实证）。
+7. **跨环境交付文件时**：二进制交付物（dump/产物/补丁附件）一律 tar.gz + SHA256SUMS——文本化管道会把 ≥0x80 字节污染为 U+FFFD（根因 #1，一次签名层冤案的教训）。
+8. **修改本文档**：可以补充事实和进度；修改原则/决策日志需要人类维护者确认。
+9. **交付给下一个 Agent 时**：更新本文档的"当前状态"，像 debt.json 一样诚实记录你做了什么、什么没做完、为什么。

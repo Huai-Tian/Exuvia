@@ -1,5 +1,5 @@
 //! SKILL.md profile fence 提取器。
-//! 锚点语义（SKILL.md §7）：info string 精确等于 `toml profile` 的 fenced block；
+//! 锚点语义（SKILL.md §8）：info string 精确等于 `toml profile` 的 fenced block；
 //! 提取不到或 TOML 语法错误 = installation-broken。
 
 #[derive(Debug)]
