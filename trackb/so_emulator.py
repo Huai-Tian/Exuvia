@@ -51,6 +51,16 @@ except ImportError:
 PAGE = 0x1000
 STACK, STACKSZ = 0x7F0000000000, 0x400000
 HEAP, HEAPSZ = 0x500000000000, 0x8000000
+
+# libc emulations that must win even over symbols the so DEFINES itself
+# (checked at both GOT-binding loops): their real code depends on
+# pthread-key/TCB machinery the fake thread layer no-ops, so running it
+# diverges — compiler-rt __emutls_get_address re-calloc's its control
+# array on every call (pthread_setspecific is a no-op), per-var blocks
+# never persist, and the whole thread_local class (TLS-guarded decoded
+# strings) never materializes. The emulations implement the contract
+# directly instead.
+LIBC_FORCE = frozenset({'__emutls_get_address', '__cxa_thread_atexit'})
 TLS = 0x510000000000
 STUB = 0x600000000000
 STUBSZ = 0x10000
@@ -280,6 +290,25 @@ def make_libc(uc, elf):
 
     def f_errno(x0, x1, x2, x3, x4=0, x5=0):
         return TLS + 0x80
+
+    # __emutls_get_address: one zeroed block per emutls object, cached by
+    # object address (object header = {size, align}). Device semantics are
+    # calloc-backed per-thread storage; the fake world's bump heap is
+    # zero-fresh and never reused, so a plain dict gives exactly the same
+    # observable behavior — including the guard byte a thread_local string
+    # resolver flips after first initialization.
+    emutls_vars = {}
+
+    def f_emutls_get_address(x0, x1, x2, x3, x4=0, x5=0):
+        p = emutls_vars.get(x0)
+        if p is None:
+            try:
+                size = struct.unpack('<Q', rd(x0, 8))[0]
+            except Exception:
+                size = 0
+            p = bump(min(max(size, 1), 0x100000))
+            emutls_vars[x0] = p
+        return p
 
     # File-system bridge (Battle-1 r7-8): verification chains fopen() their own APK.
     fs_map = FS_MAP[0]
@@ -567,6 +596,7 @@ def make_libc(uc, elf):
             # table; fbase+0 IS the cipher). Emulator mapping base = 0.
             wr(x1, struct.pack('<QQQQ', 0, 0, 0, x0)), 1)[1],
         'dlerror': f_noop, '__errno': f_errno, 'sysconf': lambda x0, x1, x2, x3, x4=0, x5=0: 4096,
+        '__emutls_get_address': f_emutls_get_address, '__cxa_thread_atexit': f_noop,
         'dlopen': f_dlopen, 'dlsym': f_dlsym, 'dlclose': f_noop,
         'inflate': f_inflate, 'inflateInit_': f_inflateInit_, 'inflateEnd': f_inflateEnd,
         'fopen': f_fopen, 'fread': f_fread, 'fclose': f_fclose,
@@ -671,8 +701,11 @@ def main():
             # to callable stubs — silently returning 0 instead of dispatching real
             # code. Bind them to their own VA. Decoys (shndx == 0 with a data
             # address painted on) are imports — keep libc stub semantics.
+            # Exception: LIBC_FORCE names lose even to self-defined code —
+            # their real bodies need pthread-key machinery the fake thread
+            # layer no-ops (see the constant).
             shndx, val = sym_def(symidx)
-            if shndx and val:
+            if shndx and val and name not in LIBC_FORCE:
                 uc.mem_write(r_offset, struct.pack('<Q', val))
                 continue
             sa = STUB + 8 * i

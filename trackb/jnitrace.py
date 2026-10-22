@@ -410,7 +410,10 @@ def trace_function(so_path, fn, label='', this_desc='this', max_insn=2000000, ru
             name = elf.str_at(strtab_off, struct.unpack_from('<I', data, symtab_off + symidx * 24)[0])
             b = symtab_off + symidx * 24
             shndx, val = struct.unpack_from('<H', data, b + 6)[0], struct.unpack_from('<Q', data, b + 8)[0]
-            if shndx and val:  # self-defined symbols run their real code
+            # self-defined symbols run their real code, except LIBC_FORCE
+            # names whose real bodies need pthread-key machinery the fake
+            # thread layer no-ops (TLS class never stabilizes otherwise)
+            if shndx and val and name not in emu_base.LIBC_FORCE:
                 uc.mem_write(r_offset, struct.pack('<Q', val))
                 continue
             sa = STUB + 8 * i
