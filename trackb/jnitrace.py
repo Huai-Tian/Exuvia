@@ -134,6 +134,7 @@ class Tracer:
         self.trace = []
         self.sent_ctr = 0x51E00000   # sentinel base for primitive JNI results
         self.sent = {}               # sentinel -> producer description
+        self.sstatic = {}            # static-object field key -> written token
 
     def sentinel(self, producer):
         """Numeric JNI results (Get*Field/CallInt/...) must be UNIQUE tokens:
@@ -322,12 +323,32 @@ def trace_function(so_path, fn, label='', this_desc='this', max_insn=2000000, ru
                 val = hex(x3)
             argd = f' {tr.desc(x2)} = {val}'
             ret = 0
-        elif 145 <= idx <= 154:  # GetStatic*Field
+        elif 145 <= idx <= 153:  # GetStatic*Field (144 = GetStaticFieldID)
             argd = f' {tr.desc(x2)}'
-            ret = (tr.sentinel('sfield:' + tr.desc(x2)) if idx != 145
-                   else tr.tok('sfield:' + tr.desc(x2)))
-        elif 155 <= idx <= 163:  # SetStatic*Field
-            val = tr.sent.get(x3, tr.desc(x3)) if idx == 155 else tr.sent.get(x3, hex(x3))
+            if idx == 145:
+                # Fake-world TRUTH for static OBJECT fields: a field never
+                # written in this run IS null. Returning a non-null token here
+                # (old policy) makes every translated null-guard read false,
+                # so null-guarded lazy-init branches are silently amputated
+                # from the trace (device-verified root cause: er.c Lhr; read
+                # non-null in trace, null on device -> NPE). Post-write reads
+                # return the written token, keeping dataflow linked.
+                ret = tr.sstatic.get(tr.desc(x2), 0)
+            else:
+                ret = tr.sentinel('sfield:' + tr.desc(x2))
+        elif 154 <= idx <= 162:  # SetStatic*Field (154 = SetStaticObjectField;
+            # the previous 155..163 range was off by one — 154 fell into the
+            # GetStatic branch above, so static-object WRITES were never seen
+            # as writes, and 163 (NewString) was misrouted here)
+            if idx == 154:
+                tr.sstatic[tr.desc(x2)] = x3  # record the write for later reads
+                # print the value hex-prefixed like the instance setter does,
+                # so trace2smali's value regex (hex[=desc]) resolves it
+                val = f'{hex(x3)}={tr.sent.get(x3, tr.desc(x3))}' if x3 else '0'
+            else:
+                # sentinel values print hex=desc (same contract as above and
+                # as the instance setter) so the downstream regex sees them
+                val = f'{hex(x3)}={tr.sent[x3]}' if x3 in tr.sent else hex(x3)
             argd = f' {tr.desc(x2)} = {val}'
             ret = 0
         elif idx == 4:

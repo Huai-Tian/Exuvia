@@ -173,6 +173,8 @@ def synth(trace_path, mname, msig, super_cls, cls=None):
     notes = []
     this_addr = None
     alloc_ty = {}    # ret-addr -> class type (AllocObject awaiting <init>)
+    ns_ctr = [0]         # null-static-read counter (fresh register keys)
+    nullstatic = [None]  # (vreg, field type) of the last null static read
 
     def preg(k):
         return f'p{k}'
@@ -188,6 +190,16 @@ def synth(trace_path, mname, msig, super_cls, cls=None):
     def emit_value(tok, ty, argaddr=None):
         """tok: an args[] element — number / null / token-desc. Returns reg label."""
         if tok in ('null', '0', '0x0'):
+            # A static object field the tracer never saw written reads back
+            # null in the trace; downstream uses of that value ALSO print as
+            # null. Rebind them to the field's sget register — but only when
+            # the parameter type matches the field type exactly (obfuscated
+            # dexes pass the field itself). The type gate is what tells this
+            # zero from a genuine null literal, and it keeps the verifier
+            # safe by construction (a bound register always satisfies the
+            # parameter type).
+            if nullstatic[0] and ty.startswith(('L', '[')) and nullstatic[0][1] == ty:
+                return f'v{nullstatic[0][0]}'
             key = 'zero:' + ('Z' if ty == 'Z' else 'o')
             r = rf.get(key)
             if r is None:
@@ -316,7 +328,20 @@ def synth(trace_path, mname, msig, super_cls, cls=None):
             if not ref:
                 continue
             owner, fname, fsig = ref
-            r = vreg_of(retaddr, fsig)
+            if retaddr in ('0', '0x0'):
+                # Null in the fake world (static object field never written in
+                # this run). Keep the sget — it carries the class-init side
+                # effect and yields the register that type-matched downstream
+                # nulls rebind to. A FRESH key is mandatory: the shared 'a0'
+                # key would alias every null static read to one register and
+                # silently drop later sgets.
+                ns_ctr[0] += 1
+                r = rf.alloc('ns%d' % ns_ctr[0], fsig)
+                nullstatic[0] = (r, fsig) if fsig.startswith(('L', '[')) else None
+                notes.append(f'static field {owner}->{fname}:{fsig} null in trace '
+                             f'(never written in run) — sget kept, type-gated binding armed')
+            else:
+                r = vreg_of(retaddr, fsig)
             op = 'sget-object' if fsig.startswith(('L', '[')) else 'sget'
             body.append(f'    {op} v{r}, {owner}->{fname}:{fsig}')
             continue
@@ -329,6 +354,26 @@ def synth(trace_path, mname, msig, super_cls, cls=None):
             r = vreg_of(retaddr, fsig)
             op = 'iget-object' if fsig.startswith(('L', '[')) else 'iget'
             emit_iget(op, r, reg_label(x1), f'{owner}->{fname}:{fsig}', fsig)
+            continue
+
+        if name.startswith('SetStatic') and 'Field' in name:
+            # Static writes have NO object register — the instance iput path
+            # would burn the class token as the object. sput is 22c: one
+            # 4-bit value register + 16-bit field ref, so the value goes
+            # through the v0 scratch slot like iget/iput operands do.
+            vm = re.search(r'\s=\s(0x[0-9a-f]+|\d+)(?:=\S*)?\s*$', midtxt)
+            val = vm.group(1) if vm else '0'
+            reftok2 = midtxt[:vm.start()] if vm else reftok
+            ref = parse_ref(reftok2.strip())
+            if not ref:
+                continue
+            owner, fname, fsig = ref
+            rv = emit_value(val, fsig)
+            op = ('sput-object' if fsig.startswith(('L', '['))
+                  else 'sput-boolean' if fsig == 'Z' else 'sput')
+            mv = 'move-object/from16' if fsig.startswith(('L', '[')) else 'move/from16'
+            body.append(f'    {mv} v0, {rv}')
+            body.append(f'    {op} v0, {owner}->{fname}:{fsig}')
             continue
 
         if name.startswith('Set') and 'Field' in name:
