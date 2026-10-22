@@ -17,6 +17,7 @@ argument, the JNIEnv world follows the JNI 1.6 spec (233-slot table).
 Usage:
   python3 jnitrace.py shell.so --fn 0x98408 --label onCreate
   python3 jnitrace.py shell.so --fn 0x98408 --fn 0x9bae0 --out traces/
+  python3 jnitrace.py shell.so --fn 0x98408 --seed-dex dump.dex   # clinit seed
 
 Exit codes: 0 = trace captured; 2 = unicorn missing; 3 = ELF parse error.
 """
@@ -208,7 +209,170 @@ class Tracer:
         return ', '.join(vals)
 
 
-def trace_function(so_path, fn, label='', this_desc='this', max_insn=2000000, run_init=False):
+# --- clinit static-object-field seed scan (--seed-dex) ----------------------
+#
+# The fake-world null policy for static OBJECT fields ("never written in this
+# run -> null") is the device truth for method-lazy fields (er.c) but LIES
+# for fields the class's own <clinit> initializes: clinit has already run by
+# the time any traced method executes, so those reads are non-null on device
+# (device-verified inverse-amputation: zg.a LayoutParams, clinit-written,
+# read null in trace -> the translated guard steered off the device path).
+# The seed set is DERIVABLE FROM ANY DUMP DEX — no operator knowledge: scan
+# every <clinit> for sput-object targets and pre-seed them. Fields a method
+# writes in-run still override the seed via the normal write path.
+
+_SEED_TOKEN_BASE = 0x5000000000F0  # below the tracer heap/token start
+
+
+def _uleb(d, p):
+    r = s = 0
+    while True:
+        b = d[p]
+        p += 1
+        r |= (b & 0x7F) << s
+        if not b & 0x80:
+            return r, p
+        s += 7
+
+
+def scan_clinit_object_seeds(dex):
+    """dex bytes -> {seed_key: token} for every static object field any
+    <clinit> writes via sput-object. Seed key matches the tracer's field
+    descriptor form 'sfid:class:OWNER->NAMESIG' (both the 'zg' and 'Lzg;'
+    owner spellings are registered — translators vary)."""
+    import struct as _s
+    if dex[:4] != b'dex\n':
+        return {}
+    ssz, soff = _s.unpack_from('<II', dex, 0x38)
+    tsz, toff = _s.unpack_from('<II', dex, 0x40)
+    fsz, foff = _s.unpack_from('<II', dex, 0x50)
+    msz, moff = _s.unpack_from('<II', dex, 0x58)
+    csz, coff = _s.unpack_from('<II', dex, 0x60)
+
+    def string(i):
+        o = _s.unpack_from('<I', dex, soff + i * 4)[0]
+        _, p = _uleb(dex, o)
+        e = dex.index(b'\x00', p)
+        return dex[p:e].decode('utf-8', 'replace')
+
+    def tname(i):
+        return string(_s.unpack_from('<I', dex, toff + i * 4)[0])
+
+    # Dalvik opcode -> length in 16-bit units (formats with variable payloads
+    # handled in the walk). Only exactness matters; unknown -> abort method.
+    LEN = {}
+    for op in range(0x100):
+        LEN[op] = 1
+    for op in (0x02, 0x05, 0x08, 0x13, 0x15, 0x16, 0x19, 0x1A, 0x1F, 0x20,
+               0x22, 0x23, 0x29, 0xFE, 0xFF):
+        LEN[op] = 2
+    for op in range(0x2D, 0x3E):
+        LEN[op] = 2
+    for op in range(0x44, 0x60):
+        LEN[op] = 2
+    for op in range(0x60, 0x6E):
+        LEN[op] = 2
+    for op in range(0x90, 0xB0):
+        LEN[op] = 2
+    for op in range(0xD0, 0xE3):
+        LEN[op] = 2
+    for op in (0x03, 0x06, 0x09, 0x14, 0x17, 0x1B, 0x24, 0x25, 0x26, 0x2A,
+               0x2B, 0x2C, 0xFC, 0xFD):
+        LEN[op] = 3
+    for op in range(0x6E, 0x73):
+        LEN[op] = 3
+    for op in range(0x74, 0x79):
+        LEN[op] = 3
+    LEN[0x18] = 5
+    LEN[0xFA] = LEN[0xFB] = 4
+
+    seeds = {}
+    for ci in range(csz):
+        off = coff + ci * 32
+        cdata = _s.unpack_from('<I', dex, off + 24)[0]
+        if not cdata:
+            continue
+        p = cdata
+        nsf, p = _uleb(dex, p)
+        nif, p = _uleb(dex, p)
+        ndm, p = _uleb(dex, p)
+        nvm, p = _uleb(dex, p)
+        for _ in range(nsf + nif):
+            _, p = _uleb(dex, p)
+            _, p = _uleb(dex, p)
+        # direct_methods and virtual_methods are separate sorted lists; each
+        # restarts with an ABSOLUTE method_idx diff (no cross-list chaining).
+        for nm_ in (ndm, nvm):
+            midx = 0
+            for _ in range(nm_):
+                d_, p = _uleb(dex, p)
+                midx += d_
+                _fl, p = _uleb(dex, p)
+                code_off, p = _uleb(dex, p)
+                if midx >= msz:
+                    break  # anomalous class in the dump — abandon it, keep scanning
+                name_i = _s.unpack_from('<I', dex, moff + midx * 8 + 4)[0]
+                if (string(name_i) != '<clinit>' or not code_off
+                        or code_off + 16 > len(dex)):
+                    continue
+                insns_size = _s.unpack_from('<I', dex, code_off + 12)[0]
+                if insns_size > (len(dex) - code_off - 16) // 2:
+                    continue
+                base = code_off + 16
+                pos = 0
+                while pos < insns_size:
+                    unit = _s.unpack_from('<H', dex, base + pos * 2)[0]
+                    op = unit & 0xFF
+                    if op == 0 and unit == 0 and pos + 1 < insns_size:
+                        sig = _s.unpack_from('<H', dex, base + (pos + 1) * 2)[0]
+                        if sig == 0x0100:  # packed-switch payload
+                            size = _s.unpack_from('<H', dex, base + (pos + 2) * 2)[0]
+                            pos += 4 + size * 2
+                            continue
+                        if sig == 0x0200:  # sparse-switch payload
+                            size = _s.unpack_from('<H', dex, base + (pos + 2) * 2)[0]
+                            pos += 2 + size * 4
+                            continue
+                        if sig == 0x0300:  # fill-array-data payload
+                            w = _s.unpack_from('<H', dex, base + (pos + 2) * 2)[0]
+                            size = _s.unpack_from('<I', dex, base + (pos + 4) * 2)[0]
+                            pos += 4 + (w * size + 1) // 2
+                            continue
+                    if op == 0x69 and pos + 1 < insns_size:  # sput-object (21c)
+                        fi = _s.unpack_from('<H', dex, base + (pos + 1) * 2)[0]
+                        if fi < fsz:
+                            cidx, tidx, nidx = _s.unpack_from('<HHI', dex, foff + fi * 8)
+                            owner, sig_s, name = tname(cidx), tname(tidx), string(nidx)
+                            if sig_s.startswith(('L', '[')):
+                                body = 'sfid:class:%s->%s%s' % (owner.strip('L;'), name, sig_s)
+                                seeds.setdefault(body, None)
+                                seeds.setdefault('sfid:class:%s->%s%s' % (owner, name, sig_s), None)
+                        pos += 2
+                        continue
+                    step = LEN.get(op)
+                    if step is None:
+                        break  # unknown opcode — abandon this clinit, keep the rest
+                    pos += step
+    return assign_seed_tokens(seeds)
+
+
+def assign_seed_tokens(keys):
+    """Field-key iterable -> {key: token}. Both owner spellings of the same
+    field share one token; tokens never alias across fields, so merging the
+    key sets of several --seed-dex scans is safe (re-run this on the union)."""
+    out = {}
+    canon = {}
+    for k in sorted(keys):
+        head, _, rest = k.partition('->')
+        c = (head[len('sfid:class:'):].strip('L;'), rest)
+        if c not in canon:
+            canon[c] = _SEED_TOKEN_BASE + len(canon) * 0x10
+        out[k] = canon[c]
+    return out
+
+
+def trace_function(so_path, fn, label='', this_desc='this', max_insn=2000000, run_init=False,
+                   seeds=None):
     data = open(so_path, 'rb').read()
     elf = emu_base.Elf(data)
     uc = Uc(UC_ARCH_ARM64, UC_MODE_LITTLE_ENDIAN)
@@ -246,6 +410,15 @@ def trace_function(so_path, fn, label='', this_desc='this', max_insn=2000000, ru
             uc.mem_write(r_offset, struct.pack('<Q', addend))
 
     tr = Tracer(uc)
+    if seeds:
+        # clinit-initialized static object fields are non-null on device by
+        # the time any method runs (see scan_clinit_object_seeds); in-run
+        # writes still override via the normal SetStaticObjectField path
+        tr.sstatic.update(seeds)
+        # keep tok() from re-issuing a seed token to an unrelated object
+        hi = max(seeds.values()) - HEAP + 0x10
+        if hi > tr.next_tok:
+            tr.next_tok = hi
     env = JNIF + 0x2000
     uc.mem_write(env, struct.pack('<Q', JNIF))
     for slot in range(240):
@@ -458,10 +631,28 @@ def main():
     ap.add_argument('--this', default='this', help='label for the x1 jobject (e.g. Lcom/app/MainActivity;)')
     ap.add_argument('--out', help='directory for per-function trace files (default: stdout)')
     ap.add_argument('--init', action='store_true', help='run DT_INIT_ARRAY + JNI_OnLoad first (runtime-built strings/globals)')
+    ap.add_argument('--seed-dex', action='append', default=[], metavar='DEX',
+                    help='dump dex to scan for clinit-initialized static object '
+                    'fields (<clinit> sput-object targets) and pre-seed them '
+                    'non-null in the fake world — the device truth for such '
+                    'fields, derivable from any dump; repeatable')
     args = ap.parse_args()
+    seed_keys = set()
+    for dex_path in args.seed_dex:
+        got = scan_clinit_object_seeds(open(dex_path, 'rb').read())
+        seed_keys.update(got)
+        print('[seed-dex] %s: %d clinit-initialized static object field(s)'
+              % (dex_path, len(set(got.values()))), file=sys.stderr)
+    # tokenize the UNION (per-dex scans each start at the token base —
+    # merging their dicts directly would alias tokens across dexes)
+    seeds = assign_seed_tokens(seed_keys)
+    if args.seed_dex:
+        print('[seed-dex] total: %d field(s) pre-seeded'
+              % len(set(seeds.values())), file=sys.stderr)
     for k, f in enumerate(args.fn):
         label = args.label[k] if k < len(args.label) else f
-        text = trace_function(args.so, int(f, 16), label, args.this, run_init=args.init)
+        text = trace_function(args.so, int(f, 16), label, args.this, run_init=args.init,
+                              seeds=seeds or None)
         if args.out:
             os.makedirs(args.out, exist_ok=True)
             with open(os.path.join(args.out, f'trace_{label or f}.txt'), 'w') as fh:
