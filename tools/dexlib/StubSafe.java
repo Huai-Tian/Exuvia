@@ -14,6 +14,9 @@ import org.jf.dexlib2.iface.ClassDef;
 import org.jf.dexlib2.iface.Method;
 import org.jf.dexlib2.iface.MethodImplementation;
 import org.jf.dexlib2.iface.MethodParameter;
+import org.jf.dexlib2.iface.instruction.Instruction;
+import org.jf.dexlib2.iface.instruction.NarrowLiteralInstruction;
+import org.jf.dexlib2.iface.instruction.WideLiteralInstruction;
 import org.jf.dexlib2.iface.reference.MethodReference;
 import org.jf.dexlib2.immutable.ImmutableClassDef;
 import org.jf.dexlib2.immutable.ImmutableMethod;
@@ -34,14 +37,21 @@ import org.jf.dexlib2.writer.pool.DexPool;
  * A packer's method extraction freezes app methods as `native + no code_item`
  * (the shell served the body from its runtime hook). Once the shell is gone
  * that stub is a LETHAL leftover: the JNI hook no longer exists, so the call
- * dies with UnsatisfiedLinkError. Restore.java merges bodies back when a
- * reference/source DEX carries them; StubSafe handles what NO source has:
+ * dies with UnsatisfiedLinkError. The extraction+nop-fill family (爱加密-style)
+ * leaves the twin lethal leftover: a LEGAL code_item whose body is a nop wall
+ * (nops + zero-literal consts + return only). Such a method verifies and
+ * runs — and does NOTHING, which for a framework lifecycle override means the
+ * mandatory super call never happens (SuperNotCalledException at launch).
+ * Restore.java merges bodies back when a reference/source DEX carries them;
+ * StubSafe handles what NO source has:
  *
  *   FRAMEWORK-LIFECYCLE CONTRACT (the strong tell): an Activity/Application/
  *   Service/Fragment lifecycle override is NEVER a legal native method — the
  *   framework template-method contract requires the super chain. native +
- *   lifecycle name == shell-extracted, with near certainty. For those we
- *   synthesize the contract-equivalent minimal body:
+ *   lifecycle name == shell-extracted, with near certainty; a nop wall under
+ *   a lifecycle name ON A FRAMEWORK-CARRIER CLASS is the same tell in the
+ *   nop-fill family. For those we synthesize the contract-equivalent minimal
+ *   body:
  *
  *     invoke-super {p0..pN}, Super.sameSignature   +  return(-void)
  *
@@ -56,6 +66,10 @@ import org.jf.dexlib2.writer.pool.DexPool;
  *   (e.g. androidx PathIterator natives backed by lib/*.so in the APK) is
  *   a necessary, side-effect-free leftover we deliberately reuse instead
  *   of synthesizing fake bodies ("not equivalence for equivalence's sake").
+ *   Non-lifecycle nop walls are likewise KEPT: the wall already verifies as
+ *   a no-op, so synthesizing a default-return body would change nothing —
+ *   Restore (with a dump) is their only real cure, and the residue is
+ *   harmless until then.
  *
  * Either way the whole DEX is re-serialized through DexPool (standard
  * smali-ecosystem layout), so StubSafe doubles as the final repack.
@@ -84,6 +98,85 @@ public class StubSafe {
             "onPictureInPictureModeChanged", "onTopResumedActivityChanged",
             "attachBaseContext", "onStartCommand", "onBind", "onUnbind", "onRebind"));
 
+    /**
+     * Nop-wall predicate: the extraction+nop-fill family's gutted body.
+     * Instructions exclusively nops / zero-literal consts / returns, with at
+     * least one nop. A legit empty method is exactly `return-void` (zero
+     * nops) — untouched. A residual try table does NOT disqualify: this
+     * family keeps the try structure while gutting handler code to nops too,
+     * and the instruction scan covers handler code (a real handler trips the
+     * default case); a synthesized/grafted body replaces the implementation
+     * wholesale, try table included. Purely structural, no family-specific
+     * constants.
+     */
+    static boolean isNopWall(Method m) {
+        MethodImplementation impl = m.getImplementation();
+        if (impl == null) {
+            return false;
+        }
+        int nops = 0, returns = 0;
+        for (Instruction insn : impl.getInstructions()) {
+            switch (insn.getOpcode()) {
+                case NOP:
+                    nops++;
+                    break;
+                case RETURN_VOID:
+                case RETURN:
+                case RETURN_WIDE:
+                case RETURN_OBJECT:
+                    returns++;
+                    break;
+                case CONST_4:
+                case CONST_16:
+                case CONST:
+                case CONST_HIGH16:
+                    if (((NarrowLiteralInstruction) insn).getNarrowLiteral() != 0) {
+                        return false;
+                    }
+                    break;
+                case CONST_WIDE_16:
+                case CONST_WIDE_32:
+                case CONST_WIDE:
+                case CONST_WIDE_HIGH16:
+                    if (((WideLiteralInstruction) insn).getWideLiteral() != 0L) {
+                        return false;
+                    }
+                    break;
+                default:
+                    return false;
+            }
+        }
+        return nops >= 1 && returns >= 1;
+    }
+
+    /**
+     * Framework-carrier guard for the nop-wall branch: a lifecycle NAME on a
+     * class that does NOT inherit the framework template-method contract
+     * (e.g. a POJO callback `onStart` whose superclass chain ends at
+     * java/lang/Object) is not a lifecycle override — synthesizing
+     * invoke-super there would reference a super method that does not exist
+     * (VerifyError). Carrier = walking the in-dex superclass chain meets an
+     * EXTERNAL class other than java/lang/Object (androidx/appcompat/...
+     * — the contract lives up that chain). The native-stub branch keeps its
+     * historical semantics (a native lifecycle name is lethal wherever it
+     * sits); this guard scopes only the widened nop-wall tell.
+     */
+    static boolean isFrameworkCarrier(ClassDef c, Map<String, ClassDef> classIdx) {
+        String sup = c.getSuperclass();
+        Set<String> seen = new HashSet<>();
+        while (sup != null && seen.add(sup)) {
+            if (sup.equals("Ljava/lang/Object;")) {
+                return false;
+            }
+            ClassDef sc = classIdx.get(sup);
+            if (sc == null) {
+                return true;  // external non-Object ancestor: framework/library
+            }
+            sup = sc.getSuperclass();
+        }
+        return false;
+    }
+
     public static void main(String[] args) throws Exception {
         if (args.length < 2) {
             System.err.println("usage: StubSafe <in.dex> <out.dex> [api]");
@@ -96,8 +189,10 @@ public class StubSafe {
         DexFile dex = DexFileFactory.loadDexFile(new File(args[0]), opcodes);
 
         // index this dex: class -> (sig -> Method), to inspect a stub's
-        // super-method when the super class lives in the same dump
+        // super-method when the super class lives in the same dump; plus a
+        // type -> ClassDef map for the nop-wall branch's carrier guard
         Map<String, Map<String, Method>> index = new HashMap<>();
+        Map<String, ClassDef> classIdx = new HashMap<>();
         for (ClassDef c : dex.getClasses()) {
             Map<String, Method> mmap = new HashMap<>();
             for (Method m : c.getMethods()) {
@@ -105,44 +200,69 @@ public class StubSafe {
                         + m.getParameterTypes(), m);
             }
             index.put(c.getType(), mmap);
+            classIdx.put(c.getType(), c);
         }
 
         List<ClassDef> outClasses = new ArrayList<>();
         int synthesized = 0;
         int keptNative = 0;
+        int keptNopWall = 0;
         for (ClassDef c : dex.getClasses()) {
             List<Method> patched = new ArrayList<>();
             boolean changed = false;
             for (Method m : c.getMethods()) {
-                boolean nativeStub = (m.getAccessFlags() & ACC_NATIVE) != 0
+                int flags = m.getAccessFlags();
+                boolean nativeStub = (flags & ACC_NATIVE) != 0
                         && m.getImplementation() == null;
-                if (!nativeStub) {
+                // the nop-fill family's twin lethal leftover: a legal
+                // code_item whose gutted body does nothing — lethal when a
+                // framework contract (super chain) rides on it
+                boolean nopWall = (flags & (ACC_NATIVE | ACC_ABSTRACT)) == 0
+                        && isNopWall(m);
+                if (!nativeStub && !nopWall) {
                     patched.add(m);
                     continue;
                 }
                 boolean isLifecycle = LIFECYCLE.contains(m.getName())
-                        && (m.getAccessFlags() & ACC_STATIC) == 0
-                        && (m.getAccessFlags() & ACC_ABSTRACT) == 0;
+                        && (flags & ACC_STATIC) == 0
+                        && (flags & ACC_ABSTRACT) == 0
+                        // a lifecycle NAME without the framework contract
+                        // (POJO callback) is not the shell's tell — guard
+                        // the widened nop-wall predicate against it
+                        && (!nopWall || isFrameworkCarrier(c, classIdx));
                 if (!isLifecycle) {
-                    // no framework contract -> probably a legal JNI declaration
-                    // backed by a .so still shipped in the APK: keep it as-is
-                    keptNative++;
-                    System.out.println("stubsafe: keep-native " + c.getType()
-                            + "." + m.getName() + " (no lifecycle contract)");
+                    if (nativeStub) {
+                        // no framework contract -> probably a legal JNI
+                        // declaration backed by a .so still shipped in the
+                        // APK: keep it as-is
+                        keptNative++;
+                        System.out.println("stubsafe: keep-native " + c.getType()
+                                + "." + m.getName() + " (no lifecycle contract)");
+                    } else {
+                        // non-lifecycle nop wall: verifies as a no-op — the
+                        // shell-free run is unaffected; only Restore with a
+                        // body-carrying source truly refills it
+                        keptNopWall++;
+                        System.out.println("stubsafe: keep-nopwall " + c.getType()
+                                + "." + m.getName()
+                                + " (no lifecycle contract; no-op body verifies)");
+                    }
                     patched.add(m);
                     continue;
                 }
                 MethodImplementation body = synthesizeSuperCall(c, m, index);
+                String tell = nopWall ? " (nop-wall body)" : "";
                 if (body == null) {
                     // super-method is itself abstract/stubbed in-dex: delegate
                     // would not verify; keep the declaration but NOT as a
                     // lethal native stub — synthesize a default-return body
                     body = synthesizeDefaultReturn(m);
                     System.out.println("stubsafe: default-return " + c.getType()
-                            + "." + m.getName() + " (super not invocable)");
+                            + "." + m.getName() + " (super not invocable)" + tell);
                 } else {
                     System.out.println("stubsafe: super-delegate " + c.getType()
-                            + "." + m.getName() + " (framework lifecycle contract)");
+                            + "." + m.getName()
+                            + " (framework lifecycle contract)" + tell);
                 }
                 patched.add(new ImmutableMethod(
                         m.getDefiningClass(),
@@ -176,7 +296,8 @@ public class StubSafe {
         }
         pool.writeTo(new org.jf.dexlib2.writer.io.FileDataStore(new File(args[1])));
         System.out.println("stubsafe: " + synthesized + " method(s) synthesized, "
-                + keptNative + " native kept -> " + args[1]);
+                + keptNative + " native kept, " + keptNopWall
+                + " nop-wall kept -> " + args[1]);
     }
 
     /**

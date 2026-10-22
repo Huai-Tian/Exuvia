@@ -27,7 +27,7 @@ Exuvia 是一个**面向 AI Agent 的 Android 通用脱壳 / 修复流水线**�
 - **修复战役**：**v12 产物真机双双成功**（12 轮交付、11 个根因、2 个产物、2 次真机成功）——两个不同脱壳器的 dump（56.al 紧凑重排 1.85MB / fulldump 内存展开 4.5MB）经同一修复管线产出均正常运行（Oppo/Android 15+/targetSdk 36）。五重验收门（verify_all.py）+ 修复工具链产品化。
 - **第二战（dex2c 翻译族）**：**闭环 APK 维护者真机确认（2026-10-21/22）**——无 dump、无参照，从 JNI 语义重建方法体。工具链自动化已收官：dexcontainer.py 尾容器重建、jnitrace.py（`--init` 运行时预热 / `--seed-dex` clinit 静态域播种 / `--arms` 空值守卫双臂枚举）、TLS 字符串离线物化（so_emulator emutls 契约仿真）、trace2smali.py（`--sigs-dex` 空心 stub 签名自动提取）、verify_all V4 多 dex 并集修正。SKILL §8 族 2 入册。
 - **产品化**：`exuvia repair` 子命令上线（Rust 壳 + 内嵌 Python——不重写 12 轮真机验证的工具链）；方法体**四来源体系**：`--dump`（第三方 dump，多来源互补，**生产主路径**）/ `--reference`（原包，**内部测试专用**）/ StubSafe **框架契约兜底** / dex2c 源（jnitrace→trace2smali，无 dump 可恢复，SKILL §7）。
-- **契约层**：六协议物 fixture 双向锚定、SKILL_VERSION 1.9.0、CI 全绿。**锚点纪律（血泪教训）**：SKILL_VERSION 升版必须**同一 commit** 改 `src/version.rs`——1e5b601 只改文档导致锚点漂移、CI 连红（1fdc8df 修复）。
+- **契约层**：六协议物 fixture 双向锚定、SKILL_VERSION 1.10.0、CI 全绿。**锚点纪律（血泪教训）**：SKILL_VERSION 升版必须**同一 commit** 改 `src/version.rs`——1e5b601 只改文档导致锚点漂移、CI 连红（1fdc8df 修复）。
 - 产品线 a 契约面：卡点两类（method-native-stub：ACC_NATIVE stub + JNI 符号定位 + 方法体切片；encrypted-payload：坏 DEX 文件 / 声明区域内未申报尾区 / so 内明文 DEX 扫描命中 / assets ELF 零命中负事实四机械来源）+ 解密例程候选机械定位（JNI_OnLoad / init_array 双路径：PT_DYNAMIC 运行时视角优先）。
 - 外循环闭合且留痕：`exuvia packed.apk → next --goal → [LLM 解卡点] → unpack merge（四层闸门 + 沙箱双锚 + 销账）→ validate`；merge 拒绝时 attempts.log 记 merge-rejected + 被认领卡点 attempts 递增；recovered DEX 形状产物归档 workspace/<debt_id>/recovered.dex；洋葱二次分析 `analyze --dex` 回注解卡产物 → 下一层欠账地图。
 - CLI 契约表全兑现：--version / --profile / --goal / --json / --resume、next、schema --dump、unpack validate / merge、analyze --dex、hunt（含变体 RC4 参数）、repair。
@@ -60,7 +60,7 @@ Exuvia 是一个**面向 AI Agent 的 Android 通用脱壳 / 修复流水线**�
 ### 0.5.2 产品化拍板（修复战役收官 → `exuvia repair`）
 
 - **形态**：Rust 壳 + `include_bytes!` 嵌入 Python 工具链（编译时嵌入/运行时提取 `<temp>/exuvia-repair/<hash>/`，幂等）——**不重写 12 轮真机验证的工具链**（重写引入新 bug 的风险 > 语言统一的收益）。
-- **方法体来源体系**：`--dump` 多来源互补 = 生产主路径；`--reference` 原包 = 内部测试专用；无来源时 StubSafe 契约兜底（native + 生命周期名 = 壳抽取铁证 → 合成 `invoke-super` 契约等价体并清 native 位；其余 native 保留 = lib/*.so 支撑的合法 JNI，**必要且无副作用的残留直接复用，不为等义而等义**）；dex2c 族走第四来源（JNI trace → smali 合成，SKILL §7/§8 族 2）。
+- **方法体来源体系**：`--dump` 多来源互补 = 生产主路径；`--reference` 原包 = 内部测试专用；无来源时 StubSafe 契约兜底（native + 生命周期名 = 壳抽取铁证 → 合成 `invoke-super` 契约等价体并清 native 位；**抽取+nop 填充族**（爱加密形态）的孪生铁证 = 框架载体类上的生命周期 nop 墙——指令仅 nop/零值 const/return 且 ≥1 nop——同样合成契约体；其余 native 保留 = lib/*.so 支撑的合法 JNI，**必要且无副作用的残留直接复用，不为等义而等义**；非生命周期墙同为保留——已是可验证空操作，唯来源真体能真填）；dex2c 族走第四来源（JNI trace → smali 合成，SKILL §7/§8 族 2）。
 - **已知语义边界（如实）**：契约体保证"可安装、可启动、不崩"，但不含业务逻辑——onCreate 被抽取且无任何来源携带其方法体时产物白屏（信息论边界：该信息不在任何可得载体中）；恢复依赖来源。
 
 ### 0.5.3 脱壳线终态（360 技术族；容器 key = 唯一剩余卡点，低优先级）
@@ -520,7 +520,7 @@ OS 沙箱按平台分文件实现（单一接口 `run_sandboxed(code, args)`）�
 | repack | 终点合成阶段：方法体 → DEX → 重组 → 自签 → 可运行 APK；四组件按三次法则生长（dexlib2 DexPool 标准布局重序列化已落地为 stubsafe/restore 阶段的序列化器） |
 | repair / 修复管线 | 产品线 b（SKILL §7）：`exuvia repair` 单命令 dump→可运行 APK——doctor→clean→deweave→restore→stubsafe→surgery→zipalign→sign |
 | 方法体来源 | 被壳抽取方法的还原载体：--dump（第三方 dump，生产主路径，多来源互补）/ --reference（原包，内部测试专用）/ StubSafe 契约兜底 / dex2c 源（JNI trace → smali） |
-| StubSafe | 无来源时的兜底等义生成器（tools/dexlib/StubSafe.java）：native+框架生命周期名 = 壳抽取铁证 → 合成 invoke-super 契约体并清 native 位；其余 native 保留（合法 JNI 复用）；兼作最终 DexPool 标准布局重序列化 |
+| StubSafe | 无来源时的兜底等义生成器（tools/dexlib/StubSafe.java）：native+框架生命周期名 = 壳抽取铁证 → 合成 invoke-super 契约体并清 native 位；框架载体类上的生命周期 nop 墙（抽取+nop 填充族孪生铁证）同样合成；其余 native 保留（合法 JNI 复用），非生命周期墙保留（可验证空操作）；兼作最终 DexPool 标准布局重序列化 |
 | 五重验收门 | trackb/verify_all.py：V1 zip / V2 病理 P0–P11 / V3 dexlib2 严格反编译 / V4 内容残留·多 dex 并集 / V5 apksigtool 验签——ALL GREEN 才 ship |
 | dex2c 翻译族 | 四代壳亚型：方法体被翻译为 JNI C++（常加 OLLVM 平坦化），原 Dalvik 不在包内；恢复 = JNI 语义 trace → smali 合成（第二战毕业，SKILL §8 族 2） |
 | jnitrace / trace2smali | dex2c 恢复前后半：fake-Emulator JNI 调用序列追踪器（--init/--seed-dex/--arms）/ trace→smali 编译器（--sigs/--sigs-dex） |
