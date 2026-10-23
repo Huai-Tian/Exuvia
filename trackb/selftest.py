@@ -937,6 +937,29 @@ def test_repair_multi_donor_stage_names():
           'no stage/final collision' % len(names))
 
 
+def test_restore_forwarding_shell():
+    """Finding #9 (family-3 爱加密 empirical): Restore's hollow-shell
+    predicates and graft behavior are anchored Java-side by
+    `Restore --selftest` (synthetic, in-memory — wall/shell grafted, hollow
+    donor rejected, real untouched). Run it when the dexlib toolchain is
+    provisioned (user-side policy: jars live outside the repo); SKIP loudly
+    otherwise."""
+    repack_dir = os.environ.get('EXUVIA_DEXLIB', '/workspace/tools/dexlib')
+    jars = 'dexlib2-2.5.2.jar:util-2.5.2.jar:guava-31.1-jre.jar:.'
+    if not (os.path.exists(os.path.join(repack_dir, 'Restore.class'))
+            and os.path.exists(os.path.join(repack_dir, 'dexlib2-2.5.2.jar'))):
+        print('restore forwarding-shell anchor: SKIP '
+              '(dexlib toolchain not provisioned — Restore --selftest runs '
+              'wherever the jars live)')
+        return
+    r = subprocess.run(['java', '-cp', jars, 'Restore', '--selftest'],
+                       cwd=repack_dir, capture_output=True, text=True,
+                       timeout=300)
+    assert r.returncode == 0 and 'ALL GREEN' in r.stdout, r.stdout + r.stderr
+    for line in [l for l in r.stdout.strip().split('\n') if l.strip()]:
+        print('  ' + line)
+
+
 def test_rc4mat():
     """rc4mat (r17 tool): material-space scan — synthetic 14B-header material ->
     parity-key derivation round-trip + planted scan hit via the CLI."""
@@ -1117,6 +1140,7 @@ if __name__ == '__main__':
     test_elfrecon()
     test_repair_pipeline()
     test_repair_multi_donor_stage_names()
+    test_restore_forwarding_shell()
     test_dexdoctor()
     test_fidelity()
     test_rc4mat()

@@ -272,7 +272,7 @@ Stages (all embedded in the binary; output JSON reports counts per stage):
 | doctor | dexdoctor | triage & heal dump pathologies (sabotaged checksums, wiped map_off, page padding, map section anomalies P0–P11) |
 | clean | dexclean | drop shell/foreign class_defs (reachability from manifest components; R8-obfuscation aware) |
 | deweave | deweave | restore shell-woven bytecode in place (bridge invokes → the framework calls they replaced; probes → nops) |
-| restore | dexlib2 Restore | merge method bodies for shell-extracted stubs (native+no-code) and nop-wall bodies (extraction+nop-fill family) from every source that carries them (§ sources below); a nop-wall source body never donates — wall over wall restores nothing |
+| restore | dexlib2 Restore | merge method bodies for shell-extracted stubs (native+no-code), nop-wall bodies (extraction+nop-fill family) and pure forwarding shells (the family's gutted-callback shape: exactly one invoke + one return, optional move-result plumbing) from every source that carries them (§ sources below); the hollow predicate is SYMMETRIC — a hollow source body (wall or shell) never donates: shell over wall restores nothing and fakes the count |
 | stubsafe | dexlib2 StubSafe | synthesize contract-equivalent bodies for lethal stubs no source could fill (native lifecycle stubs; nop-wall lifecycle bodies on framework-carrier classes); final standard-layout re-serialization |
 | surgery | axmltool+repair | remove `<application android:name="WRAPPER">`, strip shell asset entries, swap classes.dex |
 | sign | sign2 | fresh APK v2 signature (RSASSA-PKCS1+SHA2-256) + zipalign semantics (4-byte aligned entries, resources.arsc STORED) |
@@ -340,7 +340,7 @@ guidance = [
 ## 9. Version anchors
 
 ```text
-SKILL_VERSION: 1.10.3
+SKILL_VERSION: 1.10.4
 handoff_version: 1    goal_version: 1    proposal_version: 1
 ```
 
@@ -357,4 +357,5 @@ handoff_version: 1    goal_version: 1    proposal_version: 1
 - 1.10.1: repair 清单手术盲区修复（族 3 爱加密实证）：wrapper 检测的兜底判定去掉 `com.` 前缀窄化——"类不在随包 dex 集内"本就是定案判据，与前缀无关（爱加密的壳 Application 在非 com 命名空间下逃过检测）；手术范围从单一 `android:name` 扩到全部启动期类属性（`android:name` + `android:appComponentFactory`，API 28+ 工厂劫持是族 3 的实际引导链），支持同一 `<application>` 元素多属性一次摘除（降序偏移删除 + 尺寸字段逐轮重读）；自检新增双属性合成锚点（正例双摘/兄弟属性保留/负例随包类不误伤）；无协议变更。
 - 1.10.2: so_emulator 伪 libc 覆盖面扩充（族 3 爱加密实证）：真壳 import 面 150+ 个 libc 名，表外名字原先塌缩成匿名静默 return-0 桩——对"返回值被消费"的函数那不是良性默认，而是把壳的控制流推上错误分支（实证：爱加密 VMP 环境门 atoi(__system_property_get("ro.build.version.sdk")) 的 atoi 丢失 → 恒 0 → "上古设备"分派）。补齐约 110 个通用设备级语义（atoi/strtol 家族、str/mem 家族、_chk 变体、getauxval、pthread/sem/信号集、open/read/stat 家族（fd 层与 FILE 层共享 --fs 桥）、printf/scanf 家族（AAPCS64 va_list 读取器 + 变参扫描引擎）、qsort/dl_iterate_phdr/siglongjmp 以延迟调用记录输出、AAssetManager 桩）；表外名字改为具名计数桩，JSON 新增 unbound_imports（语义缺口清单，不是噪音）与 deferred_calls/once_pending；潜伏修复 f_memset 参数序（C 契约 dest/val/n——旧体写反，零值世界侥幸不显）与 __stack_chk_fail 大声停下（绝不静默落进下一函数）；自检新增六导入合成 ELF 锚点（atoi/strstr/strtok/sscanf 真语义 + memset 参数序 + 未绑定计数）；样本回归：VMP 环境门返回 1（sdk=30 分派正确），svc 事件流与修复前逐项一致。无协议变更。
 - 1.10.3: repair 多供体恢复链修复（族 3 爱加密实证）：restore 逐供体暂存名 `.stage_next{dex}` 只按产物 dex 编号、不随供体编号——≥2 个 `--dump` 供体时自第二个起输入输出同名，成功后的上一步清理恰好删掉当前产物，后续供体与 StubSafe 连锁 FileNotFound、整脚本崩溃（实证：7 供体 mHook eBPF dump 回填，第一供体 375 条恢复成功后全链断裂；§7"several dumps are complementary"的多供体生产路径实际不可用）；暂存名补供体维度 `.stage_next{dex}_{src}`（`restore_stage_path(out, di, si)`）；自检新增多供体暂存名唯一性锚点（21 路径互异 + 与 stage/stage_final 不相撞）；样本回归：7 供体全链 5727 条恢复日志、nop 墙 8794→3240、五重验收门全绿；无协议变更。
+- 1.10.4: restore 回填谓词纳入转发薄壳 + 供体诚实性修复（族 3 爱加密实证）：抽代码族对框架回调重写方法留纯转发薄壳（恰好 1 invoke + 1 return，可夹 move-result 值传递——8B 空壳顶包 104B 真身），非 nop 墙 → 旧谓词漏修（实证：74 薄壳中 31 处供体有真身，含启动路径 `Lyg;.onCreate` 8B→104B、`Lb4;.onAttachedToWindow` 8B→764B）；同时旧供体守卫把薄壳当真身——212 处 nop 墙被"回填"成 8B 薄壳仍记 restored（伪恢复，墙数照降、语义没回来）。谓词双侧对称放宽：目标可填 = nop 墙 ∨ 转发薄壳；供体资格 = 非空壳（墙与薄壳皆不供体）——对称性即安全证明：真空方法（开发者就写的 `super.onX()`）在供体侧同为薄壳被拒之门外，回填只在同签名供体携带真身时触发，同构建 dump 下这只能意味着目标被抽空。Restore 日志区分三种回填事由（nop-wall / forwarding-shell / body-merged）；新增 `Restore --selftest` 合成锚点（谓词六正反例 + 内存合成 dex 走真实 CLI 回填 e2e：墙与薄壳回填、真空供体被拒、真身不被触碰），自检在 dexlib 工具链可用时联动、否则大声 SKIP；样本回归：回填 5546（墙 5515 + 壳 31），净 nop 墙 8697→3182、薄壳 74→43、伪恢复 212 清零，`Lyg;.onCreate` 104B 真身实证；无协议变更。
 - Before adapting to a new environment, compare `exuvia --version` against these.
