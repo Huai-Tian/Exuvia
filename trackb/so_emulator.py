@@ -31,6 +31,7 @@ Exit codes: 0 = emulated return captured; 2 = unicorn missing; 3 = ELF parse err
 """
 
 import argparse
+import os
 import struct
 import sys
 import json
@@ -265,7 +266,10 @@ def make_libc(uc, elf):
         return x0
 
     def f_memset(x0, x1, x2, x3, x4=0, x5=0):
-        wr(x0, bytes([x2 & 0xFF]) * x1)
+        # r32 latent fix: the old body wrote x1 copies of byte(x2) — the C
+        # contract is memset(dest=x0, val=x1, n=x2). Value-0 calls looked
+        # fine only because the fake world is zero-fresh.
+        wr(x0, bytes([x1 & 0xFF]) * x2)
         return x0
 
     def f_memcmp(x0, x1, x2, x3, x4=0, x5=0):
@@ -663,22 +667,614 @@ def make_libc(uc, elf):
     f_sprintf_chk = _mk_printf(4)                  # __sprintf_chk(buf, flag, slen, fmt, ...)
     f_snprintf_chk = _mk_printf(5, size_arg=1)     # __snprintf_chk(buf, n, flag, slen, fmt, ...)
 
+    # r32: 伪 libc 覆盖面（libc surface）。真壳 import 面 150+ 个 libc 名；每个
+    # 未实现的都塌缩成静默 return-0 桩 —— 对"返回值被消费"的函数那不是良性默认，
+    # 而是把壳的控制流推上错误分支（Battle-3 爱加密：VMP 环境门做
+    # atoi(__system_property_get(sdk)) 再按结果分派；atoi 缺失 => 0 => "上古设备"
+    # => 引擎走 legacy 路径调用一张没人注册过的表槽 => blr 0）。以下语义全部是
+    # 设备通用：该解析/扫描/拷贝的真做字节级语义，进程面（pid/tid/pagesize）给
+    # 常量，只有诚实答案确实是"无副作用成功"的地方才静默（信号/锁/无内核世界）。
+    # 真正做不到的（qsort 比较器、dl_iterate_phdr、longjmp —— unicorn 钩子内
+    # 不可重入 emu_start）记录进 _deferred，绝不静默。
+    deferred = []
+    once_pending = []
+
+    def _parse_int(a, base):
+        s = cstr(a).decode(errors='replace')
+        i = 0
+        while i < len(s) and s[i] in ' \t\n\r\v\f':
+            i += 1
+        neg = False
+        if i < len(s) and s[i] in '+-':
+            neg = s[i] == '-'
+            i += 1
+        if base == 0:
+            if s[i:i + 2].lower() == '0x':
+                base, i = 16, i + 2
+            elif s[i:i + 1] == '0':
+                base = 8
+            else:
+                base = 10
+        elif base == 16 and s[i:i + 2].lower() == '0x':
+            i += 2
+        v = 0
+        while i < len(s):
+            c = s[i].lower()
+            d = ord(c) - 48 if '0' <= c <= '9' else (ord(c) - 87 if 'a' <= c <= 'f' else 99)
+            if d >= base:
+                break
+            v = v * base + d
+            i += 1
+        return (-v if neg else v) & 0xFFFFFFFFFFFFFFFF, i
+
+    def f_atoi(x0, x1, x2, x3, x4=0, x5=0):
+        return _parse_int(x0, 10)[0]
+
+    def f_strtol(x0, x1, x2, x3, x4=0, x5=0):
+        v, n = _parse_int(x0, x2)
+        if x1:
+            wr(x1, struct.pack('<Q', x0 + n))
+        return v
+
+    def f_strchr(x0, x1, x2, x3, x4=0, x5=0):
+        s = cstr(x0)
+        c = x1 & 0xFF
+        if c == 0:
+            return x0 + len(s)  # strchr(s, 0) 指向结尾 NUL —— C 标准语义
+        i = s.find(bytes([c]))
+        return x0 + i if i >= 0 else 0
+
+    def f_strrchr(x0, x1, x2, x3, x4=0, x5=0):
+        s = cstr(x0)
+        i = s.rfind(bytes([x1 & 0xFF]))
+        return x0 + i if i >= 0 else 0
+
+    def f_strstr(x0, x1, x2, x3, x4=0, x5=0):
+        i = cstr(x0).find(cstr(x1))
+        return x0 + i if i >= 0 else 0
+
+    def f_strcasestr(x0, x1, x2, x3, x4=0, x5=0):
+        i = cstr(x0).lower().find(cstr(x1).lower())
+        return x0 + i if i >= 0 else 0
+
+    def f_strspn(x0, x1, x2, x3, x4=0, x5=0):
+        s, acc = bytes(cstr(x0)), set(bytes(cstr(x1)))
+        n = 0
+        while n < len(s) and s[n] in acc:
+            n += 1
+        return n
+
+    def f_strcspn(x0, x1, x2, x3, x4=0, x5=0):
+        s, rej = bytes(cstr(x0)), set(bytes(cstr(x1)))
+        n = 0
+        while n < len(s) and s[n] not in rej:
+            n += 1
+        return n
+
+    def f_strncmp(x0, x1, x2, x3, x4=0, x5=0):
+        a, b = rd(x0, x2), rd(x1, x2)
+        for k in range(x2):
+            if a[k] != b[k]:
+                return -1 if a[k] < b[k] else 1
+            if a[k] == 0:
+                return 0
+        return 0
+
+    def f_strncasecmp(x0, x1, x2, x3, x4=0, x5=0):
+        a, b = rd(x0, x2), rd(x1, x2)
+        for k in range(x2):
+            ca, cb = a[k], b[k]
+            ca = ca + 32 if 65 <= ca <= 90 else ca
+            cb = cb + 32 if 65 <= cb <= 90 else cb
+            if ca != cb:
+                return -1 if ca < cb else 1
+            if ca == 0:
+                return 0
+        return 0
+
+    def f_strnlen(x0, x1, x2, x3, x4=0, x5=0):
+        i = rd(x0, x1).find(b'\0')
+        return i if i >= 0 else x1
+
+    def f_strdup(x0, x1, x2, x3, x4=0, x5=0):
+        s = cstr(x0) + b'\0'
+        p = bump(len(s))
+        if p:
+            wr(p, s)
+        return p
+
+    strtok_state = [0]
+
+    def f_strtok(x0, x1, x2, x3, x4=0, x5=0):
+        buf = x0 or strtok_state[0]
+        if not buf:
+            return 0
+        d = set(bytes(cstr(x1)))
+        s = bytes(cstr(buf))
+        i = 0
+        while i < len(s) and s[i] in d:
+            i += 1
+        if i == len(s):
+            strtok_state[0] = 0
+            return 0
+        j = i
+        while j < len(s) and s[j] not in d:
+            j += 1
+        if j < len(s):
+            wr(buf + j, b'\0')
+            strtok_state[0] = buf + j + 1
+        else:
+            strtok_state[0] = 0
+        return buf + i
+
+    def f_strlcpy(x0, x1, x2, x3, x4=0, x5=0):
+        s = cstr(x1)
+        if x2:
+            wr(x0, s[:x2 - 1] + b'\0')
+        return len(s)
+
+    def f_memchr(x0, x1, x2, x3, x4=0, x5=0):
+        i = rd(x0, x2).find(bytes([x1 & 0xFF]))
+        return x0 + i if i >= 0 else 0
+
+    def f_memmem(x0, x1, x2, x3, x4=0, x5=0):
+        i = rd(x0, x1).find(rd(x2, x3))
+        return x0 + i if i >= 0 else 0
+
+    def f_tolower(x0, x1, x2, x3, x4=0, x5=0):
+        c = x0 & 0xFF
+        return c + 32 if 65 <= c <= 90 else c
+
+    def f_strcpy(x0, x1, x2, x3, x4=0, x5=0):
+        wr(x0, cstr(x1) + b'\0')
+        return x0
+
+    def f_strcat(x0, x1, x2, x3, x4=0, x5=0):
+        wr(x0 + len(cstr(x0)), cstr(x1) + b'\0')
+        return x0
+
+    def f_strncpy(x0, x1, x2, x3=0, x4=0, x5=0):
+        wr(x0, cstr(x1)[:x2].ljust(x2, b'\0'))
+        return x0
+
+    # _chk 加固变体：前三个参数与基函数相同，bound/flag 参数直接忽略。
+    def f_memcpy_chk(x0, x1, x2, x3, x4=0, x5=0):
+        return f_memcpy(x0, x1, x2)
+
+    def f_memset_chk(x0, x1, x2, x3, x4=0, x5=0):
+        return f_memset(x0, x1, x2)
+
+    # 进程/系统面：常量描述仿真设备（与 PROPS/getpid/time 同一哲学）。
+    def f_getauxval(x0, x1, x2, x3, x4=0, x5=0):
+        if x0 == 6:
+            return 4096            # AT_PAGESZ
+        if x0 == 23:
+            return 0               # AT_SECURE：非 setuid —— 诚实
+        if x0 == 25:               # AT_RANDOM：16 字节确定性内容（非样本派生）
+            p = bump(16)
+            wr(p, bytes(range(16)))
+            return p
+        return 0
+
+    def f_exit(x0, x1, x2, x3, x4=0, x5=0):
+        svc_events.append({'libc_exit': x0})
+        uc.emu_stop()
+        return 0
+
+    def f_stack_chk_fail(x0, x1, x2, x3, x4=0, x5=0):
+        # 真设备上这是进程死亡 —— 大声停下，绝不静默落进下一函数（旧的
+        # return-0 桩会让执行流摔进 __stack_chk_fail 后面的随机代码）。
+        svc_events.append({'stack_chk_fail': 1})
+        uc.emu_stop()
+        return 0
+
+    def f_sigemptyset(x0, x1, x2, x3, x4=0, x5=0):
+        wr(x0, b'\0' * 8)
+        return 0
+
+    def f_sigfillset(x0, x1, x2, x3, x4=0, x5=0):
+        wr(x0, b'\xff' * 8)
+        return 0
+
+    def f_sigaddset(x0, x1, x2, x3, x4=0, x5=0):
+        v = struct.unpack('<Q', rd(x0, 8))[0] | (1 << ((x1 - 1) & 63))
+        wr(x0, struct.pack('<Q', v))
+        return 0
+
+    def f_sigismember(x0, x1, x2, x3, x4=0, x5=0):
+        return (struct.unpack('<Q', rd(x0, 8))[0] >> ((x1 - 1) & 63)) & 1
+
+    def f_sigsetjmp(x0, x1, x2, x3, x4=0, x5=0):
+        deferred.append({'call': 'sigsetjmp', 'note': 'returns 0 (direct path); longjmp not modeled'})
+        return 0
+
+    def f_siglongjmp(x0, x1, x2, x3, x4=0, x5=0):
+        deferred.append({'call': 'siglongjmp', 'val': x1})
+        return 0
+
+    # pthread/sem：无并发世界 —— 锁与信号量是诚实的无副作用成功；pthread_once
+    # 的 init 例程不可在钩子内重入执行，记录待决（与 pthread_create 同一哲学）。
+    pthread_keys = {}
+
+    def f_pthread_key_create(x0, x1, x2, x3, x4=0, x5=0):
+        k = len(pthread_keys) + 1
+        pthread_keys[k] = 0
+        wr(x0, struct.pack('<I', k))
+        return 0
+
+    def f_pthread_getspecific(x0, x1, x2, x3, x4=0, x5=0):
+        return pthread_keys.get(x0, 0)
+
+    def f_pthread_setspecific(x0, x1, x2, x3, x4=0, x5=0):
+        pthread_keys[x0] = x1
+        return 0
+
+    def f_pthread_once(x0, x1, x2, x3, x4=0, x5=0):
+        if struct.unpack('<I', rd(x0, 4))[0] == 0:
+            wr(x0, struct.pack('<I', 1))
+            once_pending.append(x1)
+        return 0
+
+    def f_posix_memalign(x0, x1, x2, x3, x4=0, x5=0):
+        p = bump(max(x2, 1))
+        if not p:
+            return 12  # ENOMEM
+        wr(x0, struct.pack('<Q', p))
+        return 0
+
+    def f_realloc(x0, x1, x2, x3, x4=0, x5=0):
+        p = bump(max(x1, 1))
+        if p and x0:
+            wr(p, rd(x0, min(x1, 0x100000)))
+        return p
+
+    # fd 层 I/O：与 --fs 桥共享一张文件表（fd 即 FILE*，本世界一贯如此）。
+    def _fs_real(path):
+        real = fs_map.get(path)
+        if real is None:
+            for k, v in fs_map.items():
+                if path.startswith(k):
+                    real = v
+                    break
+        return real
+
+    def f_open(x0, x1, x2, x3, x4=0, x5=0):
+        real = _fs_real(cstr(x0).decode(errors='replace'))
+        if real is None:
+            return -1 & 0xFFFFFFFFFFFFFFFF
+        fd = FD[0]
+        FD[0] += 1
+        files[fd] = open(real, 'rb')
+        return fd
+
+    def f_read(x0, x1, x2, x3, x4=0, x5=0):
+        f = files.get(x0)
+        if not f:
+            return -1 & 0xFFFFFFFFFFFFFFFF
+        blob = f.read(x2)
+        wr(x1, blob)
+        return len(blob)
+
+    def f_close(x0, x1, x2, x3, x4=0, x5=0):
+        f = files.pop(x0, None)
+        if f:
+            try:
+                f.close()
+            except Exception:
+                pass
+        return 0
+
+    def _stat_fill(buf, size):
+        wr(buf, b'\0' * 128)
+        wr(buf + 16, struct.pack('<I', 0o100644))  # st_mode = S_IFREG|0644
+        wr(buf + 20, struct.pack('<I', 1))         # st_nlink
+        wr(buf + 40, struct.pack('<q', size))      # st_size (bionic arm64)
+        wr(buf + 48, struct.pack('<q', 4096))      # st_blksize
+
+    def f_stat(x0, x1, x2, x3, x4=0, x5=0):
+        real = _fs_real(cstr(x0).decode(errors='replace'))
+        if real is None:
+            return -1 & 0xFFFFFFFFFFFFFFFF
+        _stat_fill(x1, os.path.getsize(real))
+        return 0
+
+    def f_fstat(x0, x1, x2, x3, x4=0, x5=0):
+        f = files.get(x0)
+        if not f:
+            return -1 & 0xFFFFFFFFFFFFFFFF
+        pos = f.tell()
+        f.seek(0, 2)
+        size = f.tell()
+        f.seek(pos)
+        _stat_fill(x1, size)
+        return 0
+
+    def f_access(x0, x1, x2, x3, x4=0, x5=0):
+        ok = _fs_real(cstr(x0).decode(errors='replace')) is not None
+        return 0 if ok else -1 & 0xFFFFFFFFFFFFFFFF
+
+    def f_readlink(x0, x1, x2, x3, x4=0, x5=0):
+        deferred.append({'call': 'readlink', 'path': cstr(x0).decode(errors='replace')})
+        return -1 & 0xFFFFFFFFFFFFFFFF
+
+    def f_pipe(x0, x1, x2, x3, x4=0, x5=0):
+        import io
+        r, w = FD[0], FD[0] + 1
+        FD[0] += 2
+        files[r] = io.BytesIO(b'')
+        files[w] = io.BytesIO()
+        wr(x0, struct.pack('<II', r, w))
+        return 0
+
+    def f_fgets(x0, x1, x2, x3, x4=0, x5=0):
+        f = files.get(x2)
+        if not f:
+            return 0
+        data = b''
+        while len(data) < x1 - 1:
+            c = f.read(1)
+            if not c:
+                break
+            data += c
+            if c == b'\n':
+                break
+        if not data:
+            return 0
+        wr(x0, data + b'\0')
+        return x0
+
+    def f_fgetc(x0, x1, x2, x3, x4=0, x5=0):
+        f = files.get(x0)
+        if not f:
+            return -1 & 0xFFFFFFFFFFFFFFFF
+        b = f.read(1)
+        return b[0] if b else -1 & 0xFFFFFFFFFFFFFFFF
+
+    def f_feof(x0, x1, x2, x3, x4=0, x5=0):
+        f = files.get(x0)
+        if not f:
+            return 1
+        pos = f.tell()
+        b = f.read(1)
+        f.seek(pos)
+        return 0 if b else 1
+
+    def f_fwrite(x0, x1, x2, x3, x4=0, x5=0):
+        return x2  # 无汇世界：报告全部 nmemb 已写
+
+    def f_rewind(x0, x1, x2, x3, x4=0, x5=0):
+        f = files.get(x0)
+        if f:
+            f.seek(0)
+        return 0
+
+    # va_list（AAPCS64: {__stack, __gr_top, __vr_top, __gr_offs, __vr_offs}）—
+    # 整数变参按序推进；FP 变参壳代码罕见，降级不取。
+    def _va_reader(va):
+        def nth(_k):  # 顺序调用即语义（_fmt_render 总是 ai 递增）
+            stack, gr_top = struct.unpack('<QQ', rd(va, 16))
+            gr_offs = struct.unpack('<i', rd(va + 24, 4))[0]
+            if gr_offs < 0:
+                v = struct.unpack('<Q', rd(gr_top + gr_offs, 8))[0]
+                wr(va + 24, struct.pack('<i', gr_offs + 8))
+            else:
+                v = struct.unpack('<Q', rd(stack, 8))[0]
+                wr(va, struct.pack('<Q', stack + 8))
+            return v
+        return nth
+
+    def _mk_vprintf(fmt_arg, va_arg, dest_arg=None, size_arg=None):
+        def f(x0, x1, x2, x3, x4=0, x5=0):
+            args = (x0, x1, x2, x3, x4, x5)
+            rendered = _fmt_render(args[fmt_arg], _va_reader(args[va_arg]))
+            if dest_arg is None:
+                return len(rendered)  # printf/vfprintf：无汇，报告长度
+            buf = args[dest_arg]
+            if size_arg is not None:
+                rendered = rendered[:max(0, args[size_arg] - 1)]
+            wr(buf, rendered + b'\0')
+            return len(rendered)
+        return f
+
+    f_printf = _mk_printf(1)                       # printf(fmt, ...)
+    f_fprintf = _mk_printf(2)                      # fprintf(fp, fmt, ...) — fp 忽略
+    f_vfprintf = _mk_vprintf(1, 2)                 # vfprintf(fp, fmt, va)
+    f_vsnprintf = _mk_vprintf(2, 3, dest_arg=0, size_arg=1)
+    f_vsnprintf_chk = _mk_vprintf(4, 5, dest_arg=0, size_arg=1)  # (buf,n,flag,slen,fmt,va)
+    f_vsprintf_chk = _mk_vprintf(3, 4, dest_arg=0)               # (buf,flag,slen,fmt,va)
+
+    def f_vasprintf(x0, x1, x2, x3, x4=0, x5=0):
+        rendered = _fmt_render(x1, _va_reader(x2))
+        p = bump(len(rendered) + 1)
+        if not p:
+            return -1 & 0xFFFFFFFFFFFFFFFF
+        wr(p, rendered + b'\0')
+        wr(x0, struct.pack('<Q', p))
+        return len(rendered)
+
+    # scanf 引擎：maps 扫描链的 "%08x-%08x %s %s %s %d %s" 一类格式 —
+    # 支持宽度、空白折叠、字面量、d/i/u/x/o/p/s/c；按 l 数修正存储宽度。
+    def _fmt_scan(fmt, getch, nth):
+        pushback = []
+
+        def gc():
+            if pushback:
+                return pushback.pop()
+            return getch()
+
+        def ungc(c):
+            pushback.append(c)
+
+        i = 0
+        assigned = 0
+        while i < len(fmt):
+            c = fmt[i]
+            if c.isspace():
+                while True:
+                    ch = gc()
+                    if ch is None:
+                        break
+                    if not chr(ch).isspace():
+                        ungc(ch)
+                        break
+                i += 1
+                continue
+            if c != '%':
+                ch = gc()
+                if ch is None or ch != ord(c):
+                    if ch is not None:
+                        ungc(ch)
+                    return assigned
+                i += 1
+                continue
+            i += 1
+            suppress = False
+            if i < len(fmt) and fmt[i] == '*':
+                suppress = True
+                i += 1
+            width = 0
+            while i < len(fmt) and fmt[i].isdigit():
+                width = width * 10 + int(fmt[i])
+                i += 1
+            lmod = 0
+            while i < len(fmt) and fmt[i] in 'hljztL':
+                lmod += 1 if fmt[i] == 'l' else 0
+                i += 1
+            if i >= len(fmt):
+                break
+            spec = fmt[i]
+            i += 1
+            if spec in 'diuxop':
+                ch = gc()
+                while ch is not None and chr(ch).isspace():
+                    ch = gc()
+                tok = ''
+                if ch is not None and chr(ch) in '+-':
+                    tok += chr(ch)
+                    ch = gc()
+                lim = width or 64
+                while ch is not None and len(tok.lstrip('+-')) < lim and chr(ch).isalnum():
+                    tok += chr(ch)
+                    ch = gc()
+                if ch is not None:
+                    ungc(ch)
+                if not tok or tok in '+-':
+                    return assigned
+                base = {'d': 10, 'i': 0, 'u': 10, 'x': 16, 'o': 8, 'p': 16}[spec]
+                try:
+                    v = int(tok, base)
+                except ValueError:
+                    return assigned
+                if not suppress:
+                    ptr = nth(assigned)
+                    assigned += 1
+                    if lmod >= 2:
+                        wr(ptr, struct.pack('<Q', v & 0xFFFFFFFFFFFFFFFF))
+                    else:
+                        wr(ptr, struct.pack('<I', v & 0xFFFFFFFF))
+                continue
+            if spec in 'sc':
+                ch = gc()
+                if spec == 's':
+                    while ch is not None and chr(ch).isspace():
+                        ch = gc()
+                buf = bytearray()
+                lim = width or (1 if spec == 'c' else 4096)
+                while ch is not None and len(buf) < lim and (spec == 'c' or not chr(ch).isspace()):
+                    buf.append(ch)
+                    ch = gc()
+                if ch is not None and spec == 's':
+                    ungc(ch)
+                if not buf and spec == 's':
+                    return assigned
+                if not suppress:
+                    ptr = nth(assigned)
+                    assigned += 1
+                    wr(ptr, bytes(buf) + (b'\0' if spec == 's' else b''))
+                continue
+            if spec == '%':
+                ch = gc()
+                if ch != ord('%'):
+                    if ch is not None:
+                        ungc(ch)
+                    return assigned
+                continue
+            return assigned
+        return assigned
+
+    def f_sscanf(x0, x1, x2, x3, x4=0, x5=0):
+        src = bytes(cstr(x0))
+        pos = [0]
+
+        def getch():
+            if pos[0] >= len(src):
+                return None
+            b = src[pos[0]]
+            pos[0] += 1
+            return b
+
+        return _fmt_scan(cstr(x1).decode(errors='replace'), getch, _varg_reader(2))
+
+    def f_fscanf(x0, x1, x2, x3, x4=0, x5=0):
+        f = files.get(x0)
+        if not f:
+            return -1 & 0xFFFFFFFFFFFFFFFF
+
+        def getch():
+            b = f.read(1)
+            return b[0] if b else None
+
+        return _fmt_scan(cstr(x1).decode(errors='replace'), getch, _varg_reader(2))
+
+    def f_qsort(x0, x1, x2, x3, x4=0, x5=0):
+        # 比较器是访客代码 —— 钩子内不可重入 emu_start；记录待决而非静默
+        # "排序完成"（错序比不排更糟）或崩溃。
+        deferred.append({'call': 'qsort', 'base': '0x%x' % x0, 'n': x1,
+                         'size': x2, 'cmp': '0x%x' % x3})
+        return 0
+
+    def f_dl_iterate_phdr(x0, x1, x2, x3, x4=0, x5=0):
+        deferred.append({'call': 'dl_iterate_phdr', 'cb': '0x%x' % x0})
+        return 0
+
+    def f_mprotect_libc(x0, x1, x2, x3, x4=0, x5=0):
+        try:
+            lo = x0 & ~(PAGE - 1)
+            hi = (x0 + x1 + PAGE - 1) & ~(PAGE - 1)
+            uc.mem_protect(lo, hi - lo, x2 & 7 or 1)
+        except Exception:
+            pass
+        return 0
+
+    def f_syscall(x0, x1, x2, x3, x4=0, x5=0):
+        svc_events.append({'svc': 'libc_syscall', 'nr': x0})
+        return 0
+
+    def f_time(x0, x1, x2, x3, x4=0, x5=0):
+        if x0:
+            wr(x0, struct.pack('<q', 1234))
+        return 1234
+
+    # JNI 资产面：AssetManager 句柄给非空（世界里有管理器），具体资产诚实
+    # 报"未找到"（容器字节经 --load/--fs 桥显式注入，不走隐式资产层）。
+    def f_aasset_manager(x0, x1, x2, x3, x4=0, x5=0):
+        return bump(16)
+
     table = {
         'malloc': f_malloc, '_Znwm': f_malloc, '_Znam': f_malloc, 'calloc': f_calloc,
         'free': f_free, '_ZdlPv': f_free, '_ZdaPv': f_free,
         'memcpy': f_memcpy, 'memmove': f_memcpy, 'memset': f_memset,
         'memcmp': f_memcmp, 'strlen': f_strlen, '__strlen_chk': f_strlen,
-        'strcmp': f_strcmp, 'strcpy': lambda x0, x1, x2, x3, x4=0, x5=0: (wr(x0, cstr(x1) + b'\0'), x0)[1],
-        'strcat': lambda x0, x1, x2, x3, x4=0, x5=0: (
-            wr(x0 + len(cstr(x0)), cstr(x1) + b'\0'), x0)[1],
-        'strncpy': lambda x0, x1, x2, x3=0, x4=0, x5=0: (
-            wr(x0, cstr(x1)[:x2].ljust(x2, b'\0')), x0)[1],
+        'strcmp': f_strcmp, 'strcpy': f_strcpy, 'strcat': f_strcat, 'strncpy': f_strncpy,
         'snprintf': f_snprintf, 'sprintf': f_sprintf,
         '__snprintf_chk': f_snprintf_chk, '__sprintf_chk': f_sprintf_chk,
         '__aarch64_sync_cache_range': f_noop, 'pthread_mutex_init': f_noop,
         'pthread_mutex_lock': f_noop, 'pthread_mutex_unlock': f_noop,
         'pthread_detach': f_noop, '__cxa_atexit': f_noop, '__cxa_finalize': f_noop,
-        'time': lambda x0, x1, x2, x3, x4=0, x5=0: 1234, 'getpid': lambda x0, x1, x2, x3, x4=0, x5=0: 1234,
+        'time': f_time, 'getpid': lambda x0, x1, x2, x3, x4=0, x5=0: 1234,
+        'getppid': lambda x0, x1, x2, x3, x4=0, x5=0: 1,
+        'gettid': lambda x0, x1, x2, x3, x4=0, x5=0: 1234,
+        'getpagesize': lambda x0, x1, x2, x3, x4=0, x5=0: 4096,
         'srand': f_noop, 'rand': lambda x0, x1, x2, x3, x4=0, x5=0: 42,
         'dladdr': lambda x0, x1, x2, x3, x4=0, x5=0: (
             # r29: shells self-locate via dladdr(self_fn, &info) and store
@@ -699,12 +1295,65 @@ def make_libc(uc, elf):
         'fseek': f_fseek, 'lseek': f_lseek, 'ftell': f_ftell,
         'mmap': f_mmap, 'munmap': f_noop,
         'pthread_create': f_pthread_create,
+        # r32: libc surface（见上方 r32 块注释 —— 静默 0 会劫持壳控制流）
+        'atoi': f_atoi, 'atol': f_atoi, 'strtol': f_strtol, 'strtoul': f_strtol,
+        'strchr': f_strchr, 'strrchr': f_strrchr, 'strstr': f_strstr,
+        'strcasestr': f_strcasestr, 'strspn': f_strspn, 'strcspn': f_strcspn,
+        'strncmp': f_strncmp, 'strncasecmp': f_strncasecmp, 'strnlen': f_strnlen,
+        'strdup': f_strdup, 'strtok': f_strtok, 'strlcpy': f_strlcpy,
+        'memchr': f_memchr, 'memmem': f_memmem, 'tolower': f_tolower,
+        '__memcpy_chk': f_memcpy_chk, '__memmove_chk': f_memcpy_chk,
+        '__memset_chk': f_memset_chk, '__strcat_chk': f_strcat,
+        '__strcpy_chk': f_strcpy, '__strncpy_chk': f_strncpy,
+        '__strchr_chk': f_strchr,
+        'getauxval': f_getauxval, 'prctl': f_noop, 'ptrace': f_noop,
+        'kill': f_noop, 'fork': f_noop, 'wait': f_noop, 'waitpid': f_noop,
+        'sleep': f_noop, 'exit': f_exit, 'abort': f_exit,
+        'android_set_abort_message': f_noop, '__stack_chk_fail': f_stack_chk_fail,
+        'signal': f_noop, 'sigemptyset': f_sigemptyset, 'sigemptyset64': f_sigemptyset,
+        'sigfillset': f_sigfillset, 'sigfillset64': f_sigfillset,
+        'sigaddset': f_sigaddset, 'sigaddset64': f_sigaddset,
+        'sigismember': f_sigismember, 'sigismember64': f_sigismember,
+        'sigsetjmp': f_sigsetjmp, 'siglongjmp': f_siglongjmp,
+        'pthread_attr_init': f_noop, 'pthread_attr_destroy': f_noop,
+        'pthread_attr_setdetachstate': f_noop, 'pthread_mutex_destroy': f_noop,
+        'pthread_rwlock_rdlock': f_noop, 'pthread_rwlock_wrlock': f_noop,
+        'pthread_rwlock_unlock': f_noop,
+        'pthread_key_create': f_pthread_key_create,
+        'pthread_key_delete': f_noop,
+        'pthread_getspecific': f_pthread_getspecific,
+        'pthread_setspecific': f_pthread_setspecific,
+        'pthread_once': f_pthread_once,
+        'sem_init': f_noop, 'sem_destroy': f_noop, 'sem_post': f_noop, 'sem_wait': f_noop,
+        'posix_memalign': f_posix_memalign, 'realloc': f_realloc,
+        'open': f_open, 'read': f_read, 'close': f_close, 'lseek64': f_lseek,
+        'stat': f_stat, 'lstat': f_stat, 'fstat': f_fstat, 'access': f_access,
+        'readlink': f_readlink, 'unlink': f_noop, 'rmdir': f_noop, 'remove': f_noop,
+        'pipe': f_pipe, 'fdopen': lambda x0, x1, x2, x3, x4=0, x5=0: x0,
+        'fileno': lambda x0, x1, x2, x3, x4=0, x5=0: x0,
+        'flock': f_noop, 'perror': f_noop, 'fgets': f_fgets, 'fgetc': f_fgetc,
+        'fputc': lambda x0, x1, x2, x3, x4=0, x5=0: x0 & 0xFF,
+        'fwrite': f_fwrite, 'feof': f_feof, 'fflush': f_noop, 'fsync': f_noop,
+        'rewind': f_rewind, 'opendir': f_noop, 'readdir': f_noop, 'closedir': f_noop,
+        'printf': f_printf, 'fprintf': f_fprintf, 'vfprintf': f_vfprintf,
+        'vsnprintf': f_vsnprintf, 'vasprintf': f_vasprintf,
+        '__vsnprintf_chk': f_vsnprintf_chk, '__vsprintf_chk': f_vsprintf_chk,
+        'sscanf': f_sscanf, 'fscanf': f_fscanf,
+        'qsort': f_qsort, 'dl_iterate_phdr': f_dl_iterate_phdr,
+        'mprotect': f_mprotect_libc, 'syscall': f_syscall,
+        '__android_log_write': f_noop, 'openlog': f_noop, 'closelog': f_noop,
+        'syslog': f_noop,
+        'AAssetManager_fromJava': f_aasset_manager, 'AAssetManager_open': f_noop,
+        'AAsset_read': f_noop, 'AAsset_getLength': f_noop, 'AAsset_close': f_noop,
     }
     table['_dlsym_rev'] = dlsym_rev        # r31 槽位 -> 名（hook_stub 反查）
     table['_mmap_regions'] = mmap_regions  # main 侧 CLI 输出（非符号名，绑定循环不触碰）
     table['_threads_spawned'] = threads_spawned
     table['_svc_hook'] = hook_svc            # raw-syscall bridge (SVC → UC_HOOK_INTR)
     table['_svc_events'] = svc_events
+    table['_deferred'] = deferred            # r32 做不到但已记录的调用（qsort/…）
+    table['_once_pending'] = once_pending    # r32 pthread_once 待决 init 例程
+    table['_unbound'] = {}                   # r32 未知名调用计数（main 侧绑定循环填）
     return table
 
 
@@ -807,7 +1456,20 @@ def main():
                 continue
             sa = STUB + 8 * i
             i += 1
-            stub_addr[sa] = libc.get(name, lambda x0, x1, x2, x3, x4=0, x5=0: 0)
+            # r32: 表外名字不再塌缩成匿名 return-0 —— 每次调用计数进
+            # _unbound，main 侧 JSON 输出（静默 0 曾是控制流劫持的隐身衣：
+            # 爱加密 VMP 环境门的 atoi 就是这么丢的）。语义保持诚实失败 0。
+            fn = libc.get(name)
+            if fn is None:
+                unbound = libc.get('_unbound')
+
+                def _mk(nm):
+                    def f(x0, x1, x2, x3, x4=0, x5=0):
+                        unbound[nm] = unbound.get(nm, 0) + 1
+                        return 0
+                    return f
+                fn = _mk(name)
+            stub_addr[sa] = fn
             stub_addr[sa + 1] = name  # type tag for logging
             uc.mem_write(r_offset, struct.pack('<Q', sa))
     for r_offset, rtype, symidx, addend in elf.relocations():
@@ -971,6 +1633,9 @@ def main():
     if svc_hook:
         uc.hook_add(UC_HOOK_INTR, svc_hook)
     svc_events = libc.pop('_svc_events', [])
+    deferred_calls = libc.pop('_deferred', [])
+    once_pending = libc.pop('_once_pending', [])
+    unbound_imports = libc.pop('_unbound', {})
 
     watch_events = []
 
@@ -1208,6 +1873,14 @@ def main():
         out['threads_spawned'] = [{'start': '0x%x' % t['start'], 'arg': '0x%x' % t['arg']} for t in threads]
     if svc_events:
         out['svc_events'] = svc_events
+    if unbound_imports:
+        # r32: 表外 libc 名的调用计数 —— 每次出现都意味着控制流吃过一个
+        # 静默 0；出现在这里 = 语义缺口清单，不是噪音。
+        out['unbound_imports'] = unbound_imports
+    if deferred_calls:
+        out['deferred_calls'] = deferred_calls
+    if once_pending:
+        out['once_pending'] = ['0x%x' % f for f in once_pending]
     if args.java:
         out['registered_natives'] = {f'{k[0]}{k[1]}': f'0x{v:x}' for k, v in regs.items()}
     print(json.dumps(out, indent=2))

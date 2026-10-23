@@ -298,6 +298,138 @@ def test_so_emulator_dlsym_namespace():
               'self-export wins, unknown fails to 0, property answered')
 
 
+def test_so_emulator_libc_surface():
+    """r32: the emulated libc surface must answer value-returning calls with
+    real semantics — a silent 0 steers shell control flow (Battle-3: the VMP
+    environment gate does atoi(sdk) and dispatches on it).
+
+    Synthetic .so imports six names through JUMP_SLOTs and chains six tiny
+    fns in ONE emulated process:
+      atoi("  -42") -> -42 (sign/whitespace parse, not 0)
+      strstr("hello world","world") -> haystack+6
+      strtok("a,,b", ",") twice -> second token at buf+3 (stateful)
+      sscanf("7b-1f","%x-%x",&a,&b) -> 2 conversions, stores 0x7b/0x1f
+      memset(buf, 0xAB, 4) -> dest, bytes written (C arg order — r32 latent fix)
+      not_a_libc_fn() -> 0, and the call is COUNTED in unbound_imports
+        (unknown names must be visible, never anonymously silent)
+    """
+    try:
+        import unicorn  # noqa: F401
+    except ImportError:
+        print('SKIP so_emulator libc surface (unicorn not installed — unavailable semantics)')
+        return
+    eh = bytearray(64)
+    eh[0:4] = b'\x7fELF'
+    eh[4] = 2
+    eh[5] = 1
+    eh[6] = 1
+    eh[16:18] = struct.pack('<H', 3)
+    eh[18:20] = struct.pack('<H', 183)
+    struct.pack_into('<Q', eh, 0x20, 64)
+    struct.pack_into('<H', eh, 0x34, 64)
+    struct.pack_into('<H', eh, 0x36, 56)
+    struct.pack_into('<H', eh, 0x38, 2)
+
+    ph = bytearray(56 * 2)
+    struct.pack_into('<I', ph, 0, 1)         # PT_LOAD
+    struct.pack_into('<Q', ph, 8, 0x1000)
+    struct.pack_into('<Q', ph, 16, 0x1000)
+    struct.pack_into('<Q', ph, 32, 0x1000)
+    struct.pack_into('<Q', ph, 40, 0x1000)
+    struct.pack_into('<I', ph, 56, 2)        # PT_DYNAMIC
+    struct.pack_into('<Q', ph, 56 + 8, 0x100)
+    struct.pack_into('<Q', ph, 56 + 32, 9 * 16)
+    dyn = b''.join(struct.pack('<QQ', t, v) for t, v in (
+        (4, 0x12c0),      # DT_HASH
+        (5, 0x1180),      # DT_STRTAB
+        (6, 0x1200),      # DT_SYMTAB
+        (11, 24),         # DT_SYMENT
+        (10, 0x100),      # DT_STRSZ
+        (23, 0x1300),     # DT_JMPREL
+        (2, 6 * 24),      # DT_PLTRELSZ
+        (20, 7),          # DT_PLTREL = RELA
+        (0, 0),           # DT_NULL
+    ))
+    strs = (b'\0' + b'atoi\0' + b'strstr\0' + b'strtok\0' + b'sscanf\0'
+            + b'memset\0' + b'not_a_libc_fn\0')
+    # strtab offsets: atoi=1, strstr=6, strtok=0xd, sscanf=0x14, memset=0x1b,
+    #                 not_a_libc_fn=0x22
+    names = ['atoi', 'strstr', 'strtok', 'sscanf', 'memset', 'not_a_libc_fn']
+    offs = [1, 6, 0xd, 0x14, 0x1b, 0x22]
+    sym = b'\0' * 24
+    for no in offs:
+        sym += struct.pack('<IBBHQQ', no, 0x12, 0, 0, 0, 0)
+    hasht = struct.pack('<IIIIIIIII', 1, 7, 1, 0, 0, 0, 0, 0, 0)
+    rela = b''.join(struct.pack('<QQq', 0x1400 + 8 * k, ((k + 1) << 32) | 1026, 0)
+                    for k in range(6))
+    STP, LDP, RET, BLR = 0xA9BE7BFD, 0xA8C27BFD, 0xD65F03C0, 0xD63F0100
+
+    def words(*ws):
+        return b''.join(struct.pack('<I', w) for w in ws)
+
+    def movz(rd, imm):
+        return 0xD2800000 | (imm << 5) | rd
+
+    # fn bodies (each ends with the harness-compatible epilogue)
+    fn_atoi = words(STP, movz(0, 0x1100), movz(9, 0x1400), 0xF9400128, BLR, LDP, RET)
+    fn_strstr = words(STP, movz(0, 0x1110), movz(1, 0x1120), movz(9, 0x1408),
+                      0xF9400128, BLR, LDP, RET)
+    fn_strtok = words(STP, movz(0, 0x1130), movz(1, 0x1140), movz(9, 0x1410),
+                      0xF9400128, BLR, movz(0, 0), movz(1, 0x1140),
+                      0xF9400128, BLR, LDP, RET)
+    fn_sscanf = words(STP, movz(0, 0x1150), movz(1, 0x1160), movz(2, 0x1500),
+                      movz(3, 0x1504), movz(9, 0x1418), 0xF9400128, BLR, LDP, RET)
+    fn_memset = words(STP, movz(0, 0x1600), movz(1, 0xAB), movz(2, 4),
+                      movz(9, 0x1420), 0xF9400128, BLR, LDP, RET)
+    fn_unbound = words(STP, movz(9, 0x1428), 0xF9400128, BLR, LDP, RET)
+    fns = ((0x1000, fn_atoi), (0x1020, fn_strstr), (0x1040, fn_strtok),
+           (0x1070, fn_sscanf), (0x10a0, fn_memset), (0x10d0, fn_unbound))
+    strings = ((0x1100, b'  -42\0'), (0x1110, b'hello world\0'), (0x1120, b'world\0'),
+               (0x1130, b'a,,b\0'), (0x1140, b',\0'), (0x1150, b'7b-1f\0'),
+               (0x1160, b'%x-%x\0'))
+    img = bytes(eh) + bytes(ph)
+    img += b'\0' * (0x100 - len(img)) + dyn
+    img += b'\0' * (0x1000 - len(img))
+    for va, body in fns:
+        img += b'\0' * (va - len(img)) + body
+    for va, s in strings:
+        img += b'\0' * (va - len(img)) + s
+    img += b'\0' * (0x1180 - len(img)) + strs
+    img += b'\0' * (0x1200 - len(img)) + sym
+    img += b'\0' * (0x12c0 - len(img)) + hasht
+    img += b'\0' * (0x1300 - len(img)) + rela
+    img += b'\0' * (0x2000 - len(img))
+    with tempfile.TemporaryDirectory() as td:
+        so = os.path.join(td, 'libc.so')
+        open(so, 'wb').write(img)
+        a_out = os.path.join(td, 'a.bin')
+        m_out = os.path.join(td, 'm.bin')
+        r = subprocess.run(
+            [sys.executable, os.path.join(HERE, 'so_emulator.py'), so,
+             '--no-init',
+             '--chain', ','.join('0x%x' % va for va, _ in fns),
+             '--dump-mem', '0x1500:8:' + a_out,
+             '--dump-mem', '0x1600:4:' + m_out],
+            capture_output=True, text=True, timeout=60)
+        assert r.returncode == 0, f'exit {r.returncode}: {r.stderr}\n{r.stdout}'
+        out = json.loads(r.stdout)
+        ret = [int(v, 16) for v in out['chain_returns']]
+        assert ret[0] == (1 << 64) - 42, f'atoi("  -42") must be -42, got {ret[0]:#x}'
+        assert ret[1] == 0x1110 + 6, f'strstr hit must point at "world", got {ret[1]:#x}'
+        assert ret[2] == 0x1130 + 3, f'second strtok token must be "b", got {ret[2]:#x}'
+        assert ret[3] == 2, f'sscanf must convert twice, got {ret[3]}'
+        assert ret[4] == 0x1600, f'memset must return dest, got {ret[4]:#x}'
+        assert ret[5] == 0, f'unknown import must fail honestly to 0, got {ret[5]:#x}'
+        assert open(a_out, 'rb').read() == struct.pack('<II', 0x7B, 0x1F), \
+            'sscanf stores mismatch'
+        assert open(m_out, 'rb').read() == b'\xAB' * 4, \
+            'memset C arg order violated (r32 latent fix regressed)'
+        assert out.get('unbound_imports', {}).get('not_a_libc_fn') == 1, \
+            f'unbound import call must be counted, got {out.get("unbound_imports")}'
+        print('so_emulator libc surface OK: atoi/strstr/strtok/sscanf real semantics, '
+              'memset C order, unbound imports counted')
+
+
 def test_rc4_vector():
     sys.path.insert(0, HERE)
     import importlib.util
@@ -956,6 +1088,7 @@ def test_dexdoctor():
 if __name__ == '__main__':
     test_so_emulator()
     test_so_emulator_dlsym_namespace()
+    test_so_emulator_libc_surface()
     test_rc4_vector()
     test_recon_smoke()
     test_disasm()
