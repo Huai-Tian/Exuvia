@@ -181,6 +181,13 @@ def dex_validate_fix(dex: bytes):
 
 SHELL_ASSET_PATTERNS = (
     'libjiagu', '.jgapp', 'jiagu',  # 360 family
+    # 爱加密 family (family-3): the encrypted shell container, the runtime
+    # lib dir, the anti-tamper seed/signature blobs and the planted marker
+    # files — all packer-fixed names (written by the packer, not the app),
+    # the same contract the 360 row above has always been.
+    'ijiami', '.ajm', 'ijm_lib',
+    'af.bin', 'signed.bin',
+    'sign_verify.png', 'data_path_defualt_code.png',
 )
 
 
@@ -193,7 +200,15 @@ def is_shell_asset(name):
         wrapper at bootstrap (device-verified on two families: 360's
         assets/libjiagu*.so, tosks's assets/libtosks*.so);
       * the family pattern table above (encrypted containers and other
-        non-.so shell payloads, e.g. 360's .jgapp).
+        non-.so shell payloads, e.g. 360's .jgapp, 爱加密's .ajm).
+
+    Deliberately NO content/magic tell: an app may legitimately encrypt its
+    own assets (the family-3 sample's own assets/icon|images/*.png carry no
+    PNG magic BY DESIGN — the app encrypts its resources, empty files
+    included). Content-based rejection would false-positive real apps; the
+    net stays name-based. Evaluated and EXCLUDED on the same evidence:
+    assets/dexopt/baseline.prof{,m} — the standard androidx ProfileInstaller
+    asset ("pro\\x00" magic), app-side build output, not shell machinery.
     """
     return name.startswith('assets/') and (
         name.endswith('.so')

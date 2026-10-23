@@ -960,6 +960,35 @@ def test_restore_forwarding_shell():
         print('  ' + line)
 
 
+def test_shell_asset_rule():
+    """Finding #7 (family-3 爱加密 empirical): the shell-asset rule must
+    catch the family's packer-fixed payload names while leaving app-side
+    assets alone — including app-ENCRYPTED resources (no PNG magic, empty
+    files) and the androidx baseline profile. The rule is name-based by
+    design: content tells false-positive legitimately encrypted apps."""
+    sys.path.insert(0, HERE)
+    import repair
+    caught = ['assets/ijiami.ajm',
+              'assets/ijm_lib/arm64-v8a/libexec.so',
+              'assets/af.bin', 'assets/signed.bin',
+              'assets/sign_verify.png', 'assets/data_path_defualt_code.png',
+              'assets/libjiagu.so', 'assets/libjiagu_art.so']  # 360 regression
+    kept = ['assets/dexopt/baseline.prof', 'assets/dexopt/baseline.profm',
+            'assets/icon/image_icon_constructor_encrypted.png',
+            'assets/images/comxx_ca_tk.png',
+            'assets/images/xxx_Opti_ez_xxexxx.png',   # 0B app-side asset
+            'assets/icon/image_have_icon_x_id_file_png.png',
+            'lib/arm64-v8a/libapp.so',                 # lib/-scoped .so is legit
+            'res/drawable/icon.png', 'resources.arsc']
+    for n in caught:
+        assert repair.is_shell_asset(n), 'must catch: %s' % n
+    for n in kept:
+        assert not repair.is_shell_asset(n), 'must keep: %s' % n
+    print('shell asset rule OK: %d shell caught, %d app-side kept '
+          '(encrypted assets + baseline profile exempt)'
+          % (len(caught), len(kept)))
+
+
 def test_rc4mat():
     """rc4mat (r17 tool): material-space scan — synthetic 14B-header material ->
     parity-key derivation round-trip + planted scan hit via the CLI."""
@@ -1141,6 +1170,7 @@ if __name__ == '__main__':
     test_repair_pipeline()
     test_repair_multi_donor_stage_names()
     test_restore_forwarding_shell()
+    test_shell_asset_rule()
     test_dexdoctor()
     test_fidelity()
     test_rc4mat()
