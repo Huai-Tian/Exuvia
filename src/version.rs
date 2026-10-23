@@ -1,7 +1,7 @@
 //! 版本锚点——与 SKILL.md §9 的版本锚点节双向绑定（tests/skill_doc.rs 断言一致性）。
 
 pub const EXUVIA_VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const SKILL_VERSION: &str = "1.10.6";
+pub const SKILL_VERSION: &str = "1.10.7";
 pub const HANDOFF_VERSION: i64 = 1;
 pub const GOAL_VERSION: i64 = 1;
 pub const PROPOSAL_VERSION: i64 = 1;

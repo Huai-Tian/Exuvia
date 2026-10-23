@@ -1310,6 +1310,85 @@ def test_fart_plan():
     print('fart_plan OK: 5 actions planned, tiering/receiver/args correct')
 
 
+def _nrv_pack_events(events):
+    """Pack decoder-read-order events [('bit',b)|('byte',x)] into an NRV
+    stream: a 32-bit LE word materializes when its first bit is produced
+    (reader consumes MSB first, exactly 32 bits per word); literal/match
+    bytes flush right after the word they were produced under."""
+    import struct as st2
+    out = bytearray()
+    bitq, byteq = [], []
+
+    def flush():
+        if not bitq and not byteq:
+            return
+        w = 0
+        for k, b in enumerate(bitq):
+            w |= b << (31 - k)
+        out.extend(st2.pack('<I', w))
+        out.extend(byteq)
+        bitq.clear()
+        byteq.clear()
+
+    for kind, v in events:
+        if kind == 'bit':
+            bitq.append(v)
+            if len(bitq) == 32:
+                flush()
+        else:
+            byteq.append(v)
+    flush()
+    return bytes(out)
+
+
+# end-marker bit sequences driving each m_off loop to 0x1000002 (so that
+# (m_off-3)*256 + 0xff == 0xffffffff, the stream terminator); DFS-derived,
+# forward-verified.
+_END_2E = [0, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1,
+           0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 1]
+_END_2B = [0] * 44 + [1, 0, 0, 1]
+
+
+def test_upxunpack():
+    """upxunpack (r34): NRV2E round-trip with literal + repeat-match + end
+    marker on a synthetic stream; 2B/2D literal-only streams; arm64 call
+    filter 0x52 inverse; PackHeader end-to-end via unpack()."""
+    import struct as st2
+    import upxunpack
+    # NRV2E: 'A' literal, then 7-copy match (m_off=1, m_len=6), end marker
+    ev = ([('bit', 1), ('byte', 0x41)]                       # literal 'A'
+          + [('bit', b) for b in [0, 0, 1]]                  # match: m_off->2 == last(1)
+          + [('bit', b) for b in [0, 0, 1, 1]]               # m_len long form -> 6
+          + [('bit', 0)]                                     # exit literal loop
+          + [('bit', b) for b in _END_2E] + [('byte', 0xff)])
+    stream = _nrv_pack_events(ev)
+    out, used = upxunpack.nrv_decompress(stream, 'nrv2e', 32)
+    assert out == b'AAAAAAAA' and used == len(stream), (out, used, len(stream))
+    # 2B / 2D literal-only streams hit the same terminator
+    for algo, end in (('nrv2b', _END_2B), ('nrv2d', _END_2E)):
+        ev2 = ([('bit', 1), ('byte', 0x41), ('bit', 0)]
+               + [('bit', b) for b in end] + [('byte', 0xff)])
+        s2 = _nrv_pack_events(ev2)
+        out2, used2 = upxunpack.nrv_decompress(s2, algo, 32)
+        assert out2 == b'A' and used2 == len(s2), (algo, out2, used2)
+    # arm64 filter 0x52: word at index i gets low26 = (w - i) & 0x3ffffff
+    buf = bytearray(16)
+    st2.pack_into('<I', buf, 8, 0x94000000 | ((2 + 0x1234) & 0x3ffffff))
+    fixed, n = upxunpack.unfilter_arm64_calls(bytes(buf))
+    assert n == 1
+    assert st2.unpack_from('<I', fixed, 8)[0] == (0x94000000 | 0x1234)
+    # PackHeader end-to-end: synthetic packed file, one block, ftid 0
+    ph = b'\xaa\xbb\xcc\xdd' + b'UPX!' + st2.pack('<III', 0, 8, 8) \
+        + b'\x00' * 4
+    binfo = st2.pack('<IIBBBB', 8, len(stream), 8, 0, 0, 0)
+    packed = b'PAD!' + ph + binfo + stream + b'\0' * 8
+    out3, rep = upxunpack.unpack(packed)
+    assert out3 == b'AAAAAAAA', out3
+    assert rep['pack_header'] == 4 and rep['tail_zero_padded'] == 0
+    assert len(rep['blocks']) == 1 and rep['decompressed'] == 8
+    print('upxunpack OK: 2E/2B/2D synthetic streams, filter 0x52, PackHeader e2e')
+
+
 if __name__ == '__main__':
     test_so_emulator()
     test_so_emulator_dlsym_namespace()
@@ -1329,4 +1408,5 @@ if __name__ == '__main__':
     test_rc4mat()
     test_covdebt()
     test_fart_plan()
+    test_upxunpack()
     print('trackb selftest: ALL GREEN')

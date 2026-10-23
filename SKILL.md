@@ -342,7 +342,7 @@ guidance = [
 ## 9. Version anchors
 
 ```text
-SKILL_VERSION: 1.10.6
+SKILL_VERSION: 1.10.7
 handoff_version: 1    goal_version: 1    proposal_version: 1
 ```
 
@@ -362,4 +362,5 @@ handoff_version: 1    goal_version: 1    proposal_version: 1
 - 1.10.4: restore 回填谓词纳入转发薄壳 + 供体诚实性修复（族 3 爱加密实证）：抽代码族对框架回调重写方法留纯转发薄壳（恰好 1 invoke + 1 return，可夹 move-result 值传递——8B 空壳顶包 104B 真身），非 nop 墙 → 旧谓词漏修（实证：74 薄壳中 31 处供体有真身，含启动路径 `Lyg;.onCreate` 8B→104B、`Lb4;.onAttachedToWindow` 8B→764B）；同时旧供体守卫把薄壳当真身——212 处 nop 墙被"回填"成 8B 薄壳仍记 restored（伪恢复，墙数照降、语义没回来）。谓词双侧对称放宽：目标可填 = nop 墙 ∨ 转发薄壳；供体资格 = 非空壳（墙与薄壳皆不供体）——对称性即安全证明：真空方法（开发者就写的 `super.onX()`）在供体侧同为薄壳被拒之门外，回填只在同签名供体携带真身时触发，同构建 dump 下这只能意味着目标被抽空。Restore 日志区分三种回填事由（nop-wall / forwarding-shell / body-merged）；新增 `Restore --selftest` 合成锚点（谓词六正反例 + 内存合成 dex 走真实 CLI 回填 e2e：墙与薄壳回填、真空供体被拒、真身不被触碰），自检在 dexlib 工具链可用时联动、否则大声 SKIP；样本回归：回填 5546（墙 5515 + 壳 31），净 nop 墙 8697→3182、薄壳 74→43、伪恢复 212 清零，`Lyg;.onCreate` 104B 真身实证；无协议变更。
 - 1.10.5: 壳资产规则补族 3（爱加密实证）：家族模式表增收容载与运行时名（ijiami/.ajm/ijm_lib）、防篡改种子与签名块（af.bin/signed.bin）、植入标记文件（sign_verify.png/data_path_defualt_code.png）——均为打包器固定名（壳写的，不是应用写的），与 360 行同一契约；实证残留 5 项 660,851B 全清。规则仍纯名匹配、**刻意不加内容/magic 判据**——同一样本自证：应用自有 assets/icon|images/*.png 本就无 PNG magic（应用加密资源，含 0B 文件），内容判据会误伤真应用；assets/dexopt/baseline.prof{,m} 经评估保留（"pro\x00" magic 的 androidx ProfileInstaller 标准资产，应用侧构建产物）。自检新增壳资产规则锚点（壳 7 捕获 / 应用侧 8 豁免：加密资源、空文件、baseline profile、lib/ 下合法 .so）；样本回归：成品 398→393 条目，五重验收门全绿；无协议变更。
 - 1.10.6: 覆盖率债务闭环三件套（族 3 爱加密"执行才重物化"机理的机器化执行，模式取自 FART 主动调用）：修复后残留的每堵 nop 墙都是覆盖率债务——dump 会话没执行过它，任何供体都不可能携带其真身；重物化先于首条指令执行，故哑参数 + 全吞异常即够，方法只需开始、无需成功。trackb/covdebt.py（成品 dex → 结构化债务 JSON，纯 Python 墙谓词与 Restore.isNopWall 语义逐条对齐，packed 8697 / 成品 3182 与 dexlib2 基准零误差校准）；trackb/fart_plan.py（债务 → 调用计划：静态反射直调 / Unsafe.allocateInstance 免构造接收器 / 构造器走 newInstance / <clinit> 走 forName 初始化 / 抽象类如实跳过；清单组件类前置为高价值层，支持层数裁剪 --limit）；trackb/fart_sweep.{js,py}（设备臂：Frida 薄执行器逐条反射调用、目标内 NPE 亦记成功——证明真代码已跑，adb 运行器产 sweep_report.json）。重脱后 --dump 追加，墙数逐轮可度量收敛（多供体恢复链 1.10.3 起可用）。自检新增合成锚点（含方法合成 dex 走查 + 谓词正反例 + 计划动作/分层/参数合成）；设备侧执行为维护者一键流程，本次未经真机验证（如实标注）；无协议变更。
+- 1.10.7: 新增 trackb/upxunpack.py——纯 Python UPX 壳 ELF 解开器（族 3 实证：壳自己的 libexec.so 是 stock UPX，NRV2E_LE32 + arm64 过滤器 0x52）。解析 PackHeader（l_info/p_info/b_info 链），NRV2B/2D/2E × LE32/8/LE16 九种方法变体按 UCL 参考实现（n2b_d.c/n2d_d.c/n2e_d.c + getbit.h）逐语义移植，LZMA(14) 如实报错不猜测；arm64 过滤器 0x52 逆变换与 stock stub 逐指令核对（bits[30:26]==0b00101 → low26=(w-i)&0x3ffffff）。输出为各块解压拼接（原文件前缀），p_filesize 未覆盖尾部（运行期重建区，如壳自己的 RW/GOT）如实零填充并标注。自检锚点：合成 NRV2E 流（字面量+重复匹配+结束标记）/2B/2D 字面量流/过滤器逆变换/PackHeader e2e；样本回归：壳 .so 两块字节级尺寸全中（解压 0x3f25c/0x9cd94、消耗 0x13ef3/0x3aff8 与 b_info 完全一致），8067 处 B/BL 反过滤，JNI_OnLoad 恢复可读。无协议变更。
 - Before adapting to a new environment, compare `exuvia --version` against these.
