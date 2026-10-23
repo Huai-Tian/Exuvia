@@ -1157,6 +1157,159 @@ def test_dexdoctor():
     print('dexdoctor OK: 5 planted pathologies detected + healed to exact original bytes')
 
 
+def _mk_dex_with_methods():
+    """Synthetic DEX with one class and three coded methods: a static
+    nop-wall, a real body (non-zero literal), and a virtual nop-wall.
+    Shared by the covdebt anchor."""
+    import struct as st2
+    import hashlib as hl
+    import zlib
+    strings = ['Lcom/x/A;', 'I', 'V', 'wall', 'real', 'vwall']
+    hdr = bytearray(0x70)
+    hdr[0:8] = b'dex\n035\x00'
+    str_ids_off, n_str = 0x70, len(strings)
+    type_ids_off = str_ids_off + n_str * 4          # 3 types (0,1,2)
+    proto_ids_off = type_ids_off + 3 * 4            # 2 protos
+    method_ids_off = proto_ids_off + 2 * 12         # 3 methods
+    class_defs_off = method_ids_off + 3 * 8         # 1 class
+    data_off = class_defs_off + 32
+    # data: string blobs
+    blob = bytearray()
+    str_offs = []
+    for s in strings:
+        str_offs.append(data_off + len(blob))
+        blob += bytes([len(s)]) + s.encode() + b'\x00'
+    class_data_off = data_off + len(blob)
+    # class_data: 0 fields, 2 direct, 1 virtual — code offsets patched later
+    cd_placeholder_len = 16
+    code0_off = (class_data_off + cd_placeholder_len + 3) & ~3
+    wall = b'\x00\x00\x12\x00\x0f\x00'      # nop; const/4 v0,0; return v0
+    real = b'\x12\x10\x0f\x00'              # const/4 v0,0x1; return v0
+    vwall = b'\x00\x00\x0e\x00'             # nop; return-void
+    code1_off = code0_off + 16 + len(wall)
+    code1_off = (code1_off + 3) & ~3
+    code2_off = (code1_off + 16 + len(real) + 3) & ~3
+
+    def uleb(n):
+        out = bytearray()
+        while True:
+            b = n & 0x7f
+            n >>= 7
+            if n:
+                out.append(b | 0x80)
+            else:
+                out.append(b)
+                break
+        return bytes(out)
+
+    cd = (uleb(0) + uleb(0) + uleb(2) + uleb(1)
+          + uleb(0) + uleb(0x9) + uleb(code0_off)   # direct: wall (static)
+          + uleb(1) + uleb(0x1) + uleb(code1_off)   # direct: real
+          + uleb(2) + uleb(0x1) + uleb(code2_off))  # virtual: vwall (idx diff restarts)
+    assert len(cd) <= cd_placeholder_len
+
+    out = bytearray(hdr)
+    out += b''.join(st2.pack('<I', o) for o in str_offs)          # string_ids
+    out += st2.pack('<III', 0, 1, 2)                              # type_ids
+    out += st2.pack('<III', 1, 1, 0)                              # proto ()I
+    out += st2.pack('<III', 2, 2, 0)                              # proto ()V
+    out += st2.pack('<HHI', 0, 0, 3) + st2.pack('<HHI', 0, 0, 4) \
+        + st2.pack('<HHI', 0, 1, 5)                               # method_ids
+    out += st2.pack('<IIIIIIII', 0, 0x1, 0xFFFFFFFF, 0, 0xFFFFFFFF,
+                    0, class_data_off, 0)                         # class_def
+    assert len(out) == data_off
+    out += blob[:class_data_off - data_off]                       # strings
+    out += cd
+    out += b'\x00' * (code0_off - len(out))
+
+    def code_item(insns):
+        return st2.pack('<HHHHII', 1, 0, 0, 0, 0, len(insns) // 2) + insns
+
+    out += code_item(wall)
+    out += b'\x00' * (code1_off - len(out))
+    out += code_item(real)
+    out += b'\x00' * (code2_off - len(out))
+    out += code_item(vwall)
+    st2.pack_into('<IIII', out, 56, n_str, str_ids_off, 3, type_ids_off)
+    st2.pack_into('<IIII', out, 72, 2, proto_ids_off, 0, 0)
+    st2.pack_into('<IIII', out, 88, 3, method_ids_off, 1, class_defs_off)
+    st2.pack_into('<II', out, 104, len(out) - data_off, data_off)
+    st2.pack_into('<I', out, 32, len(out))
+    st2.pack_into('<I', out, 36, 0x70)
+    st2.pack_into('<I', out, 40, 0x12345678)
+    out[12:32] = hl.sha1(bytes(out[32:])).digest()
+    st2.pack_into('<I', out, 8, zlib.adler32(bytes(out[12:])) & 0xFFFFFFFF)
+    return bytes(out)
+
+
+def test_covdebt():
+    """covdebt (r33): wall predicate + class_data walk on a synthetic dex —
+    wall counted, real body not, direct/virtual lists both walked."""
+    import covdebt
+    d = _mk_dex_with_methods()
+    # predicate unit anchors
+    assert covdebt.is_nop_wall(b'\x00\x00\x0e\x00')                    # nop + return
+    assert not covdebt.is_nop_wall(b'\x0e\x00')                        # bare return: legit empty
+    assert not covdebt.is_nop_wall(b'\x00\x00\x12\x50\x0f\x00')        # non-zero literal (11n high nibble)
+    assert not covdebt.is_nop_wall(b'\x00\x00\x6e\x10\x00\x00\x00\x00\x0e\x00')  # invoke
+    assert not covdebt.is_nop_wall(b'\x00\x01\x00\x00\x0e\x00')        # payload, not nop
+    stats, debt = covdebt.extract_debt(d)
+    assert (stats['methods'], stats['coded']) == (3, 3), stats
+    assert (stats['nop_wall'], stats['real'], stats['no_code']) == (2, 1, 0), stats
+    by_name = {e['name']: e for e in debt}
+    assert set(by_name) == {'wall', 'vwall'}
+    w, v = by_name['wall'], by_name['vwall']
+    assert w['static'] and w['kind'] == 'direct' and w['proto'] == '()I'
+    assert w['class'] == 'Lcom/x/A;' and w['body_bytes'] == 6
+    assert v['kind'] == 'virtual' and v['proto'] == '()V' and not v['clinit']
+    print('covdebt OK: 2/3 synthetic methods flagged as debt, fields complete')
+
+
+def test_fart_plan():
+    """fart_plan (r33): debt -> actions (invoke/construct/init_class/skip),
+    receiver synthesis, dummy args, component tiering (dotted + descriptor)."""
+    import fart_plan
+    base = {'access': 0x1, 'class_abstract': False, 'static': False,
+            'abstract': False, 'constructor': False, 'clinit': False,
+            'kind': 'virtual', 'return': 'V', 'body_bytes': 6}
+    debt = {'dex': 'synthetic', 'debt': [
+        dict(base, **{'class': 'Lcom/a/Svc;', 'name': 'onX',
+                      'proto': '(I)V', 'params': ['I']}),
+        dict(base, **{'class': 'Lcom/a/Svc;', 'name': '<init>',
+                      'proto': '()V', 'params': [], 'constructor': True,
+                      'kind': 'direct'}),
+        dict(base, **{'class': 'Lcom/a/Util;', 'name': 's',
+                      'proto': '()V', 'params': [], 'static': True,
+                      'access': 0x9, 'kind': 'direct'}),
+        dict(base, **{'class': 'Lcom/a/Abs;', 'name': 'm', 'proto': '()V',
+                      'params': [], 'class_abstract': True}),
+        dict(base, **{'class': 'Lcom/a/Svc;', 'name': '<clinit>',
+                      'proto': '()V', 'params': [], 'clinit': True,
+                      'access': 0x8, 'kind': 'direct'}),
+    ]}
+    out = fart_plan.make_plan(debt, ['com.a.Svc'])
+    assert out['summary']['entries'] == 5
+    assert out['summary']['skipped_abstract'] == 1
+    by = {(e['class'], e['name']): e for e in out['plan']}
+    onx = by[('com.a.Svc', 'onX')]
+    assert onx['action'] == 'invoke' and onx['receiver'] == 'alloc'
+    assert onx['tier'] == 'component' and onx['params'] == ['int']
+    assert onx['args'] == [{'kind': 'prim', 'box': 'java.lang.Integer', 'value': 0}]
+    assert by[('com.a.Util', 's')]['receiver'] == 'static'
+    assert by[('com.a.Util', 's')]['tier'] == 'rest'
+    assert by[('com.a.Svc', '<init>')]['action'] == 'construct'
+    assert by[('com.a.Svc', '<clinit>')]['action'] == 'init_class'
+    assert by[('com.a.Abs', 'm')]['action'] == 'skip'
+    assert 'abstract' in by[('com.a.Abs', 'm')]['reason']
+    # component classes sort ahead of the rest tier
+    assert out['plan'][0]['tier'] == 'component'
+    assert out['plan'][-1]['tier'] in ('component', 'rest')
+    # descriptor form of the components list normalizes identically
+    out2 = fart_plan.make_plan(debt, ['Lcom/a/Svc;'])
+    assert [e['tier'] for e in out2['plan']] == [e['tier'] for e in out['plan']]
+    print('fart_plan OK: 5 actions planned, tiering/receiver/args correct')
+
+
 if __name__ == '__main__':
     test_so_emulator()
     test_so_emulator_dlsym_namespace()
@@ -1174,4 +1327,6 @@ if __name__ == '__main__':
     test_dexdoctor()
     test_fidelity()
     test_rc4mat()
+    test_covdebt()
+    test_fart_plan()
     print('trackb selftest: ALL GREEN')
