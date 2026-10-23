@@ -70,6 +70,7 @@ SENTINEL = 0x630000000000
 DT_NULL, DT_HASH, DT_STRTAB, DT_SYMTAB, DT_SYMENT = 0, 4, 5, 6, 11
 DT_GNU_HASH, DT_JMPREL = 0x6FFFFEF5, 23
 DT_INIT_ARRAY, DT_INIT_ARRAYSZ = 25, 27
+DT_INIT = 12
 R_RELATIVE, R_GLOB_DAT, R_JUMP_SLOT = 1027, 1025, 1026
 
 
@@ -394,27 +395,47 @@ def make_libc(uc, elf):
         # initial heap window covering the cursor, so a cursor past HEAPSZ wrote
         # to unmapped memory (mini-linker loads crash there). Absurd lengths now
         # fail as 0 (callers check), sane ones map their own region.
+        # Battle-3 爱加密 lesson: a requested address is not noise. MAP_FIXED
+        # (x3 & 0x10) is a hard contract — the caller requires exactly x0
+        # (stage-2 decryptors remap their own .text span in place; land the
+        # mapping anywhere else and the decrypted bytes never sit under the
+        # PC — DT_INIT "completes" into still-encrypted code). A bare hint
+        # (x0 != 0, no FIXED) is honored when the range is free, cursor
+        # otherwise — kernel semantics both ways.
         length = x1 if x1 else 0x1000
         if length > 0x40000000:
             mmap_regions.append({'addr': 0, 'len': length, 'source': 'refused'})
             return 0
-        addr = (mmap_cursor[0] + PAGE - 1) & ~(PAGE - 1)
-        mmap_cursor[0] = addr + ((length + PAGE - 1) & ~(PAGE - 1))
+        span = ((x0 % PAGE) + length + PAGE - 1) & ~(PAGE - 1)
+        addr = None
+        if x0:
+            cand = x0 & ~(PAGE - 1)
+            if x3 & 0x10:  # MAP_FIXED — in-place remap: reuse the pages when
+                addr = cand  # already mapped (unicorn world is RWX), else map
+            else:
+                try:
+                    uc.mem_map(cand, span)
+                    addr = cand  # hint honored
+                except Exception:
+                    addr = None  # busy — fall through to the cursor
+        if addr is None:
+            addr = (mmap_cursor[0] + PAGE - 1) & ~(PAGE - 1)
+            mmap_cursor[0] = addr + span
         try:
-            uc.mem_map(addr, (length + PAGE - 1) & ~(PAGE - 1))
+            uc.mem_map(addr, span)
         except Exception:
-            pass  # already mapped (e.g. inside the initial heap window)
+            pass  # already mapped (initial heap window / in-place remap)
         f = files.get(x4)
         if f:
             f.seek(x5)
             blob = f.read(length)
-            uc.mem_write(addr, blob)
+            uc.mem_write(addr + (x0 % PAGE), blob)
             mmap_regions.append({'addr': addr, 'len': len(blob), 'source': 'fd:%s' % f.name})
         else:
             zero = b'\0' * min(length, 0x400000)
-            uc.mem_write(addr, zero)
+            uc.mem_write(addr + (x0 % PAGE), zero)
             mmap_regions.append({'addr': addr, 'len': length, 'source': 'anon'})
-        return addr
+        return x0 if (x0 and (x3 & 0x10)) else addr
 
     # Raw-syscall bridge (r27, Battle-1 r26 discovery): modern shells carry their
     # own syscall stubs ('mov x8,#N; svc #0') to bypass libc hooks entirely —
@@ -439,6 +460,7 @@ def make_libc(uc, elf):
             # caller raises on the marker and the run reports the scene.
             svc_events.append({'exception': intno,
                                'pc': '0x%x' % uc_.reg_read(UC_ARM64_REG_PC),
+                               'lr': '0x%x' % uc_.reg_read(UC_ARM64_REG_LR),
                                'detail': 'sync CPU exception (not SVC) — undefined insn / encrypted code'})
             uc_.emu_stop()
             return
@@ -497,7 +519,30 @@ def make_libc(uc, elf):
             r = f_mmap(x0, uc_.reg_read(UC_ARM64_REG_X1), uc_.reg_read(UC_ARM64_REG_X2),
                        uc_.reg_read(UC_ARM64_REG_X3), uc_.reg_read(UC_ARM64_REG_X4),
                        uc_.reg_read(UC_ARM64_REG_X5))
+            svc_events.append({'svc': 'mmap', 'req': '0x%x' % x0, 'len': x1,
+                               'flags': '0x%x' % uc_.reg_read(UC_ARM64_REG_X3),
+                               'ret': '0x%x' % (r & 0xFFFFFFFFFFFFFFFF)})
             uc_.reg_write(UC_ARM64_REG_X0, r & 0xFFFFFFFFFFFFFFFF)
+            return
+        if x8 == 226:  # mprotect(addr,len,prot) — hardened shells flip their
+            # freshly-decrypted .text R+X; the old fallthrough logged 'unknown'
+            # and returned 0, hiding the whole stage-2 chain (Battle-3 爱加密).
+            # Apply perms best-effort (never crash the run on protect itself).
+            svc_events.append({'svc': 'mprotect', 'addr': '0x%x' % x0,
+                               'len': x1, 'prot': x2})
+            try:
+                lo = x0 & ~(PAGE - 1)
+                hi = (x0 + x1 + PAGE - 1) & ~(PAGE - 1)
+                uc_.mem_protect(lo, hi - lo, x2 & 7 or 1)
+            except Exception:
+                pass
+            uc_.reg_write(UC_ARM64_REG_X0, 0)
+            return
+        if x8 == 215:  # munmap(addr,len) — stage teardown (e.g. the stage-1
+            # region after in-place decryption); keep pages (cheap), but the
+            # event must be visible in the trace.
+            svc_events.append({'svc': 'munmap', 'addr': '0x%x' % x0, 'len': x1})
+            uc_.reg_write(UC_ARM64_REG_X0, 0)
             return
         if x8 in (93, 94):  # exit / exit_group — stop; x0 already holds the code
             svc_events.append({'svc': 'exit', 'code': x0})
@@ -1013,8 +1058,23 @@ def main():
         try:
             dtag = elf.dynamic_tags()
             ia, iasz = dtag.get(DT_INIT_ARRAY, 0), dtag.get(DT_INIT_ARRAYSZ, 0)
+            dt_init = dtag.get(DT_INIT, 0)
         except Exception:
-            ia, iasz = 0, 0
+            ia, iasz, dt_init = 0, 0, 0
+        # Battle-3 爱加密: hardened shells put the bootstrap decryptor in
+        # DT_INIT — every real loader runs it BEFORE .init_array. Running
+        # .init_array first executes still-encrypted code (the old intno=1
+        # wall on all 55 entries). Faithful order: DT_INIT -> INIT_ARRAY.
+        if dt_init:
+            try:
+                uc.reg_write(UC_ARM64_REG_SP, STACK + STACKSZ // 2)
+                uc.reg_write(UC_ARM64_REG_LR, SENTINEL)
+                n0 = len(svc_events)
+                uc.emu_start(dt_init, SENTINEL, timeout=args.timeout * 1000 * 1000)
+                raise_if_cpu_exc(n0)
+                init_ran.append('0x%x(dt_init)' % dt_init)
+            except Exception:
+                init_ran.append('0x%x(dt_init)!' % dt_init)
         for k in range(iasz // 8 if ia else 0):
             try:
                 fn = struct.unpack('<Q', bytes(uc.mem_read(ia + k * 8, 8)))[0]
@@ -1075,6 +1135,7 @@ def main():
         dump_fixed_regions()
         print(f'{{"error":"E_EMU","detail":"{e}","pc":"0x{uc.reg_read(UC_ARM64_REG_PC):x}",'
               f'"entry":"0x{entries[idx][0]:x}",'
+              f'"init_array_ran":{json.dumps(init_ran)},'
               f'"regs":{json.dumps(regs)},'
               f'"svc_events":{json.dumps(svc_events)},'
               f'"watch":{json.dumps(watch_events)}}}')
