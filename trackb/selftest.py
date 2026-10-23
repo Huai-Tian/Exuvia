@@ -917,6 +917,26 @@ def test_repair_pipeline():
     print('repair pipeline OK: dexclean classification (shell caught, app kept)')
 
 
+def test_repair_multi_donor_stage_names():
+    """Finding #8 (family-3 爱加密 empirical): the restore loop's temp name
+    must be unique per (stage dex, donor source). A dex-only name is shared
+    by every --dump source: from the second donor on, a restore's input and
+    output are the same file, and the success cleanup then deletes the very
+    file the chain continues from — every later donor plus StubSafe dies on
+    DexFileNotFound and the pipeline collapses."""
+    sys.path.insert(0, HERE)
+    import repair_all
+    names = [repair_all.restore_stage_path('/tmp/o.apk', di, si)
+             for di in range(3) for si in range(7)]
+    assert len(set(names)) == len(names), \
+        'restore stage names must be unique per (stage dex, donor)'
+    for di in range(3):
+        assert '/tmp/o.apk.stage%d.dex' % di not in names
+        assert '/tmp/o.apk.stage_final%d.dex' % di not in names
+    print('repair multi-donor stage names OK: %d unique paths, '
+          'no stage/final collision' % len(names))
+
+
 def test_rc4mat():
     """rc4mat (r17 tool): material-space scan — synthetic 14B-header material ->
     parity-key derivation round-trip + planted scan hit via the CLI."""
@@ -1096,6 +1116,7 @@ if __name__ == '__main__':
     test_sm4recon()
     test_elfrecon()
     test_repair_pipeline()
+    test_repair_multi_donor_stage_names()
     test_dexdoctor()
     test_fidelity()
     test_rc4mat()

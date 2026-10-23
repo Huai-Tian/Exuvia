@@ -340,7 +340,7 @@ guidance = [
 ## 9. Version anchors
 
 ```text
-SKILL_VERSION: 1.10.2
+SKILL_VERSION: 1.10.3
 handoff_version: 1    goal_version: 1    proposal_version: 1
 ```
 
@@ -356,4 +356,5 @@ handoff_version: 1    goal_version: 1    proposal_version: 1
 - 1.10.0: restore/stubsafe close the nop-wall gap (the extraction+nop-fill family shape — 爱加密-style: gutted bodies remain as LEGAL code_items of nops + zero-literal consts + return, so the old `implementation == null` fill predicate never saw them): Restore's fillable set gains nop-wall methods and its donor index rejects nop-wall source bodies (wall over wall = fake restore); StubSafe synthesizes contract bodies for nop-wall LIFECYCLE bodies on framework-carrier classes (superclass chain must exit the dex at a non-`Object` ancestor — a lifecycle name on a POJO is not the tell) and keeps non-lifecycle walls (verify as no-ops; only a source truly refills); residual try tables don't disqualify (handler code is gutted to nops too, and grafting replaces the implementation wholesale). Sample-validated: 8771/10290 walls on the 爱加密-free sample (85.1%), zero fake restores with an all-wall source, 44 lifecycle walls synthesized. No protocol change.
 - 1.10.1: repair 清单手术盲区修复（族 3 爱加密实证）：wrapper 检测的兜底判定去掉 `com.` 前缀窄化——"类不在随包 dex 集内"本就是定案判据，与前缀无关（爱加密的壳 Application 在非 com 命名空间下逃过检测）；手术范围从单一 `android:name` 扩到全部启动期类属性（`android:name` + `android:appComponentFactory`，API 28+ 工厂劫持是族 3 的实际引导链），支持同一 `<application>` 元素多属性一次摘除（降序偏移删除 + 尺寸字段逐轮重读）；自检新增双属性合成锚点（正例双摘/兄弟属性保留/负例随包类不误伤）；无协议变更。
 - 1.10.2: so_emulator 伪 libc 覆盖面扩充（族 3 爱加密实证）：真壳 import 面 150+ 个 libc 名，表外名字原先塌缩成匿名静默 return-0 桩——对"返回值被消费"的函数那不是良性默认，而是把壳的控制流推上错误分支（实证：爱加密 VMP 环境门 atoi(__system_property_get("ro.build.version.sdk")) 的 atoi 丢失 → 恒 0 → "上古设备"分派）。补齐约 110 个通用设备级语义（atoi/strtol 家族、str/mem 家族、_chk 变体、getauxval、pthread/sem/信号集、open/read/stat 家族（fd 层与 FILE 层共享 --fs 桥）、printf/scanf 家族（AAPCS64 va_list 读取器 + 变参扫描引擎）、qsort/dl_iterate_phdr/siglongjmp 以延迟调用记录输出、AAssetManager 桩）；表外名字改为具名计数桩，JSON 新增 unbound_imports（语义缺口清单，不是噪音）与 deferred_calls/once_pending；潜伏修复 f_memset 参数序（C 契约 dest/val/n——旧体写反，零值世界侥幸不显）与 __stack_chk_fail 大声停下（绝不静默落进下一函数）；自检新增六导入合成 ELF 锚点（atoi/strstr/strtok/sscanf 真语义 + memset 参数序 + 未绑定计数）；样本回归：VMP 环境门返回 1（sdk=30 分派正确），svc 事件流与修复前逐项一致。无协议变更。
+- 1.10.3: repair 多供体恢复链修复（族 3 爱加密实证）：restore 逐供体暂存名 `.stage_next{dex}` 只按产物 dex 编号、不随供体编号——≥2 个 `--dump` 供体时自第二个起输入输出同名，成功后的上一步清理恰好删掉当前产物，后续供体与 StubSafe 连锁 FileNotFound、整脚本崩溃（实证：7 供体 mHook eBPF dump 回填，第一供体 375 条恢复成功后全链断裂；§7"several dumps are complementary"的多供体生产路径实际不可用）；暂存名补供体维度 `.stage_next{dex}_{src}`（`restore_stage_path(out, di, si)`）；自检新增多供体暂存名唯一性锚点（21 路径互异 + 与 stage/stage_final 不相撞）；样本回归：7 供体全链 5727 条恢复日志、nop 墙 8794→3240、五重验收门全绿；无协议变更。
 - Before adapting to a new environment, compare `exuvia --version` against these.

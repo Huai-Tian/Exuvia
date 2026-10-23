@@ -113,6 +113,18 @@ def expand_dex_inputs(path):
     return []
 
 
+def restore_stage_path(out, di, si):
+    """Per-(stage-dex, source) restore temp name. Both dimensions are
+    required: a name indexed by the stage dex alone is shared by every
+    --dump source, so from the second source on the restore input and
+    output are the SAME file — the success cleanup (os.remove of the
+    previous input) then deletes the very file the chain continues from,
+    and every later source plus StubSafe dies on DexFileNotFound.
+    Empirical (family-3 爱加密, 7-donor mHook dump): donor 1 merged fine,
+    the whole chain collapsed behind it."""
+    return '%s.stage_next%d_%d.dex' % (out, di, si)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('packed')
@@ -258,10 +270,10 @@ def main():
             cur = args.out + '.stage%d.dex' % di
             open(cur, 'wb').write(cleaned)
             # restore: merge bodies from every source that carries them
-            for kind, lbl, sp in src_paths:
+            for si, (kind, lbl, sp) in enumerate(src_paths):
                 if not have_restore:
                     break
-                nxt = args.out + '.stage_next%d.dex' % di
+                nxt = restore_stage_path(args.out, di, si)
                 r = subprocess.run(['java', '-Xmx2g', '-cp', jars,
                                     'Restore', cur, sp, nxt],
                                    cwd=repack_dir, capture_output=True, text=True, timeout=600)
