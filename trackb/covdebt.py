@@ -104,6 +104,37 @@ def is_nop_wall(blob):
     return nops >= 1 and returns >= 1
 
 
+def _is_ctor_stub(dx, blob, name):
+    """StubSafe's synthesized nop-wall-constructor body (finding #10):
+    zero or more zero-literal consts, exactly one invoke-direct naming an
+    <init>, exactly one return-void, and NO nops (a nop would make it a
+    wall again). Not debt — the class verifies now — but not a recovered
+    body either, so it is counted separately (honest convergence metrics:
+    ctor_stub exits the debt list without inflating 'real')."""
+    if name != '<init>':
+        return False
+    invokes = 0
+    returns = 0
+    i = 0
+    while i < len(blob):
+        op = blob[i]
+        if op == 0x0e:
+            returns += 1
+        elif op == 0x70:                       # invoke-direct (35c, 3 units)
+            midx = struct.unpack_from('<H', blob, i + 2)[0]
+            _cls, mname, _p = dx.method_ref(midx)
+            if mname != '<init>':
+                return False
+            invokes += 1
+        elif op in _CONSTS:
+            if not _const_literal_zero(op, blob, i):
+                return False
+        else:
+            return False
+        i += _UNITS[op] * 2
+    return invokes == 1 and returns == 1
+
+
 class Dex:
     """Minimal table walker (header / strings / types / protos / methods /
     class_data). Self-contained: the type_list width is detected
@@ -236,7 +267,7 @@ def extract_debt(data: bytes):
     declarations are not debt."""
     dx = Dex(data)
     stats = {'classes': dx.class_defs_size, 'methods': 0, 'coded': 0,
-             'nop_wall': 0, 'real': 0, 'no_code': 0}
+             'nop_wall': 0, 'real': 0, 'no_code': 0, 'ctor_stub': 0}
     debt = []
     for cls, cls_access, name, proto_idx, access, code_off, kind in dx.methods():
         stats['methods'] += 1
@@ -246,7 +277,10 @@ def extract_debt(data: bytes):
         stats['coded'] += 1
         blob = dx.code_blob(code_off)
         if not is_nop_wall(blob):
-            stats['real'] += 1
+            if _is_ctor_stub(dx, blob, name):
+                stats['ctor_stub'] += 1  # synthesized, verifies — not debt
+            else:
+                stats['real'] += 1
             continue
         stats['nop_wall'] += 1
         shorty, ret, params = dx.proto(proto_idx)
@@ -280,9 +314,10 @@ def main():
     with open(out, 'w') as f:
         json.dump({'tool': 'covdebt', 'dex': args.dex, 'stats': stats,
                    'debt': debt}, f, indent=1)
-    print('[covdebt] %s: %d methods (%d coded), nop-wall debt=%d, real=%d -> %s'
+    print('[covdebt] %s: %d methods (%d coded), nop-wall debt=%d, real=%d, '
+          'ctor-stub=%d -> %s'
           % (args.dex, stats['methods'], stats['coded'], stats['nop_wall'],
-             stats['real'], out))
+             stats['real'], stats['ctor_stub'], out))
 
 
 if __name__ == '__main__':

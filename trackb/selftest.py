@@ -1158,20 +1158,22 @@ def test_dexdoctor():
 
 
 def _mk_dex_with_methods():
-    """Synthetic DEX with one class and three coded methods: a static
-    nop-wall, a real body (non-zero literal), and a virtual nop-wall.
+    """Synthetic DEX with one class and four coded methods: a static
+    nop-wall, a real body (non-zero literal), a virtual nop-wall, and a
+    StubSafe-shaped ctor stub (invoke-direct <init> + return-void).
     Shared by the covdebt anchor."""
     import struct as st2
     import hashlib as hl
     import zlib
-    strings = ['Lcom/x/A;', 'I', 'V', 'wall', 'real', 'vwall']
+    strings = ['Lcom/x/A;', 'Ljava/lang/Object;', 'I', 'V',
+               'wall', 'real', 'vwall', '<init>']
     hdr = bytearray(0x70)
     hdr[0:8] = b'dex\n035\x00'
     str_ids_off, n_str = 0x70, len(strings)
-    type_ids_off = str_ids_off + n_str * 4          # 3 types (0,1,2)
-    proto_ids_off = type_ids_off + 3 * 4            # 2 protos
-    method_ids_off = proto_ids_off + 2 * 12         # 3 methods
-    class_defs_off = method_ids_off + 3 * 8         # 1 class
+    type_ids_off = str_ids_off + n_str * 4          # 4 types (0..3)
+    proto_ids_off = type_ids_off + 4 * 4            # 2 protos
+    method_ids_off = proto_ids_off + 2 * 12         # 5 methods
+    class_defs_off = method_ids_off + 5 * 8         # 1 class
     data_off = class_defs_off + 32
     # data: string blobs
     blob = bytearray()
@@ -1180,15 +1182,17 @@ def _mk_dex_with_methods():
         str_offs.append(data_off + len(blob))
         blob += bytes([len(s)]) + s.encode() + b'\x00'
     class_data_off = data_off + len(blob)
-    # class_data: 0 fields, 2 direct, 1 virtual — code offsets patched later
-    cd_placeholder_len = 16
+    # class_data: 0 fields, 3 direct, 1 virtual — code offsets patched later
+    cd_placeholder_len = 24
     code0_off = (class_data_off + cd_placeholder_len + 3) & ~3
     wall = b'\x00\x00\x12\x00\x0f\x00'      # nop; const/4 v0,0; return v0
     real = b'\x12\x10\x0f\x00'              # const/4 v0,0x1; return v0
+    init = b'\x70\x10\x04\x00\x00\x00\x0e\x00'  # invoke-direct {v0}, m4; return-void
     vwall = b'\x00\x00\x0e\x00'             # nop; return-void
     code1_off = code0_off + 16 + len(wall)
     code1_off = (code1_off + 3) & ~3
     code2_off = (code1_off + 16 + len(real) + 3) & ~3
+    code3_off = (code2_off + 16 + len(init) + 3) & ~3
 
     def uleb(n):
         out = bytearray()
@@ -1202,19 +1206,21 @@ def _mk_dex_with_methods():
                 break
         return bytes(out)
 
-    cd = (uleb(0) + uleb(0) + uleb(2) + uleb(1)
+    cd = (uleb(0) + uleb(0) + uleb(3) + uleb(1)
           + uleb(0) + uleb(0x9) + uleb(code0_off)   # direct: wall (static)
           + uleb(1) + uleb(0x1) + uleb(code1_off)   # direct: real
-          + uleb(2) + uleb(0x1) + uleb(code2_off))  # virtual: vwall (idx diff restarts)
+          + uleb(2) + uleb(0x10001) + uleb(code2_off)  # direct: <init> (ctor stub)
+          + uleb(2) + uleb(0x1) + uleb(code3_off))  # virtual: vwall (idx diff restarts)
     assert len(cd) <= cd_placeholder_len
 
     out = bytearray(hdr)
     out += b''.join(st2.pack('<I', o) for o in str_offs)          # string_ids
-    out += st2.pack('<III', 0, 1, 2)                              # type_ids
-    out += st2.pack('<III', 1, 1, 0)                              # proto ()I
-    out += st2.pack('<III', 2, 2, 0)                              # proto ()V
-    out += st2.pack('<HHI', 0, 0, 3) + st2.pack('<HHI', 0, 0, 4) \
-        + st2.pack('<HHI', 0, 1, 5)                               # method_ids
+    out += st2.pack('<IIII', 0, 1, 2, 3)                          # type_ids
+    out += st2.pack('<III', 2, 2, 0)                              # proto ()I
+    out += st2.pack('<III', 3, 3, 0)                              # proto ()V
+    out += st2.pack('<HHI', 0, 0, 4) + st2.pack('<HHI', 0, 0, 5) \
+        + st2.pack('<HHI', 0, 1, 6) + st2.pack('<HHI', 0, 1, 7) \
+        + st2.pack('<HHI', 1, 1, 7)                               # method_ids
     out += st2.pack('<IIIIIIII', 0, 0x1, 0xFFFFFFFF, 0, 0xFFFFFFFF,
                     0, class_data_off, 0)                         # class_def
     assert len(out) == data_off
@@ -1229,10 +1235,12 @@ def _mk_dex_with_methods():
     out += b'\x00' * (code1_off - len(out))
     out += code_item(real)
     out += b'\x00' * (code2_off - len(out))
+    out += code_item(init)
+    out += b'\x00' * (code3_off - len(out))
     out += code_item(vwall)
-    st2.pack_into('<IIII', out, 56, n_str, str_ids_off, 3, type_ids_off)
+    st2.pack_into('<IIII', out, 56, n_str, str_ids_off, 4, type_ids_off)
     st2.pack_into('<IIII', out, 72, 2, proto_ids_off, 0, 0)
-    st2.pack_into('<IIII', out, 88, 3, method_ids_off, 1, class_defs_off)
+    st2.pack_into('<IIII', out, 88, 5, method_ids_off, 1, class_defs_off)
     st2.pack_into('<II', out, 104, len(out) - data_off, data_off)
     st2.pack_into('<I', out, 32, len(out))
     st2.pack_into('<I', out, 36, 0x70)
@@ -1244,7 +1252,10 @@ def _mk_dex_with_methods():
 
 def test_covdebt():
     """covdebt (r33): wall predicate + class_data walk on a synthetic dex —
-    wall counted, real body not, direct/virtual lists both walked."""
+    wall counted, real body not, direct/virtual lists both walked. The
+    ctor-stub anchor (finding #10): StubSafe's synthesized constructor body
+    (invoke-direct <init> + return-void, no nops) is neither debt nor
+    'real' — it must land in its own stats bucket."""
     import covdebt
     d = _mk_dex_with_methods()
     # predicate unit anchors
@@ -1254,15 +1265,42 @@ def test_covdebt():
     assert not covdebt.is_nop_wall(b'\x00\x00\x6e\x10\x00\x00\x00\x00\x0e\x00')  # invoke
     assert not covdebt.is_nop_wall(b'\x00\x01\x00\x00\x0e\x00')        # payload, not nop
     stats, debt = covdebt.extract_debt(d)
-    assert (stats['methods'], stats['coded']) == (3, 3), stats
+    assert (stats['methods'], stats['coded']) == (4, 4), stats
     assert (stats['nop_wall'], stats['real'], stats['no_code']) == (2, 1, 0), stats
+    assert stats['ctor_stub'] == 1, stats
     by_name = {e['name']: e for e in debt}
     assert set(by_name) == {'wall', 'vwall'}
     w, v = by_name['wall'], by_name['vwall']
     assert w['static'] and w['kind'] == 'direct' and w['proto'] == '()I'
     assert w['class'] == 'Lcom/x/A;' and w['body_bytes'] == 6
     assert v['kind'] == 'virtual' and v['proto'] == '()V' and not v['clinit']
-    print('covdebt OK: 2/3 synthetic methods flagged as debt, fields complete')
+    print('covdebt OK: 2/4 synthetic methods flagged as debt, ctor stub '
+          'counted separately, fields complete')
+
+
+def test_stubsafe_ctor_stub():
+    """Finding #10 (family-3 爱加密 empirical): a nop-wall CONSTRUCTOR never
+    verifies ('Constructor returning without calling superclass
+    constructor') — load-time VerifyError shell-free, cascading to every
+    subclass at dexopt. StubSafe's ctor-stub branch is anchored Java-side
+    by `StubSafe --selftest` (synthetic, in-memory: object super / sibling
+    this-chain / undeclared-super ref / assumed-noarg fallback / non-ctor
+    wall kept). SKIP loudly when the dexlib toolchain is not provisioned
+    (user-side policy: jars live outside the repo)."""
+    repack_dir = os.environ.get('EXUVIA_DEXLIB', '/workspace/tools/dexlib')
+    jars = 'dexlib2-2.5.2.jar:util-2.5.2.jar:guava-31.1-jre.jar:.'
+    if not (os.path.exists(os.path.join(repack_dir, 'StubSafe.class'))
+            and os.path.exists(os.path.join(repack_dir, 'dexlib2-2.5.2.jar'))):
+        print('stubsafe ctor-stub anchor: SKIP '
+              '(dexlib toolchain not provisioned — StubSafe --selftest runs '
+              'wherever the jars live)')
+        return
+    r = subprocess.run(['java', '-cp', jars, 'StubSafe', '--selftest'],
+                       cwd=repack_dir, capture_output=True, text=True,
+                       timeout=300)
+    assert r.returncode == 0 and 'ALL GREEN' in r.stdout, r.stdout + r.stderr
+    for line in [l for l in r.stdout.strip().split('\n') if l.strip()]:
+        print('  ' + line)
 
 
 def test_fart_plan():
@@ -1409,4 +1447,5 @@ if __name__ == '__main__':
     test_covdebt()
     test_fart_plan()
     test_upxunpack()
+    test_stubsafe_ctor_stub()
     print('trackb selftest: ALL GREEN')

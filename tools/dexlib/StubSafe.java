@@ -1,6 +1,8 @@
 import java.io.File;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -16,11 +18,13 @@ import org.jf.dexlib2.iface.MethodImplementation;
 import org.jf.dexlib2.iface.MethodParameter;
 import org.jf.dexlib2.iface.instruction.Instruction;
 import org.jf.dexlib2.iface.instruction.NarrowLiteralInstruction;
+import org.jf.dexlib2.iface.instruction.ReferenceInstruction;
 import org.jf.dexlib2.iface.instruction.WideLiteralInstruction;
 import org.jf.dexlib2.iface.reference.MethodReference;
 import org.jf.dexlib2.immutable.ImmutableClassDef;
 import org.jf.dexlib2.immutable.ImmutableMethod;
 import org.jf.dexlib2.immutable.ImmutableMethodImplementation;
+import org.jf.dexlib2.immutable.ImmutableMethodParameter;
 import org.jf.dexlib2.immutable.instruction.ImmutableInstruction;
 import org.jf.dexlib2.immutable.instruction.ImmutableInstruction10x;
 import org.jf.dexlib2.immutable.instruction.ImmutableInstruction11n;
@@ -66,10 +70,25 @@ import org.jf.dexlib2.writer.pool.DexPool;
  *   (e.g. androidx PathIterator natives backed by lib/*.so in the APK) is
  *   a necessary, side-effect-free leftover we deliberately reuse instead
  *   of synthesizing fake bodies ("not equivalence for equivalence's sake").
- *   Non-lifecycle nop walls are likewise KEPT: the wall already verifies as
- *   a no-op, so synthesizing a default-return body would change nothing —
- *   Restore (with a dump) is their only real cure, and the residue is
- *   harmless until then.
+ *   Non-lifecycle nop walls are likewise KEPT — but ONLY when the wall
+ *   actually VERIFIES as a no-op. The one wall shape that never verifies is
+ *   the nop-wall CONSTRUCTOR: the ART verifier rejects any <init> that
+ *   returns without calling a this/super constructor ("[0x0] Constructor
+ *   returning without calling superclass constructor"), the rejection
+ *   cascades to every subclass at dexopt, and the class dies with
+ *   VerifyError at first touch shell-free (in the packed app the wall is
+ *   invisible — the shell re-materializes the body before class load).
+ *   For those we synthesize the minimal legal body:
+ *
+ *     invoke-direct {p0, dummy...}, DirectSuper.<init>(cheapest)  +
+ *     return-void          (or a this-call to a real sibling ctor)
+ *
+ *   The ref MUST name the direct superclass (verifier rule) even when the
+ *   signature comes from an ancestor up the chain (an in-dex superclass
+ *   that declares no ctor resolves upward — Object terminates every chain).
+ *   Non-constructor nop walls keep verifying as no-ops, so they are kept
+ *   as-is: Restore (with a dump) is their only real cure, and the residue
+ *   is harmless until then.
  *
  * Either way the whole DEX is re-serialized through DexPool (standard
  * smali-ecosystem layout), so StubSafe doubles as the final repack.
@@ -80,6 +99,9 @@ public class StubSafe {
     static final int ACC_NATIVE = 0x100;
     static final int ACC_STATIC = 0x8;
     static final int ACC_ABSTRACT = 0x400;
+    static final int ACC_PUBLIC = 0x1;
+    static final int ACC_PRIVATE = 0x2;
+    static final int ACC_PROTECTED = 0x4;
 
     /** Framework template-method names (Activity/Application/Service/Fragment
      *  lifecycle + must-call-super callbacks). A native method with one of
@@ -178,8 +200,13 @@ public class StubSafe {
     }
 
     public static void main(String[] args) throws Exception {
+        if (args.length > 0 && "--selftest".equals(args[0])) {
+            selftest();
+            return;
+        }
         if (args.length < 2) {
             System.err.println("usage: StubSafe <in.dex> <out.dex> [api]");
+            System.err.println("       StubSafe --selftest   (synthetic ctor-stub anchors)");
             System.exit(2);
         }
         Opcodes opcodes = args.length > 2
@@ -203,10 +230,41 @@ public class StubSafe {
             classIdx.put(c.getType(), c);
         }
 
+        // External-constructor evidence for the ctor-stub branch: every
+        // invoke-site reference to an <init> whose defining class is NOT in
+        // this dex proves that exact signature exists on-device (some real
+        // body once linked it). Collected dex-wide, cheapest signature first.
+        Map<String, List<MethodReference>> extCtorRefs = new HashMap<>();
+        for (ClassDef c2 : dex.getClasses()) {
+            for (Method m2 : c2.getMethods()) {
+                MethodImplementation impl = m2.getImplementation();
+                if (impl == null) {
+                    continue;
+                }
+                for (Instruction insn : impl.getInstructions()) {
+                    if (!(insn instanceof ReferenceInstruction)) {
+                        continue;
+                    }
+                    Object ref = ((ReferenceInstruction) insn).getReference();
+                    if (!(ref instanceof MethodReference)) {
+                        continue;
+                    }
+                    MethodReference mr = (MethodReference) ref;
+                    if (!mr.getName().equals("<init>")
+                            || classIdx.containsKey(mr.getDefiningClass())) {
+                        continue;
+                    }
+                    extCtorRefs.computeIfAbsent(mr.getDefiningClass(),
+                            k -> new ArrayList<>()).add(mr);
+                }
+            }
+        }
+
         List<ClassDef> outClasses = new ArrayList<>();
         int synthesized = 0;
         int keptNative = 0;
         int keptNopWall = 0;
+        int ctorStubbed = 0;
         for (ClassDef c : dex.getClasses()) {
             List<Method> patched = new ArrayList<>();
             boolean changed = false;
@@ -238,10 +296,40 @@ public class StubSafe {
                         keptNative++;
                         System.out.println("stubsafe: keep-native " + c.getType()
                                 + "." + m.getName() + " (no lifecycle contract)");
+                    } else if (m.getName().equals("<init>")) {
+                        // finding #10: a nop-wall CONSTRUCTOR never verifies
+                        // ("Constructor returning without calling superclass
+                        // constructor") — a load-time VerifyError landmine
+                        // shell-free, cascading to every subclass at dexopt.
+                        // Synthesize the minimal legal body (this/super call
+                        // + return-void).
+                        MethodImplementation body = synthesizeCtorStub(
+                                c, m, index, classIdx, extCtorRefs);
+                        if (body != null) {
+                            System.out.println("stubsafe: ctor-stub "
+                                    + c.getType() + "-><init>"
+                                    + m.getParameterTypes()
+                                    + " (nop-wall constructor never verifies)");
+                            patched.add(new ImmutableMethod(
+                                    m.getDefiningClass(), m.getName(),
+                                    m.getParameters(), m.getReturnType(),
+                                    m.getAccessFlags(), m.getAnnotations(),
+                                    m.getHiddenApiRestrictions(), body));
+                            ctorStubbed++;
+                            changed = true;
+                            continue;
+                        }
+                        keptNopWall++;
+                        System.out.println("stubsafe: ctor-stub-unresolved "
+                                + c.getType() + "-><init>" + m.getParameterTypes()
+                                + " (no invocable this/super signature fits the"
+                                + " register plan — kept; the class stays"
+                                + " verifier-invalid until a source carries"
+                                + " the body)");
                     } else {
-                        // non-lifecycle nop wall: verifies as a no-op — the
-                        // shell-free run is unaffected; only Restore with a
-                        // body-carrying source truly refills it
+                        // non-lifecycle, non-constructor nop wall: verifies as
+                        // a no-op — the shell-free run is unaffected; only
+                        // Restore with a body-carrying source truly refills it
                         keptNopWall++;
                         System.out.println("stubsafe: keep-nopwall " + c.getType()
                                 + "." + m.getName()
@@ -296,6 +384,7 @@ public class StubSafe {
         }
         pool.writeTo(new org.jf.dexlib2.writer.io.FileDataStore(new File(args[1])));
         System.out.println("stubsafe: " + synthesized + " method(s) synthesized, "
+                + ctorStubbed + " ctor-stub(s), "
                 + keptNative + " native kept, " + keptNopWall
                 + " nop-wall kept -> " + args[1]);
     }
@@ -402,11 +491,427 @@ public class StubSafe {
         return new ImmutableMethodImplementation(1, insns, null, null);
     }
 
+    /**
+     * The minimal legal body for a nop-wall constructor (finding #10):
+     * one invoke-direct to a this/super constructor, then return-void.
+     *
+     * Candidate targets, in order:
+     *   A. a SIBLING constructor of the same class that has a real body —
+     *      the this-call reuses the whole original init sequence for free;
+     *   B. the direct superclass chain: the cheapest accessible ctor
+     *      declared by the nearest in-dex ancestor that declares any. The
+     *      invoke-direct REF always names the DIRECT superclass (verifier
+     *      rule); when the declaring class is further up, resolution walks
+     *      there on its own. The chain can only exit the dex at an external
+     *      class — Object terminates it with the universal ()V, any other
+     *      external class needs on-device signature evidence (a dex-wide
+     *      invoke-site reference to that class's <init>);
+     *   D. last resort: assume a no-arg super ctor. Always right for the
+     *      system-instantiated component classes (Activity/Service/
+     *      Provider/Receiver/Application/Fragment all have a public no-arg
+     *      ctor) and for Object; possibly wrong elsewhere — logged loudly
+     *      (ctor-stub-assumed-noarg), and a body-carrying source remains
+     *      the real cure. A wrong guess is never worse than the wall it
+     *      replaces (both fail verification; the guess at least has a
+     *      chance).
+     *
+     * Register plan: the stub keeps the wall's signature, so its own
+     * params occupy the last insWords registers and p0 (this) sits at
+     * index <locals>. With k = target param words: when 1+k <= 5 use
+     * 35c with k fresh locals holding the dummies (all referenced
+     * registers <= 4, inside the 4-bit fields); otherwise, when the stub's
+     * own (unused, never-read) params provide k contiguous words after
+     * p0, use 3rc over p0..p0+k and const the dummies into p1... Returns
+     * null when no candidate fits either plan.
+     */
+    static MethodImplementation synthesizeCtorStub(ClassDef c, Method m,
+            Map<String, Map<String, Method>> index,
+            Map<String, ClassDef> classIdx,
+            Map<String, List<MethodReference>> extCtorRefs) {
+        String self = c.getType();
+        String sup = c.getSuperclass();
+        if (sup == null) {
+            return null;  // Object itself declares no super — no wall there
+        }
+        List<Object[]> cands = new ArrayList<>();  // {refClass, params, assumed}
+        // A: real sibling constructor -> this-call (cheapest first)
+        Map<String, Method> selfMethods = index.get(self);
+        if (selfMethods != null) {
+            String mySig = "<init>:" + m.getReturnType() + ":"
+                    + m.getParameterTypes();
+            List<Method> sibs = new ArrayList<>();
+            for (Map.Entry<String, Method> e : selfMethods.entrySet()) {
+                Method s = e.getValue();
+                if (!s.getName().equals("<init>") || e.getKey().equals(mySig)) {
+                    continue;
+                }
+                int sf = s.getAccessFlags();
+                if ((sf & (ACC_ABSTRACT | ACC_NATIVE)) != 0
+                        || s.getImplementation() == null || isNopWall(s)) {
+                    continue;
+                }
+                sibs.add(s);
+            }
+            sibs.sort(Comparator.comparingInt(
+                    s -> paramWordsTypes(s.getParameterTypes())));
+            for (Method s : sibs) {
+                List<String> tp = new ArrayList<>();
+                for (CharSequence p : s.getParameterTypes()) {
+                    tp.add(p.toString());
+                }
+                cands.add(new Object[]{self, tp, Boolean.FALSE});
+            }
+        }
+        // B: the direct-superclass chain. Collect the cheapest accessible
+        // ctor PER LEVEL, nearest first — a nearer level preserves more of
+        // the original init chain, but when nothing there fits the register
+        // plan the walk must continue (a level whose ctors are all too wide
+        // does not end the search: Object terminates every chain with ()V).
+        String cur = sup;
+        Set<String> seen = new HashSet<>();
+        while (cur != null && seen.add(cur)) {
+            ClassDef sc = classIdx.get(cur);
+            if (sc == null) {
+                // chain exits the dex here (external class)
+                if (cur.equals("Ljava/lang/Object;")) {
+                    cands.add(new Object[]{sup, new ArrayList<String>(),
+                            Boolean.FALSE});  // Object.<init>()V: universal
+                } else {
+                    List<MethodReference> refs = extCtorRefs.get(cur);
+                    if (refs != null && !refs.isEmpty()) {
+                        refs.sort(Comparator.comparingInt(
+                                r -> paramWordsTypes(r.getParameterTypes())));
+                        List<String> tp = new ArrayList<>();
+                        for (CharSequence p : refs.get(0).getParameterTypes()) {
+                            tp.add(p.toString());
+                        }
+                        cands.add(new Object[]{sup, tp, Boolean.FALSE});
+                    }
+                }
+                break;
+            }
+            List<Method> usable = new ArrayList<>();
+            Map<String, Method> sm = index.get(cur);
+            if (sm != null) {
+                for (Map.Entry<String, Method> e : sm.entrySet()) {
+                    Method s = e.getValue();
+                    if (!s.getName().equals("<init>")) {
+                        continue;
+                    }
+                    int sf = s.getAccessFlags();
+                    if ((sf & (ACC_PRIVATE | ACC_ABSTRACT)) != 0) {
+                        continue;
+                    }
+                    if ((sf & (ACC_PUBLIC | ACC_PROTECTED)) == 0
+                            && !packageOf(cur).equals(packageOf(self))) {
+                        continue;  // package-private across packages
+                    }
+                    usable.add(s);
+                }
+            }
+            if (!usable.isEmpty()) {
+                usable.sort(Comparator.comparingInt(
+                        s -> paramWordsTypes(s.getParameterTypes())));
+                List<String> tp = new ArrayList<>();
+                for (CharSequence p : usable.get(0).getParameterTypes()) {
+                    tp.add(p.toString());
+                }
+                cands.add(new Object[]{sup, tp, Boolean.FALSE});
+            }
+            cur = sc.getSuperclass();
+        }
+        if (cands.isEmpty()) {
+            // D: last resort — assume a no-arg super ctor (see javadoc)
+            cands.add(new Object[]{sup, new ArrayList<String>(), Boolean.TRUE});
+        }
+        int insWords = 1 + paramWordsTypes(m.getParameterTypes());
+        for (Object[] cand : cands) {
+            String refClass = (String) cand[0];
+            @SuppressWarnings("unchecked")
+            List<String> tps = (List<String>) cand[1];
+            boolean assumed = (Boolean) cand[2];
+            int k = paramWordsTypes(tps);
+            MethodReference ref = new ImmutableMethodReference(
+                    refClass, "<init>", tps, "V");
+            List<ImmutableInstruction> ins = new ArrayList<>();
+            if (1 + k <= 5) {  // 35c: dummies in fresh locals v0..v(k-1)
+                int v = 0;
+                for (String t : tps) {
+                    if (isWide(t)) {
+                        ins.add(new ImmutableInstruction21s(
+                                Opcode.CONST_WIDE_16, v, 0));
+                        v += 2;
+                    } else {
+                        ins.add(new ImmutableInstruction11n(
+                                Opcode.CONST_4, v, 0));
+                        v += 1;
+                    }
+                }
+                ins.add(new ImmutableInstruction35c(Opcode.INVOKE_DIRECT,
+                        1 + k, k,                       // p0 at index <locals>=k
+                        0, k > 1 ? 1 : 0,
+                        k > 2 ? 2 : 0, k > 3 ? 3 : 0, ref));
+                ins.add(new ImmutableInstruction10x(Opcode.RETURN_VOID));
+                if (assumed) {
+                    System.out.println("stubsafe: ctor-stub-assumed-noarg "
+                            + self + "-><init>" + m.getParameterTypes()
+                            + " (super " + refClass
+                            + ": no on-device signature evidence)");
+                }
+                return new ImmutableMethodImplementation(k + insWords, ins,
+                        null, null);
+            }
+            if (insWords - 1 >= k) {
+                // 3rc: dummies overwrite the stub's own unused params p1..
+                int v = 1;
+                for (String t : tps) {
+                    if (isWide(t)) {
+                        ins.add(new ImmutableInstruction21s(
+                                Opcode.CONST_WIDE_16, v, 0));
+                        v += 2;
+                    } else {
+                        ins.add(new ImmutableInstruction11n(
+                                Opcode.CONST_4, v, 0));
+                        v += 1;
+                    }
+                }
+                ins.add(new ImmutableInstruction3rc(Opcode.INVOKE_DIRECT_RANGE,
+                        0, 1 + k, ref));
+                ins.add(new ImmutableInstruction10x(Opcode.RETURN_VOID));
+                if (assumed) {
+                    System.out.println("stubsafe: ctor-stub-assumed-noarg "
+                            + self + "-><init>" + m.getParameterTypes()
+                            + " (super " + refClass
+                            + ": no on-device signature evidence)");
+                }
+                return new ImmutableMethodImplementation(insWords, ins,
+                        null, null);
+            }
+        }
+        return null;
+    }
+
+    static int paramWordsTypes(List<? extends CharSequence> types) {
+        int w = 0;
+        for (CharSequence t : types) {
+            w += isWide(t.toString()) ? 2 : 1;
+        }
+        return w;
+    }
+
+    static String packageOf(String type) {
+        int i = type.lastIndexOf('/');
+        return i < 0 ? "" : type.substring(1, i);
+    }
+
     static boolean isPrimitive(String type) {
         return type.length() == 1;  // V Z B C S I J F D — single-letter types
     }
 
     static boolean isWide(String type) {
         return type.equals("J") || type.equals("D");
+    }
+
+    /* ---------------- synthetic anchors (StubSafe --selftest) --------------
+     * No fixture files: every class below is built in memory, the pass goes
+     * through the real CLI on temp files. Anchors for the ctor-stub branch
+     * (finding #10) plus the historical keep/regression behavior. */
+
+    static void check(boolean cond, String msg) {
+        if (!cond) {
+            throw new AssertionError("StubSafe --selftest FAILED: " + msg);
+        }
+    }
+
+    static final int ACC_CTOR_PUBLIC = 0x10001;
+
+    static ImmutableMethod mkCtorWall(String cls, List<MethodParameter> params,
+                                      int registers) {
+        List<Instruction> body = new ArrayList<>();
+        body.add(new ImmutableInstruction10x(Opcode.NOP));
+        body.add(new ImmutableInstruction10x(Opcode.RETURN_VOID));
+        return new ImmutableMethod(cls, "<init>", params, "V", ACC_CTOR_PUBLIC,
+                new HashSet<>(), new HashSet<>(),
+                new ImmutableMethodImplementation(registers, body,
+                        new ArrayList<>(), new ArrayList<>()));
+    }
+
+    static ImmutableMethod mkRealCtor(String cls) {
+        List<Instruction> body = new ArrayList<>();
+        body.add(new ImmutableInstruction35c(Opcode.INVOKE_DIRECT, 1,
+                0, 0, 0, 0, 0,
+                new ImmutableMethodReference("Ljava/lang/Object;", "<init>",
+                        new ArrayList<>(), "V")));
+        body.add(new ImmutableInstruction10x(Opcode.RETURN_VOID));
+        return new ImmutableMethod(cls, "<init>", new ArrayList<>(), "V",
+                ACC_CTOR_PUBLIC, new HashSet<>(), new HashSet<>(),
+                new ImmutableMethodImplementation(1, body,
+                        new ArrayList<>(), new ArrayList<>()));
+    }
+
+    static ImmutableMethod mkVoidWall(String cls, String name) {
+        List<Instruction> body = new ArrayList<>();
+        body.add(new ImmutableInstruction10x(Opcode.NOP));
+        body.add(new ImmutableInstruction10x(Opcode.RETURN_VOID));
+        return new ImmutableMethod(cls, name, new ArrayList<>(), "V", 0x1,
+                new HashSet<>(), new HashSet<>(),
+                new ImmutableMethodImplementation(1, body,
+                        new ArrayList<>(), new ArrayList<>()));
+    }
+
+    static ImmutableMethod mkRealVoid(String cls, String name) {
+        List<Instruction> body = new ArrayList<>();
+        body.add(new ImmutableInstruction10x(Opcode.RETURN_VOID));
+        return new ImmutableMethod(cls, name, new ArrayList<>(), "V", 0x1,
+                new HashSet<>(), new HashSet<>(),
+                new ImmutableMethodImplementation(1, body,
+                        new ArrayList<>(), new ArrayList<>()));
+    }
+
+    static ImmutableClassDef mkClass(String type, String sup,
+                                     List<Method> methods) {
+        return new ImmutableClassDef(type, 0x1, sup, new ArrayList<>(), null,
+                new HashSet<>(), new ArrayList<>(), methods);
+    }
+
+    static Method theMethod(DexFile dex, String cls, String name,
+                            String protoRet, List<String> protoParams) {
+        for (ClassDef c : dex.getClasses()) {
+            if (!c.getType().equals(cls)) {
+                continue;
+            }
+            for (Method m : c.getMethods()) {
+                if (m.getName().equals(name)
+                        && m.getReturnType().equals(protoRet)
+                        && m.getParameterTypes().equals(protoParams)) {
+                    return m;
+                }
+            }
+        }
+        throw new AssertionError("method not found: " + cls + "->" + name);
+    }
+
+    static MethodReference firstInvokeTarget(Method m) {
+        for (Instruction insn : m.getImplementation().getInstructions()) {
+            if (insn instanceof ReferenceInstruction) {
+                Object ref = ((ReferenceInstruction) insn).getReference();
+                if (ref instanceof MethodReference) {
+                    return (MethodReference) ref;
+                }
+            }
+        }
+        return null;
+    }
+
+    static void selftest() throws Exception {
+        Opcodes opcodes = Opcodes.getDefault();
+
+        List<Method> wallCls = new ArrayList<>();
+        wallCls.add(mkCtorWall("Lst/Wall;", new ArrayList<>(), 1));
+        wallCls.add(mkVoidWall("Lst/Wall;", "v"));   // non-ctor wall: must stay
+        // Pair: wall <init>(I)V + real <init>()V -> this-chain to the sibling
+        List<MethodParameter> intParam = new ArrayList<>();
+        intParam.add(new ImmutableMethodParameter("I", null, null));
+        List<Method> pairCls = new ArrayList<>();
+        pairCls.add(mkCtorWall("Lst/Pair;", intParam, 2));
+        pairCls.add(mkRealCtor("Lst/Pair;"));
+        // Mid declares no ctor; Sub extends Mid -> ref names Mid, sig ()V
+        List<Method> midCls = new ArrayList<>();
+        midCls.add(mkRealVoid("Lst/Mid;", "d"));
+        List<Method> subCls = new ArrayList<>();
+        subCls.add(mkCtorWall("Lst/Sub;", new ArrayList<>(), 1));
+        // Orphan extends an external class with zero on-device evidence
+        List<Method> orphanCls = new ArrayList<>();
+        orphanCls.add(mkCtorWall("Lst/Orphan;", new ArrayList<>(), 1));
+        // WideSuper declares ONLY a 5-word ctor (a 6-register call — 35c can
+        // never fit it); Wide's wall ctor must fall through the chain to
+        // Object's ()V while the ref still names the DIRECT super
+        List<MethodParameter> fiveObj = new ArrayList<>();
+        for (int i = 0; i < 5; i++) {
+            fiveObj.add(new ImmutableMethodParameter("Ljava/lang/Object;",
+                    null, null));
+        }
+        List<Instruction> wideBody = new ArrayList<>();
+        wideBody.add(new ImmutableInstruction35c(Opcode.INVOKE_DIRECT, 1,
+                5, 0, 0, 0, 0,
+                new ImmutableMethodReference("Ljava/lang/Object;", "<init>",
+                        new ArrayList<>(), "V")));
+        wideBody.add(new ImmutableInstruction10x(Opcode.RETURN_VOID));
+        List<Method> wideSuperCls = new ArrayList<>();
+        wideSuperCls.add(new ImmutableMethod("Lst/WideSuper;", "<init>",
+                fiveObj, "V", ACC_CTOR_PUBLIC, new HashSet<>(), new HashSet<>(),
+                new ImmutableMethodImplementation(6, wideBody,
+                        new ArrayList<>(), new ArrayList<>())));
+        List<Method> wideCls = new ArrayList<>();
+        wideCls.add(mkCtorWall("Lst/Wide;", new ArrayList<>(), 1));
+
+        List<ClassDef> classes = new ArrayList<>();
+        classes.add(mkClass("Lst/Wall;", "Ljava/lang/Object;", wallCls));
+        classes.add(mkClass("Lst/Pair;", "Ljava/lang/Object;", pairCls));
+        classes.add(mkClass("Lst/Mid;", "Ljava/lang/Object;", midCls));
+        classes.add(mkClass("Lst/Sub;", "Lst/Mid;", subCls));
+        classes.add(mkClass("Lst/Orphan;", "Lst/Ext;", orphanCls));
+        classes.add(mkClass("Lst/WideSuper;", "Ljava/lang/Object;", wideSuperCls));
+        classes.add(mkClass("Lst/Wide;", "Lst/WideSuper;", wideCls));
+
+        File in = Files.createTempFile("stubsafe-st-in", ".dex").toFile();
+        File out = Files.createTempFile("stubsafe-st-out", ".dex").toFile();
+        in.deleteOnExit();
+        out.deleteOnExit();
+        DexPool pool = new DexPool(opcodes);
+        for (ClassDef cd : classes) {
+            pool.internClass(cd);
+        }
+        pool.writeTo(new org.jf.dexlib2.writer.io.FileDataStore(in));
+
+        main(new String[]{in.getPath(), out.getPath()});
+
+        DexFile od = DexFileFactory.loadDexFile(out, opcodes);
+        // wall ctor stubbed: invoke-direct to Object.<init>()V, no longer a wall
+        Method w = theMethod(od, "Lst/Wall;", "<init>", "V", new ArrayList<>());
+        check(!isNopWall(w), "stubbed ctor must not remain a nop wall");
+        MethodReference wr = firstInvokeTarget(w);
+        check(wr != null && wr.getDefiningClass().equals("Ljava/lang/Object;")
+                && wr.getName().equals("<init>")
+                && wr.getParameterTypes().isEmpty(),
+                "Wall.<init> must call Object.<init>()V, got " + wr);
+        // non-ctor wall untouched
+        check(isNopWall(theMethod(od, "Lst/Wall;", "v", "V", new ArrayList<>())),
+                "non-ctor nop wall must be KEPT (regression anchor)");
+        // sibling this-chain
+        Method p = theMethod(od, "Lst/Pair;", "<init>", "V",
+                java.util.Collections.singletonList("I"));
+        MethodReference pr = firstInvokeTarget(p);
+        check(pr != null && pr.getDefiningClass().equals("Lst/Pair;")
+                && pr.getParameterTypes().isEmpty(),
+                "Pair.<init>(I)V must this-chain to the real sibling, got " + pr);
+        // undeclared-ctor superclass: ref names the DIRECT super, sig from the
+        // chain top (Object) — resolution walks up on-device
+        Method s = theMethod(od, "Lst/Sub;", "<init>", "V", new ArrayList<>());
+        MethodReference sr = firstInvokeTarget(s);
+        check(sr != null && sr.getDefiningClass().equals("Lst/Mid;")
+                && sr.getParameterTypes().isEmpty(),
+                "Sub.<init> must name Lst/Mid;.<init>()V (upward resolution), got " + sr);
+        // external super, no evidence: assumed no-arg fallback
+        Method o = theMethod(od, "Lst/Orphan;", "<init>", "V", new ArrayList<>());
+        MethodReference or = firstInvokeTarget(o);
+        check(or != null && or.getDefiningClass().equals("Lst/Ext;")
+                && or.getParameterTypes().isEmpty(),
+                "Orphan.<init> must assume Lst/Ext;.<init>()V, got " + or);
+        // too-wide nearest super ctor: fall through the chain to Object's
+        // ()V, ref still naming the DIRECT super (regression: single-level
+        // candidate collection stranded this shape as ctor-stub-unresolved)
+        Method wc = theMethod(od, "Lst/Wide;", "<init>", "V", new ArrayList<>());
+        check(!isNopWall(wc), "Wide.<init> must be stubbed, not kept as wall");
+        MethodReference wcr = firstInvokeTarget(wc);
+        check(wcr != null && wcr.getDefiningClass().equals("Lst/WideSuper;")
+                && wcr.getParameterTypes().isEmpty(),
+                "Wide.<init> must name Lst/WideSuper;.<init>()V (chain-top "
+                + "signature, direct-super ref), got " + wcr);
+        System.out.println("StubSafe --selftest OK: ctor-stub anchors "
+                + "(object super / sibling this-chain / undeclared-super ref /"
+                + " assumed-noarg fallback / too-wide super falls to chain top /"
+                + " non-ctor wall kept)");
+        System.out.println("StubSafe --selftest: ALL GREEN");
     }
 }
