@@ -35,6 +35,7 @@ import org.jf.dexlib2.immutable.ImmutableMethodImplementation;
 import org.jf.dexlib2.immutable.instruction.ImmutableInstruction10x;
 import org.jf.dexlib2.immutable.instruction.ImmutableInstruction11n;
 import org.jf.dexlib2.immutable.instruction.ImmutableInstruction11x;
+import org.jf.dexlib2.immutable.instruction.ImmutableInstruction21s;
 import org.jf.dexlib2.immutable.instruction.ImmutableInstruction35c;
 import org.jf.dexlib2.immutable.reference.ImmutableMethodReference;
 import org.jf.dexlib2.writer.pool.DexPool;
@@ -99,12 +100,19 @@ public class Restore {
     }
 
     /**
-     * Nop-wall predicate: the extraction+nop-fill family's gutted body.
+     * Nop-wall predicate: the extraction family's gutted body.
      * True when the implementation's instructions are EXCLUSIVELY nops,
      * zero-literal consts (the packer's null/false/0/0L return feed) and
-     * returns, with at least one nop — a legit empty method is exactly
-     * `return-void` (zero nops) and a real body never carries a trailing
-     * nop wall (compilers emit no dead code). A residual try table does NOT
+     * returns, with at least one return. Nop padding is NOT required
+     * (finding #12): the family walls a getter-sized body as a bare
+     * zero-return stub (`const-wide/16 0; return-wide`, even a lone
+     * `return-void`) — no nop is needed to fill a two-instruction carve.
+     * A genuine zero-shaped body (`return 0`, empty callback) is
+     * indistinguishable from a wall without donor evidence, and the
+     * pipeline is safe either way: an identical donor body is skipped
+     * (no fake graft), a real donor body is by definition the wall's
+     * content, and a donorless zero-body is verifier-safe and untouched.
+     * A residual try table does NOT
      * disqualify: this family keeps the try structure while gutting handler
      * code to nops too — and the instruction scan already covers handler
      * code (a real handler would trip the default case). Restore grafts the
@@ -148,7 +156,7 @@ public class Restore {
                     return false;
             }
         }
-        return nops >= 1 && returns >= 1;
+        return returns >= 1;
     }
 
     /**
@@ -631,6 +639,19 @@ public class Restore {
         check(!isForwardingShell(shellPlusNop) && !isNopWall(shellPlusNop),
                 "extra nop breaks the shell shape (and the wall shape)");
 
+        // finding #12: nop padding is not required — the family walls a
+        // getter-sized body as a bare zero-return stub, and a lone
+        // return-void is the void case of the same shape
+        Method zeroWide = mk("Lxt/A;", "zeroWide", 2, insns(
+                new ImmutableInstruction21s(Opcode.CONST_WIDE_16, 0, 0),
+                new ImmutableInstruction11x(Opcode.RETURN_WIDE, 0)));
+        check(isNopWall(zeroWide),
+                "const-wide/16 0 + return-wide is a wall (no nop needed)");
+        Method loneVoid = mk("Lxt/A;", "loneVoid", 1, insns(
+                new ImmutableInstruction10x(Opcode.RETURN_VOID)));
+        check(isNopWall(loneVoid),
+                "lone return-void is wall-shaped (donor-decidable)");
+
         // toLForm anchors (finding #11 follow-up: obfuscated one-letter class
         // names must not be mistaken for primitive descriptors)
         check(toLForm("a").equals("La;"), "one-letter dotted class is a class");
@@ -640,7 +661,8 @@ public class Restore {
         check(toLForm("xt.Help").equals("Lxt/Help;"), "dotted converts");
         check(toLForm("[Lxt/Help;").equals("Lxt/Help;"), "array-of-class unwraps");
         System.out.println("Restore --selftest OK: hollow-shell predicates "
-                + "(wall / shell / value-plumbing / real / two-invoke / nop-break)");
+                + "(wall / shell / value-plumbing / real / two-invoke / "
+                + "nop-break / nop-less zero wall / lone return-void)");
 
         // --- graft e2e through the real CLI --------------------------------
         List<Method> tgtMethods = new ArrayList<>();
@@ -665,6 +687,12 @@ public class Restore {
                 new ImmutableInstruction10x(Opcode.RETURN_VOID))));
         tgtMethods.add(mk("Lxt/A;", "wallboot", 1, insns(
                 new ImmutableInstruction10x(Opcode.NOP),
+                new ImmutableInstruction10x(Opcode.RETURN_VOID))));
+        // finding #12: nop-less zero-wall targets (the lz0.g shape)
+        tgtMethods.add(mk("Lxt/A;", "zerowall", 2, insns(
+                new ImmutableInstruction21s(Opcode.CONST_WIDE_16, 0, 0),
+                new ImmutableInstruction11x(Opcode.RETURN_WIDE, 0))));
+        tgtMethods.add(mk("Lxt/A;", "lonevoid", 1, insns(
                 new ImmutableInstruction10x(Opcode.RETURN_VOID))));
 
         List<Method> srcMethods = new ArrayList<>();
@@ -703,6 +731,14 @@ public class Restore {
                 new ImmutableInstruction35c(Opcode.INVOKE_STATIC, 1, 0, 0, 0, 0, 0,
                         call("Ljava/lang/System;", "gc")),
                 new ImmutableInstruction10x(Opcode.RETURN_VOID))));
+        // finding #12: real bodies for the nop-less zero-wall targets —
+        // a non-zero literal is real, and a void body with an invoke is real
+        srcMethods.add(mk("Lxt/A;", "zerowall", 2, insns(
+                new ImmutableInstruction21s(Opcode.CONST_WIDE_16, 0, 7),
+                new ImmutableInstruction11x(Opcode.RETURN_WIDE, 0))));
+        srcMethods.add(mk("Lxt/A;", "lonevoid", 1, insns(
+                new ImmutableInstruction35c(Opcode.INVOKE_STATIC, 1, 0, 0, 0, 0, 0, work),
+                new ImmutableInstruction10x(Opcode.RETURN_VOID))));
 
         File in = Files.createTempFile("restore-st-in", ".dex").toFile();
         File src = Files.createTempFile("restore-st-src", ".dex").toFile();
@@ -733,9 +769,17 @@ public class Restore {
                 "finding #11: donor with dangling (bridge) ref must be rejected");
         check(firstOpcode(theMethod(od, "Lxt/A;", "wallboot")) == Opcode.INVOKE_STATIC,
                 "finding #11: boot-classpath ref is resolvable without universe");
+        Method zw = theMethod(od, "Lxt/A;", "zerowall");
+        check(firstOpcode(zw) == Opcode.CONST_WIDE_16
+                        && ((WideLiteralInstruction) zw.getImplementation()
+                                .getInstructions().iterator().next()).getWideLiteral() == 7L,
+                "finding #12: nop-less zero wall must graft from the donor");
+        check(firstOpcode(theMethod(od, "Lxt/A;", "lonevoid")) == Opcode.INVOKE_STATIC,
+                "finding #12: lone return-void wall must graft from the donor");
         System.out.println("Restore --selftest OK: graft e2e "
                 + "(wall+shell grafted, identical skipped, real untouched, "
-                + "shell-delegate donated, bridge ref rejected, boot ref donated)");
+                + "shell-delegate donated, bridge ref rejected, boot ref donated, "
+                + "nop-less zero walls grafted)");
         System.out.println("Restore --selftest: ALL GREEN");
     }
 }

@@ -1279,12 +1279,15 @@ def test_covdebt():
     wall counted, real body not, direct/virtual lists both walked. The
     ctor-stub anchor (finding #10): StubSafe's synthesized constructor body
     (invoke-direct <init> + return-void, no nops) is neither debt nor
-    'real' — it must land in its own stats bucket."""
+    'real' — it must land in its own stats bucket. Finding #12: nop padding
+    is not required — a bare zero-return stub (even a lone return-void) is
+    wall-shaped; a genuine zero body is donor-decidable, not provable."""
     import covdebt
     d = _mk_dex_with_methods()
     # predicate unit anchors
     assert covdebt.is_nop_wall(b'\x00\x00\x0e\x00')                    # nop + return
-    assert not covdebt.is_nop_wall(b'\x0e\x00')                        # bare return: legit empty
+    assert covdebt.is_nop_wall(b'\x0e\x00')                            # bare return: wall-shaped (#12)
+    assert covdebt.is_nop_wall(b'\x16\x00\x00\x00\x10\x00')            # const-wide/16 0 + return-wide (#12)
     assert not covdebt.is_nop_wall(b'\x00\x00\x12\x50\x0f\x00')        # non-zero literal (11n high nibble)
     assert not covdebt.is_nop_wall(b'\x00\x00\x6e\x10\x00\x00\x00\x00\x0e\x00')  # invoke
     assert not covdebt.is_nop_wall(b'\x00\x01\x00\x00\x0e\x00')        # payload, not nop

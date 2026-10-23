@@ -81,9 +81,13 @@ def _const_literal_zero(op, blob, i):
 
 def is_nop_wall(blob):
     """Semantics-for-semantics mirror of Restore.isNopWall: the body is
-    EXCLUSIVELY nops, zero-literal consts and returns, with >=1 nop and
-    >=1 return. A legit empty method is exactly `return-void` (zero nops);
-    anything else (an invoke, a field op, a non-zero literal) is real."""
+    EXCLUSIVELY nops, zero-literal consts and returns, with >=1 return.
+    Nop padding is NOT required (finding #12): the extraction family walls
+    a getter-sized body as a bare zero-return stub (`const-wide/16 0;
+    return-wide`, even a lone `return-void`) — no nop is needed to fill a
+    two-instruction carve. A genuine zero-shaped body (`return 0`, empty
+    callback) is indistinguishable from a wall without donor evidence, so
+    it is counted as debt too — honest: 'body we cannot prove real'."""
     nops = 0
     returns = 0
     i = 0
@@ -101,7 +105,7 @@ def is_nop_wall(blob):
         else:
             return False
         i += _UNITS[op] * 2
-    return nops >= 1 and returns >= 1
+    return returns >= 1
 
 
 def _is_ctor_stub(dx, blob, name):

@@ -121,10 +121,15 @@ public class StubSafe {
             "attachBaseContext", "onStartCommand", "onBind", "onUnbind", "onRebind"));
 
     /**
-     * Nop-wall predicate: the extraction+nop-fill family's gutted body.
+     * Nop-wall predicate: the extraction family's gutted body.
      * Instructions exclusively nops / zero-literal consts / returns, with at
-     * least one nop. A legit empty method is exactly `return-void` (zero
-     * nops) — untouched. A residual try table does NOT disqualify: this
+     * least one return. Nop padding is NOT required (finding #12): the
+     * family walls a getter-sized body as a bare zero-return stub
+     * (`const-wide/16 0; return-wide`, even a lone `return-void`). A
+     * genuine zero-shaped body is indistinguishable without donor evidence
+     * and safe either way: non-constructor walls are kept verbatim, and a
+     * genuine <init> always carries a super/this invoke so it never matches
+     * this shape. A residual try table does NOT disqualify: this
      * family keeps the try structure while gutting handler code to nops too,
      * and the instruction scan covers handler code (a real handler trips the
      * default case); a synthesized/grafted body replaces the implementation
@@ -168,7 +173,7 @@ public class StubSafe {
                     return false;
             }
         }
-        return nops >= 1 && returns >= 1;
+        return returns >= 1;
     }
 
     /**

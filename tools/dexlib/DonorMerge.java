@@ -54,6 +54,10 @@ import org.jf.dexlib2.writer.pool.DexPool;
 public class DonorMerge {
 
     static boolean isNopWall(Method m) {
+        // Semantics must mirror Restore.isNopWall exactly, including finding
+        // #12: nop padding is NOT required — a getter-sized wall is a bare
+        // zero-return stub (`const-wide/16 0; return-wide`, even a lone
+        // `return-void`). Walls must never win a merge.
         MethodImplementation impl = m.getImplementation();
         if (impl == null) {
             return false;
@@ -82,7 +86,7 @@ public class DonorMerge {
                     return false;
             }
         }
-        return nops >= 1 && returns >= 1;
+        return returns >= 1;
     }
 
     static String sig(Method m) {
@@ -318,14 +322,27 @@ public class DonorMerge {
                 new org.jf.dexlib2.immutable.instruction.ImmutableInstruction10x(
                         org.jf.dexlib2.Opcode.RETURN_VOID)));
 
+        // finding #12: a nop-less zero wall at the LOWER index must still
+        // lose to the real body at the higher index
+        Method zw1 = Restore.mk("Lxt/A;", "zw", 2, Restore.insns(
+                new org.jf.dexlib2.immutable.instruction.ImmutableInstruction21s(
+                        org.jf.dexlib2.Opcode.CONST_WIDE_16, 0, 0),
+                new org.jf.dexlib2.immutable.instruction.ImmutableInstruction11x(
+                        org.jf.dexlib2.Opcode.RETURN_WIDE, 0)));
+        Method zw2 = Restore.mk("Lxt/A;", "zw", 2, Restore.insns(
+                new org.jf.dexlib2.immutable.instruction.ImmutableInstruction21s(
+                        org.jf.dexlib2.Opcode.CONST_WIDE_16, 0, 7),
+                new org.jf.dexlib2.immutable.instruction.ImmutableInstruction11x(
+                        org.jf.dexlib2.Opcode.RETURN_WIDE, 0)));
+
         File d1 = Files.createTempFile("donormerge-st-1", ".dex").toFile();
         File d2 = Files.createTempFile("donormerge-st-2", ".dex").toFile();
         File out = Files.createTempFile("donormerge-st-out", ".dex").toFile();
         d1.deleteOnExit();
         d2.deleteOnExit();
         out.deleteOnExit();
-        writeOne(d1, opcodes, java.util.Arrays.asList(wall, r1, delegate));
-        writeOne(d2, opcodes, java.util.Arrays.asList(r2));
+        writeOne(d1, opcodes, java.util.Arrays.asList(wall, r1, delegate, zw1));
+        writeOne(d2, opcodes, java.util.Arrays.asList(r2, zw2));
 
         main(new String[]{out.getPath(), d1.getPath(), d2.getPath()});
 
@@ -351,11 +368,21 @@ public class DonorMerge {
                         }
                     }
                 }
+                if (m.getName().equals("zw")) {
+                    for (Instruction i : m.getImplementation().getInstructions()) {
+                        if (i instanceof WideLiteralInstruction) {
+                            check(((WideLiteralInstruction) i).getWideLiteral() == 7L,
+                                    "finding #12: nop-less zero wall must lose to the "
+                                            + "real body even at the lower index");
+                        }
+                    }
+                }
             }
         }
-        check(found == 2, "merged class carries exactly the two real bodies");
+        check(found == 3, "merged class carries exactly the three real bodies");
         System.out.println("DonorMerge --selftest: ALL GREEN "
-                + "(wall dropped, delegate kept, conflict first-wins)");
+                + "(wall dropped, delegate kept, conflict first-wins, "
+                + "nop-less zero wall loses at lower index)");
     }
 
     static void writeOne(File f, Opcodes opcodes, List<Method> methods) throws Exception {
