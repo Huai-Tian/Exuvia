@@ -373,15 +373,49 @@ def make_libc(uc, elf):
     def f_dlopen(x0, x1, x2, x3, x4=0, x5=0):
         return DLOPEN_SELF
 
+    # r31: dlsym resolves against the whole emulated process, not only the
+    # so's own exports — shells hand-resolve libc imports (dlopen("libc.so")
+    # + dlsym) into cached runtime-table slots, and a 0 there becomes a null
+    # function pointer (blr to 0) on first use. Known stub-table names bind
+    # to FRESH slots in the upper STUB half, allocated lazily on first dlsym
+    # and stable after (real dlsym: same name => same address); hook_stub
+    # decodes them through _dlsym_rev. Unknown names return 0 — honest
+    # "dlsym failed", callers check. (Three latent bugs fixed here: the
+    # self-export loop unpacked 3-tuples as pairs — it raised on the first
+    # defined symbol and the except swallowed it; the comparison was
+    # str == bytes; and the old lazy path appended to an undefined
+    # libc_names.)
+    dlsym_slots = {}
+    dlsym_rev = {}
+
     def f_dlsym(x0, x1, x2, x3, x4=0, x5=0):
         name = cstr(x1)
         try:
-            for nm, val in elf.dyn_symbols():
-                if nm == name and val:
+            for nm, val, _sz in elf.dyn_symbols():
+                if nm.encode() == name and val:
                     return val
         except Exception:
             pass
-        return 0
+        key = name.decode(errors='replace')
+        if key not in dlsym_slots and callable(table.get(key)):
+            sa = STUB + STUBSZ // 2 + 8 * len(dlsym_rev)
+            dlsym_slots[key] = sa
+            dlsym_rev[sa] = key
+        return dlsym_slots.get(key, 0)
+
+    # r31: fake-device property namespace (same philosophy as the getpid /
+    # time / sysconf stubs: describes the emulated DEVICE, never any sample).
+    # Unknown names answer len 0 = "property unset", like a real device.
+    PROPS = {
+        'ro.build.version.sdk': b'30',
+        'ro.build.version.release': b'11',
+        'ro.product.cpu.abi': b'arm64-v8a',
+    }
+
+    def f_prop_get(x0, x1, x2, x3, x4=0, x5=0):
+        v = PROPS.get(cstr(x0).decode(errors='replace'), b'')
+        wr(x1, v + b'\0')
+        return len(v)
 
     # mmap bridge (Battle-1 r13): shells mmap a runtime file (their own APK /
     # released blob) — [0x2e40d0] composes an mmap-base pointer, and the SM4
@@ -655,12 +689,18 @@ def make_libc(uc, elf):
         'dlerror': f_noop, '__errno': f_errno, 'sysconf': lambda x0, x1, x2, x3, x4=0, x5=0: 4096,
         '__emutls_get_address': f_emutls_get_address, '__cxa_thread_atexit': f_noop,
         'dlopen': f_dlopen, 'dlsym': f_dlsym, 'dlclose': f_noop,
+        # r31: names shells resolve by hand through dlopen+dlsym. Signal
+        # registration is a success-noop in a world with no signal delivery.
+        '__system_property_get': f_prop_get,
+        'sigaction': f_noop, 'sigaction64': f_noop,
+        'sigprocmask': f_noop, 'sigprocmask64': f_noop,
         'inflate': f_inflate, 'inflateInit_': f_inflateInit_, 'inflateEnd': f_inflateEnd,
         'fopen': f_fopen, 'fread': f_fread, 'fclose': f_fclose,
         'fseek': f_fseek, 'lseek': f_lseek, 'ftell': f_ftell,
         'mmap': f_mmap, 'munmap': f_noop,
         'pthread_create': f_pthread_create,
     }
+    table['_dlsym_rev'] = dlsym_rev        # r31 槽位 -> 名（hook_stub 反查）
     table['_mmap_regions'] = mmap_regions  # main 侧 CLI 输出（非符号名，绑定循环不触碰）
     table['_threads_spawned'] = threads_spawned
     table['_svc_hook'] = hook_svc            # raw-syscall bridge (SVC → UC_HOOK_INTR)
@@ -912,6 +952,11 @@ def main():
 
     def hook_stub(uc_, addr, size, user):
         fn = stub_addr.get(addr)
+        if fn is None:
+            # r31: f_dlsym's lazily-allocated namespace slots carry no
+            # stub_addr entry (that dict maps slot -> callable, not names);
+            # the reverse map decodes slot -> name -> semantics.
+            fn = libc.get(libc.get('_dlsym_rev', {}).get(addr))
         if callable(fn):
             x = [uc_.reg_read(r) for r in (UC_ARM64_REG_X0, UC_ARM64_REG_X1, UC_ARM64_REG_X2, UC_ARM64_REG_X3, UC_ARM64_REG_X4, UC_ARM64_REG_X5)]
             r = fn(*x)

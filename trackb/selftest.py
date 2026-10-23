@@ -178,6 +178,126 @@ def test_so_emulator():
         print('so_emulator chain OK: fn1 write observed by fn2 (session-shared memory)')
 
 
+def test_so_emulator_dlsym_namespace():
+    """r31: dlsym resolves against the process namespace, not only self-exports.
+
+    Synthetic .so carries one JUMP_SLOT import (dlsym), one self-export
+    (self_export) and drives four cases through the CLI:
+      A  dlsym("strlen")           -> a lazily bound libc-namespace stub slot
+                                      (upper STUB half, never 0)
+      B  dlsym("no_such_symbol")   -> 0 (honest failure)
+      C  dlsym("self_export")      -> the so's own VA (self-first semantics)
+      D  dlsym("__system_property_get") then call it -> writes "30" and
+         returns len 2 (fake-device property semantics via the namespace)
+    """
+    try:
+        import unicorn  # noqa: F401
+    except ImportError:
+        print('SKIP so_emulator dlsym (unicorn not installed — unavailable semantics)')
+        return
+    eh = bytearray(64)
+    eh[0:4] = b'\x7fELF'
+    eh[4] = 2
+    eh[5] = 1
+    eh[6] = 1
+    eh[16:18] = struct.pack('<H', 3)
+    eh[18:20] = struct.pack('<H', 183)
+    struct.pack_into('<Q', eh, 0x20, 64)
+    struct.pack_into('<H', eh, 0x34, 64)     # e_ehsize (spec offsets — the
+    struct.pack_into('<H', eh, 0x36, 56)     # e_phentsize  emulator's parser
+    struct.pack_into('<H', eh, 0x38, 2)      # e_phnum      reads these exact)
+
+    ph = bytearray(56 * 2)
+    struct.pack_into('<I', ph, 0, 1)         # PT_LOAD
+    struct.pack_into('<Q', ph, 8, 0x1000)
+    struct.pack_into('<Q', ph, 16, 0x1000)
+    struct.pack_into('<Q', ph, 32, 0x1000)
+    struct.pack_into('<Q', ph, 40, 0x1000)
+    struct.pack_into('<I', ph, 56, 2)        # PT_DYNAMIC
+    struct.pack_into('<Q', ph, 56 + 8, 0x100)    # p_offset (file)
+    struct.pack_into('<Q', ph, 56 + 32, 9 * 16)  # p_filesz
+    dyn = b''.join(struct.pack('<QQ', t, v) for t, v in (
+        (4, 0x1180),      # DT_HASH
+        (5, 0x1080),      # DT_STRTAB
+        (6, 0x1100),      # DT_SYMTAB
+        (11, 24),         # DT_SYMENT
+        (10, 0x100),      # DT_STRSZ
+        (23, 0x11c0),     # DT_JMPREL
+        (2, 24),          # DT_PLTRELSZ
+        (20, 7),          # DT_PLTREL = RELA
+        (0, 0),           # DT_NULL
+    ))
+    strs = (b'\0' + b'strlen\0' + b'dlsym\0' + b'self_export\0'
+            + b'no_such_symbol\0')
+    strs = strs.ljust(0x30, b'\0') + b'ro.build.version.sdk\0'.ljust(22, b'\0') \
+        + b'__system_property_get\0'
+    # strtab offsets: strlen=1, dlsym=8, self_export=0xe, no_such=0x1a,
+    #                 ro.build.version.sdk=0x30, __system_property_get=0x46
+    sym = b'\0' * 24
+    sym += struct.pack('<IBBHQQ', 8, 0x12, 0, 0, 0, 0)            # [1] dlsym (undef)
+    sym += struct.pack('<IBBHQQ', 0xe, 0x12, 0, 1, 0x1060, 4)     # [2] self_export
+    hasht = struct.pack('<IIIIIII', 1, 3, 1, 0, 0, 0, 0)          # nbucket/nchain...
+    rela = struct.pack('<QQq', 0x1400, (1 << 32) | 1026, 0)       # JUMP_SLOT dlsym
+    # blr clobbers LR — a bare 'blr; ret' loops on its own ret (the harness
+    # ends runs via LR=SENTINEL). Real prologue/epilogue saves LR first.
+    fn_a = b''.join(struct.pack('<I', w) for w in (
+        0xA9BE7BFD,   # stp x29, x30, [sp, #-0x20]!
+        0xD2828009,   # movz x9, #0x1400   (dlsym GOT slot)
+        0xF9400128,   # ldr x8, [x9]
+        0xD63F0100,   # blr x8             -> f_dlsym(x0, x1=name)
+        0xA8C27BFD,   # ldp x29, x30, [sp], #0x20
+        0xD65F03C0,   # ret
+    ))
+    fn_d = b''.join(struct.pack('<I', w) for w in (
+        0xA9BE7BFD,   # stp x29, x30, [sp, #-0x20]!
+        0xD2828009,   # movz x9, #0x1400
+        0xF9400128,   # ldr x8, [x9]
+        0xD63F0100,   # blr x8             -> x0 = prop_get stub
+        0xAA0003E8,   # mov x8, x0
+        0xD2821600,   # movz x0, #0x10b0   ("ro.build.version.sdk")
+        0xD282A001,   # movz x1, #0x1500   (out buf)
+        0xD63F0100,   # blr x8
+        0xA8C27BFD,   # ldp x29, x30, [sp], #0x20
+        0xD65F03C0,   # ret
+    ))
+    img = bytes(eh) + bytes(ph)
+    img += b'\0' * (0x100 - len(img)) + dyn
+    img += b'\0' * (0x1000 - len(img))
+    img += fn_a + b'\0' * (0x20 - len(fn_a)) + fn_d + b'\0' * (0x1060 - 0x1020 - len(fn_d))
+    img += struct.pack('<I', 0xD65F03C0)                            # self_export @0x1060: ret
+    img += b'\0' * (0x1080 - len(img)) + strs
+    img += b'\0' * (0x1100 - len(img)) + sym
+    img += b'\0' * (0x1180 - len(img)) + hasht
+    img += b'\0' * (0x11c0 - len(img)) + rela
+    img += b'\0' * (0x2000 - len(img))
+    with tempfile.TemporaryDirectory() as td:
+        so = os.path.join(td, 'dlsym.so')
+        open(so, 'wb').write(img)
+
+        def run(*extra):
+            r = subprocess.run(
+                [sys.executable, os.path.join(HERE, 'so_emulator.py'), so] + list(extra),
+                capture_output=True, text=True, timeout=60)
+            assert r.returncode == 0, f'exit {r.returncode}: {r.stderr}\n{r.stdout}'
+            return json.loads(r.stdout)
+
+        out = run('--fn', '0x1000', '--arg', 'x1=0x1081')
+        got = int(out['return'], 16)
+        assert 0x600000008000 <= got < 0x600000010000, \
+            f'libc name must bind to an upper-STUB-half slot, got 0x{got:x}'
+        out = run('--fn', '0x1000', '--arg', 'x1=0x109a')
+        assert int(out['return'], 16) == 0, 'unknown name must fail honestly (0)'
+        out = run('--fn', '0x1000', '--arg', 'x1=0x108e')
+        assert int(out['return'], 16) == 0x1060, 'self-export must win over the namespace'
+        buf = os.path.join(td, 'prop.bin')
+        out = run('--fn', '0x1020', '--arg', 'x1=0x10c6',
+                  '--dump-mem', '0x1500:3:' + buf)
+        assert int(out['return'], 16) == 2, f'prop len expected 2, got {out["return"]}'
+        assert open(buf, 'rb').read() == b'30\0', 'property value mismatch'
+        print('so_emulator dlsym OK: libc names bind to namespace slots, '
+              'self-export wins, unknown fails to 0, property answered')
+
+
 def test_rc4_vector():
     sys.path.insert(0, HERE)
     import importlib.util
@@ -835,6 +955,7 @@ def test_dexdoctor():
 
 if __name__ == '__main__':
     test_so_emulator()
+    test_so_emulator_dlsym_namespace()
     test_rc4_vector()
     test_recon_smoke()
     test_disasm()
