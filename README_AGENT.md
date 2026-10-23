@@ -27,7 +27,7 @@ Exuvia 是一个**面向 AI Agent 的 Android 通用脱壳 / 修复流水线**�
 - **修复战役**：**v12 产物真机双双成功**（12 轮交付、11 个根因、2 个产物、2 次真机成功）——两个不同脱壳器的 dump（56.al 紧凑重排 1.85MB / fulldump 内存展开 4.5MB）经同一修复管线产出均正常运行（Oppo/Android 15+/targetSdk 36）。五重验收门（verify_all.py）+ 修复工具链产品化。
 - **第二战（dex2c 翻译族）**：**闭环 APK 维护者真机确认（2026-10-21/22）**——无 dump、无参照，从 JNI 语义重建方法体。工具链自动化已收官：dexcontainer.py 尾容器重建、jnitrace.py（`--init` 运行时预热 / `--seed-dex` clinit 静态域播种 / `--arms` 空值守卫双臂枚举）、TLS 字符串离线物化（so_emulator emutls 契约仿真）、trace2smali.py（`--sigs-dex` 空心 stub 签名自动提取）、verify_all V4 多 dex 并集修正。SKILL §8 族 2 入册。
 - **产品化**：`exuvia repair` 子命令上线（Rust 壳 + 内嵌 Python——不重写 12 轮真机验证的工具链）；方法体**四来源体系**：`--dump`（第三方 dump，多来源互补，**生产主路径**）/ `--reference`（原包，**内部测试专用**）/ StubSafe **框架契约兜底** / dex2c 源（jnitrace→trace2smali，无 dump 可恢复，SKILL §7）。
-- **契约层**：六协议物 fixture 双向锚定、SKILL_VERSION 1.10.10、CI 全绿。**锚点纪律（血泪教训）**：SKILL_VERSION 升版必须**同一 commit** 改 `src/version.rs`——1e5b601 只改文档导致锚点漂移、CI 连红（1fdc8df 修复）。
+- **契约层**：六协议物 fixture 双向锚定、SKILL_VERSION 1.10.11、CI 全绿。**锚点纪律（血泪教训）**：SKILL_VERSION 升版必须**同一 commit** 改 `src/version.rs`——1e5b601 只改文档导致锚点漂移、CI 连红（1fdc8df 修复）。
 - 产品线 a 契约面：卡点两类（method-native-stub：ACC_NATIVE stub + JNI 符号定位 + 方法体切片；encrypted-payload：坏 DEX 文件 / 声明区域内未申报尾区 / so 内明文 DEX 扫描命中 / assets ELF 零命中负事实四机械来源）+ 解密例程候选机械定位（JNI_OnLoad / init_array 双路径：PT_DYNAMIC 运行时视角优先）。
 - 外循环闭合且留痕：`exuvia packed.apk → next --goal → [LLM 解卡点] → unpack merge（四层闸门 + 沙箱双锚 + 销账）→ validate`；merge 拒绝时 attempts.log 记 merge-rejected + 被认领卡点 attempts 递增；recovered DEX 形状产物归档 workspace/<debt_id>/recovered.dex；洋葱二次分析 `analyze --dex` 回注解卡产物 → 下一层欠账地图。
 - CLI 契约表全兑现：--version / --profile / --goal / --json / --resume、next、schema --dump、unpack validate / merge、analyze --dex、hunt（含变体 RC4 参数）、repair。

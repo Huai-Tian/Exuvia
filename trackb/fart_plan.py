@@ -20,9 +20,11 @@ exceptions are enough — the call need never succeed):
                         itself runs the static initializer
 
 --components is a text file (one class per line, dotted or descriptor) of
-manifest-declared components; those classes are sorted first as the
-"component" tier — callbacks live there and carry the highest repair
-value per sweep second. Zero-sample: no family-specific constants.
+manifest-declared components; those classes are sorted as the "component"
+tier — callbacks live there and carry the highest repair value per sweep
+second. Finding #13: covdebt's `hot` flag (wall named by an in-dex invoke
+site = reachable = latent crash) outranks everything — those entries form
+the "hot" tier, planned first. Zero-sample: no family-specific constants.
 """
 import argparse
 import json
@@ -95,24 +97,30 @@ def make_plan(debt_json, components=(), limit=0):
                 comps.add('L' + c.replace('.', '/') + ';')
     plan, skips = [], 0
     for e in debt_json['debt']:
-        tier = 'component' if e['class'] in comps else 'rest'
+        # finding #13: a wall invoked by in-dex real code is a latent crash
+        # (the countdown-end AIOOBE class of bug) — sweep it first.
+        tier = ('hot' if e.get('hot')
+                else 'component' if e['class'] in comps else 'rest')
         pe = plan_entry(e, tier)
         if pe is None:
             continue
         if pe['action'] == 'skip':
             skips += 1
         plan.append(pe)
-    rank = {'component': 0, 'rest': 1}
+    rank = {'hot': 0, 'component': 1, 'rest': 2}
     plan.sort(key=lambda p: (rank[p['tier']], p['action'] != 'invoke',
                              p['class'], p['name']))
     if limit:
         plan = plan[:limit]
     by_action = {}
+    by_tier = {}
     for p in plan:
         by_action[p['action']] = by_action.get(p['action'], 0) + 1
+        by_tier[p['tier']] = by_tier.get(p['tier'], 0) + 1
     return {'tool': 'fart_plan', 'source': debt_json.get('dex'),
             'summary': {'entries': len(plan), 'skipped_abstract': skips,
-                        'by_action': by_action},
+                        'hot': by_tier.get('hot', 0),
+                        'by_tier': by_tier, 'by_action': by_action},
             'plan': plan}
 
 
@@ -132,8 +140,8 @@ def main():
     with open(path, 'w') as f:
         json.dump(out, f, indent=1)
     s = out['summary']
-    print('[fart_plan] %d entries (%s), %d abstract-class skips -> %s'
-          % (s['entries'],
+    print('[fart_plan] %d entries (hot=%d, %s), %d abstract-class skips -> %s'
+          % (s['entries'], s['hot'],
              ', '.join('%s=%d' % kv for kv in sorted(s['by_action'].items())),
              s['skipped_abstract'], path))
 

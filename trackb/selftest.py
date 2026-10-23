@@ -1182,22 +1182,26 @@ def test_dexdoctor():
 
 
 def _mk_dex_with_methods():
-    """Synthetic DEX with one class and four coded methods: a static
-    nop-wall, a real body (non-zero literal), a virtual nop-wall, and a
-    StubSafe-shaped ctor stub (invoke-direct <init> + return-void).
-    Shared by the covdebt anchor."""
+    """Synthetic DEX: class A (super: Object) with five coded methods —
+    a static nop-wall, a real body (non-zero literal; invoke-statics the
+    wall AND invoke-virtuals Object.vwall), two virtual nop-walls (vwall,
+    uwall), and a StubSafe-shaped ctor stub (invoke-direct <init> +
+    return-void). Finding #13 anchors: `wall` is directly hot; `vwall`
+    is dispatch-hot only (nothing names A.vwall — the invoke targets the
+    Object base it overrides); `uwall` stays cold. Shared by the covdebt
+    anchor."""
     import struct as st2
     import hashlib as hl
     import zlib
     strings = ['Lcom/x/A;', 'Ljava/lang/Object;', 'I', 'V',
-               'wall', 'real', 'vwall', '<init>']
+               'wall', 'real', 'vwall', '<init>', 'uwall']
     hdr = bytearray(0x70)
     hdr[0:8] = b'dex\n035\x00'
     str_ids_off, n_str = 0x70, len(strings)
     type_ids_off = str_ids_off + n_str * 4          # 4 types (0..3)
     proto_ids_off = type_ids_off + 4 * 4            # 2 protos
-    method_ids_off = proto_ids_off + 2 * 12         # 5 methods
-    class_defs_off = method_ids_off + 5 * 8         # 1 class
+    method_ids_off = proto_ids_off + 2 * 12         # 7 methods
+    class_defs_off = method_ids_off + 7 * 8         # 1 class
     data_off = class_defs_off + 32
     # data: string blobs
     blob = bytearray()
@@ -1206,17 +1210,21 @@ def _mk_dex_with_methods():
         str_offs.append(data_off + len(blob))
         blob += bytes([len(s)]) + s.encode() + b'\x00'
     class_data_off = data_off + len(blob)
-    # class_data: 0 fields, 3 direct, 1 virtual — code offsets patched later
-    cd_placeholder_len = 24
+    # class_data: 0 fields, 3 direct, 2 virtual — code offsets patched later
+    cd_placeholder_len = 32
     code0_off = (class_data_off + cd_placeholder_len + 3) & ~3
     wall = b'\x00\x00\x12\x00\x0f\x00'      # nop; const/4 v0,0; return v0
-    real = b'\x12\x10\x0f\x00'              # const/4 v0,0x1; return v0
+    # const/4 v0,1; invoke-virtual {v0}, Object.vwall(m5);
+    # invoke-static {}, wall(m0); return v0  (real; seeds direct+dispatch hot)
+    real = b'\x12\x10\x6e\x10\x05\x00\x00\x00\x71\x00\x00\x00\x00\x00\x0f\x00'
     init = b'\x70\x10\x04\x00\x00\x00\x0e\x00'  # invoke-direct {v0}, m4; return-void
     vwall = b'\x00\x00\x0e\x00'             # nop; return-void
+    uwall = b'\x00\x00\x0e\x00'             # nop; return-void (unreferenced)
     code1_off = code0_off + 16 + len(wall)
     code1_off = (code1_off + 3) & ~3
     code2_off = (code1_off + 16 + len(real) + 3) & ~3
     code3_off = (code2_off + 16 + len(init) + 3) & ~3
+    code4_off = (code3_off + 16 + len(vwall) + 3) & ~3
 
     def uleb(n):
         out = bytearray()
@@ -1230,11 +1238,12 @@ def _mk_dex_with_methods():
                 break
         return bytes(out)
 
-    cd = (uleb(0) + uleb(0) + uleb(3) + uleb(1)
+    cd = (uleb(0) + uleb(0) + uleb(3) + uleb(2)
           + uleb(0) + uleb(0x9) + uleb(code0_off)   # direct: wall (static)
           + uleb(1) + uleb(0x1) + uleb(code1_off)   # direct: real
           + uleb(2) + uleb(0x10001) + uleb(code2_off)  # direct: <init> (ctor stub)
-          + uleb(2) + uleb(0x1) + uleb(code3_off))  # virtual: vwall (idx diff restarts)
+          + uleb(2) + uleb(0x1) + uleb(code3_off)   # virtual: vwall (diff restarts)
+          + uleb(4) + uleb(0x1) + uleb(code4_off))  # virtual: uwall (midx 2+4=6)
     assert len(cd) <= cd_placeholder_len
 
     out = bytearray(hdr)
@@ -1244,9 +1253,10 @@ def _mk_dex_with_methods():
     out += st2.pack('<III', 3, 3, 0)                              # proto ()V
     out += st2.pack('<HHI', 0, 0, 4) + st2.pack('<HHI', 0, 0, 5) \
         + st2.pack('<HHI', 0, 1, 6) + st2.pack('<HHI', 0, 1, 7) \
-        + st2.pack('<HHI', 1, 1, 7)                               # method_ids
-    out += st2.pack('<IIIIIIII', 0, 0x1, 0xFFFFFFFF, 0, 0xFFFFFFFF,
-                    0, class_data_off, 0)                         # class_def
+        + st2.pack('<HHI', 1, 1, 7) + st2.pack('<HHI', 1, 1, 6) \
+        + st2.pack('<HHI', 0, 1, 8)                               # method_ids
+    out += st2.pack('<IIIIIIII', 0, 0x1, 1, 0, 0xFFFFFFFF,
+                    0, class_data_off, 0)                         # class_def (super=Object)
     assert len(out) == data_off
     out += blob[:class_data_off - data_off]                       # strings
     out += cd
@@ -1262,9 +1272,11 @@ def _mk_dex_with_methods():
     out += code_item(init)
     out += b'\x00' * (code3_off - len(out))
     out += code_item(vwall)
+    out += b'\x00' * (code4_off - len(out))
+    out += code_item(uwall)
     st2.pack_into('<IIII', out, 56, n_str, str_ids_off, 4, type_ids_off)
     st2.pack_into('<IIII', out, 72, 2, proto_ids_off, 0, 0)
-    st2.pack_into('<IIII', out, 88, 5, method_ids_off, 1, class_defs_off)
+    st2.pack_into('<IIII', out, 88, 7, method_ids_off, 1, class_defs_off)
     st2.pack_into('<II', out, 104, len(out) - data_off, data_off)
     st2.pack_into('<I', out, 32, len(out))
     st2.pack_into('<I', out, 36, 0x70)
@@ -1292,17 +1304,26 @@ def test_covdebt():
     assert not covdebt.is_nop_wall(b'\x00\x00\x6e\x10\x00\x00\x00\x00\x0e\x00')  # invoke
     assert not covdebt.is_nop_wall(b'\x00\x01\x00\x00\x0e\x00')        # payload, not nop
     stats, debt = covdebt.extract_debt(d)
-    assert (stats['methods'], stats['coded']) == (4, 4), stats
-    assert (stats['nop_wall'], stats['real'], stats['no_code']) == (2, 1, 0), stats
+    assert (stats['methods'], stats['coded']) == (5, 5), stats
+    assert (stats['nop_wall'], stats['real'], stats['no_code']) == (3, 1, 0), stats
     assert stats['ctor_stub'] == 1, stats
     by_name = {e['name']: e for e in debt}
-    assert set(by_name) == {'wall', 'vwall'}
-    w, v = by_name['wall'], by_name['vwall']
+    assert set(by_name) == {'wall', 'vwall', 'uwall'}
+    w, v, u = by_name['wall'], by_name['vwall'], by_name['uwall']
     assert w['static'] and w['kind'] == 'direct' and w['proto'] == '()I'
     assert w['class'] == 'Lcom/x/A;' and w['body_bytes'] == 6
     assert v['kind'] == 'virtual' and v['proto'] == '()V' and not v['clinit']
-    print('covdebt OK: 2/4 synthetic methods flagged as debt, ctor stub '
-          'counted separately, fields complete')
+    # finding #13: hot = reachable from real code. `real` invoke-statics
+    # `wall` (midx 0) -> directly hot. Nothing names A.vwall; the invoke-
+    # virtual targets its Object base -> dispatch-hot. `uwall` shares
+    # vwall's exact body yet is unreferenced -> cold (reachability, not
+    # shape, decides).
+    assert stats['hot'] == 2, stats
+    assert w['hot'] and w['method_idx'] == 0
+    assert v['hot'] and v['method_idx'] == 2
+    assert not u['hot']
+    print('covdebt OK: 3/5 synthetic methods flagged as debt, ctor stub '
+          'counted separately, direct + dispatch hot reachability anchored')
 
 
 def test_stubsafe_ctor_stub():
@@ -1332,7 +1353,10 @@ def test_stubsafe_ctor_stub():
 
 def test_fart_plan():
     """fart_plan (r33): debt -> actions (invoke/construct/init_class/skip),
-    receiver synthesis, dummy args, component tiering (dotted + descriptor)."""
+    receiver synthesis, dummy args, component tiering (dotted + descriptor).
+    Finding #13: a `hot` debt entry (wall named by an in-dex invoke site)
+    forms its own tier ranking ahead of component; pre-#13 debt JSONs lack
+    the key and must plan exactly as before."""
     import fart_plan
     base = {'access': 0x1, 'class_abstract': False, 'static': False,
             'abstract': False, 'constructor': False, 'clinit': False,
@@ -1351,10 +1375,15 @@ def test_fart_plan():
         dict(base, **{'class': 'Lcom/a/Svc;', 'name': '<clinit>',
                       'proto': '()V', 'params': [], 'clinit': True,
                       'access': 0x8, 'kind': 'direct'}),
+        dict(base, **{'class': 'Lcom/a/Op;', 'name': 'a',
+                      'proto': '(I)V', 'params': ['I'], 'hot': True,
+                      'method_idx': 42}),
     ]}
     out = fart_plan.make_plan(debt, ['com.a.Svc'])
-    assert out['summary']['entries'] == 5
+    assert out['summary']['entries'] == 6
     assert out['summary']['skipped_abstract'] == 1
+    assert out['summary']['hot'] == 1
+    assert out['summary']['by_tier'] == {'hot': 1, 'component': 3, 'rest': 2}
     by = {(e['class'], e['name']): e for e in out['plan']}
     onx = by[('com.a.Svc', 'onX')]
     assert onx['action'] == 'invoke' and onx['receiver'] == 'alloc'
@@ -1366,13 +1395,16 @@ def test_fart_plan():
     assert by[('com.a.Svc', '<clinit>')]['action'] == 'init_class'
     assert by[('com.a.Abs', 'm')]['action'] == 'skip'
     assert 'abstract' in by[('com.a.Abs', 'm')]['reason']
-    # component classes sort ahead of the rest tier
-    assert out['plan'][0]['tier'] == 'component'
+    assert by[('com.a.Op', 'a')]['tier'] == 'hot'
+    # hot tier sorts ahead of component, component ahead of the rest tier
+    assert out['plan'][0]['tier'] == 'hot'
+    assert out['plan'][1]['tier'] == 'component'
     assert out['plan'][-1]['tier'] in ('component', 'rest')
     # descriptor form of the components list normalizes identically
     out2 = fart_plan.make_plan(debt, ['Lcom/a/Svc;'])
     assert [e['tier'] for e in out2['plan']] == [e['tier'] for e in out['plan']]
-    print('fart_plan OK: 5 actions planned, tiering/receiver/args correct')
+    print('fart_plan OK: 6 actions planned, hot/component tiering, '
+          'receiver/args correct')
 
 
 def _nrv_pack_events(events):

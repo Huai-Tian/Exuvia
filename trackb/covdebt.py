@@ -10,6 +10,13 @@ turns "N walls left" into an actionable, machine-readable worklist:
 
 Each debt entry carries everything a sweep planner needs: class, name,
 proto, access flags, direct/virtual, and the parsed parameter descriptors.
+Finding #13 (family-3): each entry also carries `hot` — True when real
+code can reach it: an in-dex invoke site names the method itself, or it
+overrides (same name+proto) an invoke-referenced base — virtual dispatch
+reaches overrides the dex never names (the countdown-crash walls were pure
+Operation.execute overrides; the executor references only the base). Wall
+bodies hold no invoke instructions, so every referrer is real (or
+ctor-stub) code: a hot wall is a latent crash, planned first by fart_plan.
 Pair with fart_plan.py (debt -> invocation plan) and fart_sweep (device-side
 FART-style forced materialization), then re-dump and feed --dump again —
 the debt shrinks every round, measurably.
@@ -42,6 +49,11 @@ for _o in ([0x03, 0x06, 0x09, 0x14, 0x17, 0x1b, 0x24, 0x25, 0x26, 0x2a,
            + list(range(0x74, 0x79))):  # invoke-*/range
     _UNITS[_o] = 3
 _UNITS[0x18] = 5                        # const-wide (51l)
+_UNITS[0xfa] = 4                        # invoke-polymorphic (45cc)
+for _o in (0xfb, 0xfc):                 # invoke-custom(/range) (3rc)
+    _UNITS[_o] = 3
+for _o in (0xfd, 0xfe, 0xff):           # const-method-handle/type
+    _UNITS[_o] = 2
 
 _RETURNS = (0x0e, 0x0f, 0x10, 0x11)
 _CONSTS = (0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19)
@@ -230,8 +242,9 @@ class Dex:
 
     def methods(self):
         """Yield (class_desc, class_access, name, proto_idx, access,
-        code_off) for every declared method (direct then virtual per the
-        class_data stream; method_idx_diff restarts at 0 for each list)."""
+        code_off, kind, method_idx) for every declared method (direct then
+        virtual per the class_data stream; method_idx_diff restarts at 0
+        for each list)."""
         for ci in range(self.class_defs_size):
             base = self.class_defs_off + 32 * ci
             cls_idx, cls_access = struct.unpack_from('<II', self.d, base)
@@ -258,22 +271,126 @@ class Dex:
                         '<I', self.d, self.method_ids_off + 8 * midx + 4)[0]]
                     proto_idx = struct.unpack_from(
                         '<H', self.d, self.method_ids_off + 8 * midx + 2)[0]
-                    yield cls, cls_access, name, proto_idx, access, code_off, kind
+                    yield cls, cls_access, name, proto_idx, access, code_off, \
+                        kind, midx
 
     def code_blob(self, code_off):
         insns_size = struct.unpack_from('<I', self.d, code_off + 12)[0]
         return self.d[code_off + 16:code_off + 16 + 2 * insns_size]
 
 
+_INVOKES = frozenset(list(range(0x6e, 0x73)) + list(range(0x74, 0x79)))
+
+
+def _payload_units(blob, i):
+    """Unit length of the switch/array payload at offset i (op 0x00 with a
+    non-zero ident). None when the ident is unknown — caller then advances
+    one unit (scan stays conservative; payloads never carry invokes)."""
+    ident = struct.unpack_from('<H', blob, i)[0]
+    if ident == 0x0100:                      # packed-switch: +size i32 targets
+        size = struct.unpack_from('<H', blob, i + 2)[0]
+        return 4 + 2 * size
+    if ident == 0x0200:                      # sparse-switch: size keys+targets
+        size = struct.unpack_from('<H', blob, i + 2)[0]
+        return 2 + 4 * size
+    if ident == 0x0300:                      # fill-array-data
+        width = struct.unpack_from('<H', blob, i + 2)[0]
+        size = struct.unpack_from('<I', blob, i + 4)[0]
+        return 4 + (width * size + 1) // 2
+    return None
+
+
+def _referenced_methods(dx):
+    """Set of method_idx values named by at least one invoke site anywhere
+    in the dex. Finding #13: wall bodies hold no invoke instructions at
+    all, so a wall in this set is referenced exclusively from real (or
+    ctor-stub) code = REACHABLE debt, a latent crash candidate (the v7
+    countdown crash: changelist Operation.execute walls dispatched from
+    the real OperationList loop)."""
+    refs = set()
+    for _c, _a, _n, _p, _ac, code_off, _k, _m in dx.methods():
+        if not code_off:
+            continue
+        blob = dx.code_blob(code_off)
+        i = 0
+        while i + 4 <= len(blob):
+            op = blob[i]
+            if op == 0x00 and blob[i + 1] != 0:
+                units = _payload_units(blob, i)
+                i += (units or 1) * 2
+                continue
+            if op in _INVOKES:
+                midx = struct.unpack_from('<H', blob, i + 2)[0]
+                if midx < dx.method_ids_size:   # tolerate payload bleed
+                    refs.add(midx)
+            i += _UNITS[op] * 2
+    return refs
+
+
+def _dispatch_refs(dx, refs):
+    """(name, proto_idx) -> set of class_idx, for every invoke-referenced
+    method. Virtual dispatch reaches overrides the dex never names: the #13
+    crash walls were pure overrides of Operation.execute — the executor
+    references only the BASE. A wall whose class's ancestor closure meets
+    the ref class set of a same-signature ref is dispatch-reachable, hence
+    hot. Over-approximation is deliberate (invoke-super is non-virtual) —
+    it only sweeps a few extra walls, never hides a crash candidate."""
+    by_sig = {}
+    for midx in refs:
+        cls_idx, proto_idx, name_idx = struct.unpack_from(
+            '<HHI', dx.d, dx.method_ids_off + 8 * midx)
+        key = (dx.strings()[name_idx], proto_idx)
+        by_sig.setdefault(key, set()).add(cls_idx)
+    return by_sig
+
+
+def _ancestor_walker(dx):
+    """Memoized transitive superclass+interface closure (self included)
+    keyed by class_idx, built from class_defs."""
+    hier = {}
+    for ci in range(dx.class_defs_size):
+        base = dx.class_defs_off + 32 * ci
+        cls_idx, _acc, super_idx, ifaces_off = struct.unpack_from(
+            '<IIII', dx.d, base)
+        hier[cls_idx] = (None if super_idx == 0xFFFFFFFF else super_idx,
+                         dx._type_list(ifaces_off))
+    memo = {}
+
+    def walk(c):
+        if c in memo:
+            return memo[c]
+        memo[c] = set()                      # cycle guard
+        anc = {c}
+        entry = hier.get(c)
+        if entry is not None:
+            sup, ifaces = entry
+            if sup is not None:
+                anc |= walk(sup)
+            for i in ifaces:
+                anc |= walk(i)
+        memo[c] = anc
+        return anc
+
+    return hier, walk
+
+
 def extract_debt(data: bytes):
     """-> (stats, [debt...]); debt entries carry the full sweep-planner
     metadata. Walls only — real bodies and abstract/native no-code
-    declarations are not debt."""
+    declarations are not debt. Each entry's `hot` flag (finding #13) marks
+    walls reachable from real code: named by an in-dex invoke site, or a
+    virtual override of one (dispatch-reachable) = crash candidate."""
     dx = Dex(data)
     stats = {'classes': dx.class_defs_size, 'methods': 0, 'coded': 0,
-             'nop_wall': 0, 'real': 0, 'no_code': 0, 'ctor_stub': 0}
+             'nop_wall': 0, 'real': 0, 'no_code': 0, 'ctor_stub': 0,
+             'hot': 0}
     debt = []
-    for cls, cls_access, name, proto_idx, access, code_off, kind in dx.methods():
+    refs = _referenced_methods(dx)
+    by_sig = _dispatch_refs(dx, refs)
+    hier, ancestors = _ancestor_walker(dx)
+    cls_idx_of = {dx.type_desc(c): c for c in hier}
+    for cls, cls_access, name, proto_idx, access, code_off, kind, midx \
+            in dx.methods():
         stats['methods'] += 1
         if not code_off:
             stats['no_code'] += 1
@@ -288,6 +405,12 @@ def extract_debt(data: bytes):
             continue
         stats['nop_wall'] += 1
         shorty, ret, params = dx.proto(proto_idx)
+        ref_classes = by_sig.get((name, proto_idx))
+        hot = (midx in refs
+               or (ref_classes is not None
+                   and not ref_classes.isdisjoint(
+                       ancestors(cls_idx_of[cls]))))
+        stats['hot'] += 1 if hot else 0
         debt.append({
             'class': cls,
             'name': name,
@@ -302,6 +425,8 @@ def extract_debt(data: bytes):
             'params': params,
             'return': ret,
             'body_bytes': len(blob),
+            'method_idx': midx,
+            'hot': hot,
         })
     return stats, debt
 
@@ -318,10 +443,10 @@ def main():
     with open(out, 'w') as f:
         json.dump({'tool': 'covdebt', 'dex': args.dex, 'stats': stats,
                    'debt': debt}, f, indent=1)
-    print('[covdebt] %s: %d methods (%d coded), nop-wall debt=%d, real=%d, '
-          'ctor-stub=%d -> %s'
+    print('[covdebt] %s: %d methods (%d coded), nop-wall debt=%d (hot=%d), '
+          'real=%d, ctor-stub=%d -> %s'
           % (args.dex, stats['methods'], stats['coded'], stats['nop_wall'],
-             stats['real'], stats['ctor_stub'], out))
+             stats['hot'], stats['real'], stats['ctor_stub'], out))
 
 
 if __name__ == '__main__':
