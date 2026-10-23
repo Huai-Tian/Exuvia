@@ -3,8 +3,10 @@ import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import org.jf.dexlib2.DexFileFactory;
 import org.jf.dexlib2.Opcode;
 import org.jf.dexlib2.Opcodes;
@@ -13,8 +15,19 @@ import org.jf.dexlib2.iface.DexFile;
 import org.jf.dexlib2.iface.Method;
 import org.jf.dexlib2.iface.MethodImplementation;
 import org.jf.dexlib2.iface.instruction.Instruction;
+import org.jf.dexlib2.iface.instruction.FiveRegisterInstruction;
 import org.jf.dexlib2.iface.instruction.NarrowLiteralInstruction;
+import org.jf.dexlib2.iface.instruction.OneRegisterInstruction;
+import org.jf.dexlib2.iface.instruction.ReferenceInstruction;
+import org.jf.dexlib2.iface.instruction.RegisterRangeInstruction;
+import org.jf.dexlib2.iface.instruction.ThreeRegisterInstruction;
+import org.jf.dexlib2.iface.instruction.TwoRegisterInstruction;
+import org.jf.dexlib2.iface.instruction.VariableRegisterInstruction;
 import org.jf.dexlib2.iface.instruction.WideLiteralInstruction;
+import org.jf.dexlib2.iface.reference.FieldReference;
+import org.jf.dexlib2.iface.reference.MethodReference;
+import org.jf.dexlib2.iface.reference.Reference;
+import org.jf.dexlib2.iface.reference.TypeReference;
 import org.jf.dexlib2.immutable.ImmutableClassDef;
 import org.jf.dexlib2.immutable.ImmutableDexFile;
 import org.jf.dexlib2.immutable.ImmutableMethod;
@@ -48,19 +61,34 @@ import org.jf.dexlib2.writer.pool.DexPool;
  * overrides keep a PURE FORWARDING SHELL — exactly one invoke and one
  * return, optionally with move-result value plumbing between them (an 8B
  * `onCreate() { super.onCreate(); }` standing in for a real 104B body).
- * Not a nop-wall, so a wall-only predicate never fills it. The shell
- * predicate is applied SYMMETRICALLY: a genuinely trivial method (the
- * developer really did write `super.onX(); return;`) is shell-shaped on
- * the donor side too and is rejected there — a graft fires only when the
- * same signature carries a larger real body in the source, which for a
- * same-build dump can only mean the target was extracted.
+ * Not a nop-wall, so a wall-only predicate never fills it; the target-side
+ * fillable predicate therefore treats a forwarding shell as hollow too.
+ *
+ * Donor-side the rule is INFORMATION, not shape (finding #11): a real
+ * one-line delegate (`return WindowInsets.Type.statusBars();`,
+ * `c.setSystemBarsAppearance(i, i);`) is shell-SHAPED while being the
+ * genuine body — rejecting shell-shaped donors wholesale starves exactly
+ * the walls those delegates fill (a wall target is already proof of
+ * extraction; any non-wall donor body is a strict information gain). So a
+ * source body is rejected only when it cannot carry information or cannot
+ * run in the product:
+ *   - it is itself a nop wall (a wall over a wall restores nothing);
+ *   - it is INSTRUCTION-IDENTICAL to the body it would replace (the same
+ *     shell on both sides — grafting would only fake the restored count);
+ *   - with a universe file, any reference inside the donor body dangles
+ *     against the shippable class set + boot classpath (a packer bridge
+ *     call would otherwise be imported into a product where the bridge
+ *     class was cleaned away — NoSuchMethodError at runtime).
  *
  * The grafted body keeps the source method's implementation and access
  * flags (ACC_NATIVE cleared — a restored body is Dalvik again); everything
  * else comes from the primary class definition. DexPool re-interns all
  * cross-dex references, so the output is a fresh standard-layout DEX.
  *
- * Usage: java -cp ... Restore <in.dex> <source.dex> <out.dex> [api]
+ * Usage: java -cp ... Restore <in.dex> <source.dex> <out.dex> [universe.txt] [api]
+ *   universe.txt — one shippable class per line (dotted or L-form); when
+ *   given, donor bodies carrying dangling references are rejected. When
+ *   absent the gate is OFF (standalone use) and a warning is printed.
  */
 public class Restore {
     static final int ACC_NATIVE = 0x100;
@@ -188,31 +216,44 @@ public class Restore {
             return;
         }
         if (args.length < 3) {
-            System.err.println("usage: Restore <in.dex> <source.dex> <out.dex> [api]");
+            System.err.println("usage: Restore <in.dex> <source.dex> <out.dex> [universe.txt] [api]");
             System.err.println("       Restore --selftest   (synthetic predicate + graft anchors)");
             System.exit(2);
         }
-        Opcodes opcodes = args.length > 3
-                ? Opcodes.forApi(Integer.parseInt(args[3]))
-                : Opcodes.getDefault();
+        Opcodes opcodes = Opcodes.getDefault();
+        Set<String> universe = null;
+        for (int i = 3; i < args.length; i++) {
+            if (args[i].matches("\\d+")) {
+                opcodes = Opcodes.forApi(Integer.parseInt(args[i]));
+            } else {
+                universe = loadUniverse(new File(args[i]));
+            }
+        }
+        if (universe == null) {
+            System.err.println("restore: no universe file — donor reference "
+                    + "gating OFF (dangling-bridge imports unchecked)");
+        }
 
         DexFile in = DexFileFactory.loadDexFile(new File(args[0]), opcodes);
         DexFile src = DexFileFactory.loadDexFile(new File(args[1]), opcodes);
 
-        // index the source: class -> sig -> method carrying a REAL body
-        // (a hollow source body is no donor — grafting shell over shell
-        // restores nothing and would fake a "restored" count)
+        // index the source: class -> sig -> method carrying a donatable body.
+        // Donor-side rejection is by INFORMATION, not shape (finding #11): a
+        // nop wall donates nothing, but a shell-SHAPED one-line delegate is a
+        // genuine body — a wall target is already proof of extraction, so any
+        // non-wall donor body is a strict gain. Shell-bridge impostors are
+        // caught at graft time by the reference-universe gate instead.
         Map<String, Map<String, Method>> srcIdx = new HashMap<>();
         for (ClassDef c : src.getClasses()) {
             for (Method m : c.getMethods()) {
-                if (m.getImplementation() != null && !isHollowShell(m)) {
+                if (m.getImplementation() != null && !isNopWall(m)) {
                     srcIdx.computeIfAbsent(c.getType(), k -> new HashMap<>())
                           .put(sig(m), m);
                 }
             }
         }
 
-        int restored = 0;
+        int restored = 0, skipIdentical = 0, skipUnresolved = 0;
         List<ClassDef> outClasses = new ArrayList<>();
         for (ClassDef c : in.getClasses()) {
             Map<String, Method> smap = srcIdx.get(c.getType());
@@ -233,6 +274,19 @@ public class Restore {
                 boolean fillable = (m.getAccessFlags() & ACC_ABSTRACT) == 0
                         && (m.getImplementation() == null || nopWall || fwdShell);
                 Method sm = fillable ? smap.get(sig(m)) : null;
+                if (sm != null && bodiesIdentical(sm, m)) {
+                    // the same body on both sides carries no information —
+                    // grafting would only fake the restored count
+                    skipIdentical++;
+                    sm = null;
+                }
+                if (sm != null && universe != null && !refsResolvable(sm, universe)) {
+                    skipUnresolved++;
+                    System.out.println("restore-skip-unresolved " + c.getType()
+                            + "->" + m.getName() + m.getParameterTypes()
+                            + " (donor body references classes outside the shippable set)");
+                    sm = null;
+                }
                 if (sm != null) {
                     patched.add(new ImmutableMethod(
                             c.getType(), sm.getName(), sm.getParameters(),
@@ -270,7 +324,191 @@ public class Restore {
             pool.internClass(c);
         }
         pool.writeTo(new org.jf.dexlib2.writer.io.FileDataStore(new File(args[2])));
-        System.out.println("restore: " + restored + " method body/bodies merged -> " + args[2]);
+        System.out.println("restore: " + restored + " method body/bodies merged"
+                + (skipIdentical > 0 ? ", " + skipIdentical + " identical-skip" : "")
+                + (skipUnresolved > 0 ? ", " + skipUnresolved + " unresolved-ref-skip" : "")
+                + " -> " + args[2]);
+    }
+
+    /* ---------------- donor admissibility gates (finding #11) ---------------- */
+
+    /** Boot-classpath prefixes — mirrored from repair_all.is_boot_class so
+     *  reference gating uses the exact same rule as the cleaner. A donor ref
+     *  to a boot type resolves at runtime from the boot image; anything else
+     *  must be in the shippable class set. */
+    static final String[] BOOT_PREFIXES = {
+        "android.", "com.android.", "java.", "javax.", "sun.", "com.sun.",
+        "dalvik.", "libcore.", "org.w3c.", "org.xml.", "org.xmlpull.", "org.ietf.",
+    };
+    static final String[] BOOT_EXEMPT = {
+        "android.support.", "android.arch.", "android.databinding.",
+        "javax.annotation.", "javax.inject.",
+    };
+
+    static boolean isBootType(String type) {
+        if (!type.startsWith("L")) {
+            return true; // primitives/arrays-of-primitives never dangle
+        }
+        String dotted = type.substring(1, type.length() - 1).replace('/', '.');
+        for (String p : BOOT_PREFIXES) {
+            if (dotted.startsWith(p)) {
+                for (String e : BOOT_EXEMPT) {
+                    if (dotted.startsWith(e)) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Normalize a class line (dotted or L-form, array or not) to L-form. */
+    static String toLForm(String s) {
+        s = s.trim();
+        if (s.isEmpty()) {
+            return s;
+        }
+        while (s.startsWith("[")) {
+            s = s.substring(1);
+        }
+        if (s.startsWith("L")) {
+            return s.endsWith(";") ? s : s + ";";
+        }
+        if (s.length() == 1 && "VZBSCIJFD".contains(s)) {
+            return s; // primitive descriptor (a one-letter CLASS name is not one)
+        }
+        return "L" + s.replace('.', '/').replaceAll(";$", "") + ";";
+    }
+
+    static Set<String> loadUniverse(File f) throws Exception {
+        Set<String> out = new HashSet<>();
+        for (String line : Files.readAllLines(f.toPath())) {
+            String t = toLForm(line);
+            if (t.length() > 2) {
+                out.add(t);
+            }
+        }
+        return out;
+    }
+
+    /** Every class a donor body points at must either ship in the product
+     *  (universe) or resolve from the boot image. A packer bridge class is
+     *  cleaned out of the product, so a body still calling into it dangles —
+     *  better to keep the honest wall than import a NoSuchMethodError. */
+    static boolean refsResolvable(Method donor, Set<String> universe) {
+        MethodImplementation impl = donor.getImplementation();
+        for (Instruction insn : impl.getInstructions()) {
+            if (!(insn instanceof ReferenceInstruction)) {
+                continue;
+            }
+            Reference ref = ((ReferenceInstruction) insn).getReference();
+            String owner;
+            if (ref instanceof MethodReference) {
+                owner = ((MethodReference) ref).getDefiningClass();
+            } else if (ref instanceof FieldReference) {
+                owner = ((FieldReference) ref).getDefiningClass();
+            } else if (ref instanceof TypeReference) {
+                owner = ((TypeReference) ref).getType();
+            } else {
+                continue; // strings/numbers/call-sites carry no class
+            }
+            owner = toLForm(owner);
+            if (owner.length() <= 2) {
+                continue; // primitive descriptor
+            }
+            if (!universe.contains(owner) && !isBootType(owner)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Instruction-by-instruction value equality (opcode, reference, literal,
+     *  registers). Two bodies with the same instruction VALUES carry the same
+     *  information; grafting one over the other fakes the restored count. */
+    static boolean insnEqual(Instruction a, Instruction b) {
+        if (a.getOpcode() != b.getOpcode()) {
+            return false;
+        }
+        if (a instanceof ReferenceInstruction
+                && !((ReferenceInstruction) a).getReference().toString()
+                    .equals(((ReferenceInstruction) b).getReference().toString())) {
+            return false;
+        }
+        if (a instanceof NarrowLiteralInstruction
+                && ((NarrowLiteralInstruction) a).getNarrowLiteral()
+                   != ((NarrowLiteralInstruction) b).getNarrowLiteral()) {
+            return false;
+        }
+        if (a instanceof WideLiteralInstruction
+                && ((WideLiteralInstruction) a).getWideLiteral()
+                   != ((WideLiteralInstruction) b).getWideLiteral()) {
+            return false;
+        }
+        if (a instanceof OneRegisterInstruction
+                && ((OneRegisterInstruction) a).getRegisterA()
+                   != ((OneRegisterInstruction) b).getRegisterA()) {
+            return false;
+        }
+        if (a instanceof TwoRegisterInstruction
+                && ((TwoRegisterInstruction) a).getRegisterB()
+                   != ((TwoRegisterInstruction) b).getRegisterB()) {
+            return false;
+        }
+        if (a instanceof ThreeRegisterInstruction
+                && ((ThreeRegisterInstruction) a).getRegisterC()
+                   != ((ThreeRegisterInstruction) b).getRegisterC()) {
+            return false;
+        }
+        if (a instanceof FiveRegisterInstruction) {
+            FiveRegisterInstruction va = (FiveRegisterInstruction) a;
+            FiveRegisterInstruction vb = (FiveRegisterInstruction) b;
+            if (va.getRegisterC() != vb.getRegisterC()
+                    || va.getRegisterD() != vb.getRegisterD()
+                    || va.getRegisterE() != vb.getRegisterE()
+                    || va.getRegisterF() != vb.getRegisterF()
+                    || va.getRegisterG() != vb.getRegisterG()) {
+                return false;
+            }
+        } else if (a instanceof VariableRegisterInstruction
+                && ((VariableRegisterInstruction) a).getRegisterCount()
+                   != ((VariableRegisterInstruction) b).getRegisterCount()) {
+            return false;
+        }
+        if (a instanceof RegisterRangeInstruction
+                && (((RegisterRangeInstruction) a).getStartRegister()
+                    != ((RegisterRangeInstruction) b).getStartRegister()
+                || ((RegisterRangeInstruction) a).getRegisterCount()
+                    != ((RegisterRangeInstruction) b).getRegisterCount())) {
+            return false;
+        }
+        return true;
+    }
+
+    static boolean bodiesIdentical(Method donor, Method target) {
+        MethodImplementation di = donor.getImplementation();
+        MethodImplementation ti = target.getImplementation();
+        if (di == null || ti == null) {
+            return di == ti;
+        }
+        List<Instruction> da = new ArrayList<>();
+        for (Instruction i : di.getInstructions()) {
+            da.add(i);
+        }
+        List<Instruction> ta = new ArrayList<>();
+        for (Instruction i : ti.getInstructions()) {
+            ta.add(i);
+        }
+        if (da.size() != ta.size()) {
+            return false;
+        }
+        for (int i = 0; i < da.size(); i++) {
+            if (!insnEqual(da.get(i), ta.get(i))) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /* ---------------- synthetic anchors (Restore --selftest) ----------------
@@ -342,6 +580,10 @@ public class Restore {
         return n;
     }
 
+    static Opcode firstOpcode(Method m) {
+        return m.getImplementation().getInstructions().iterator().next().getOpcode();
+    }
+
     static void selftest() throws Exception {
         Opcodes opcodes = Opcodes.getDefault();
         ImmutableMethodReference nop = call("Lxt/Help;", "nop");
@@ -388,6 +630,15 @@ public class Restore {
                 new ImmutableInstruction10x(Opcode.RETURN_VOID)));
         check(!isForwardingShell(shellPlusNop) && !isNopWall(shellPlusNop),
                 "extra nop breaks the shell shape (and the wall shape)");
+
+        // toLForm anchors (finding #11 follow-up: obfuscated one-letter class
+        // names must not be mistaken for primitive descriptors)
+        check(toLForm("a").equals("La;"), "one-letter dotted class is a class");
+        check(toLForm("I").equals("I"), "primitive descriptor stays");
+        check(toLForm("[I").equals("I"), "array-of-primitive unwraps");
+        check(toLForm("Lxt/A;").equals("Lxt/A;"), "L-form passes through");
+        check(toLForm("xt.Help").equals("Lxt/Help;"), "dotted converts");
+        check(toLForm("[Lxt/Help;").equals("Lxt/Help;"), "array-of-class unwraps");
         System.out.println("Restore --selftest OK: hollow-shell predicates "
                 + "(wall / shell / value-plumbing / real / two-invoke / nop-break)");
 
@@ -405,6 +656,16 @@ public class Restore {
         tgtMethods.add(mk("Lxt/A;", "real", 1, insns(
                 new ImmutableInstruction11n(Opcode.CONST_4, 0, 5),
                 new ImmutableInstruction10x(Opcode.RETURN_VOID))));
+        // finding #11 anchors: three nop-wall targets
+        tgtMethods.add(mk("Lxt/A;", "wallfw", 1, insns(
+                new ImmutableInstruction10x(Opcode.NOP),
+                new ImmutableInstruction10x(Opcode.RETURN_VOID))));
+        tgtMethods.add(mk("Lxt/A;", "walldangle", 1, insns(
+                new ImmutableInstruction10x(Opcode.NOP),
+                new ImmutableInstruction10x(Opcode.RETURN_VOID))));
+        tgtMethods.add(mk("Lxt/A;", "wallboot", 1, insns(
+                new ImmutableInstruction10x(Opcode.NOP),
+                new ImmutableInstruction10x(Opcode.RETURN_VOID))));
 
         List<Method> srcMethods = new ArrayList<>();
         // donors for wall/shell: a real body (3 instructions)
@@ -416,7 +677,8 @@ public class Restore {
                 new ImmutableInstruction11n(Opcode.CONST_4, 0, 1),
                 new ImmutableInstruction35c(Opcode.INVOKE_STATIC, 1, 0, 0, 0, 0, 0, work),
                 new ImmutableInstruction10x(Opcode.RETURN_VOID))));
-        // donor for trivial: the SAME hollow shell — must be rejected
+        // donor for trivial: instruction-identical to the target — zero
+        // information, must be skipped (the graft would fake the count)
         srcMethods.add(mk("Lxt/A;", "trivial", 1, insns(
                 new ImmutableInstruction35c(Opcode.INVOKE_STATIC, 1, 0, 0, 0, 0, 0, nop),
                 new ImmutableInstruction10x(Opcode.RETURN_VOID))));
@@ -424,17 +686,37 @@ public class Restore {
         srcMethods.add(mk("Lxt/A;", "real", 1, insns(
                 new ImmutableInstruction11n(Opcode.CONST_4, 0, 7),
                 new ImmutableInstruction10x(Opcode.RETURN_VOID))));
+        // finding #11: a shell-SHAPED donor that is the genuine one-line
+        // delegate body — with resolvable refs it must donate
+        srcMethods.add(mk("Lxt/A;", "wallfw", 1, insns(
+                new ImmutableInstruction35c(Opcode.INVOKE_STATIC, 1, 0, 0, 0, 0, 0, work),
+                new ImmutableInstruction10x(Opcode.RETURN_VOID))));
+        // finding #11: a shell-shaped donor calling into a class that ships
+        // nowhere (a packer bridge) — the universe gate must reject it
+        srcMethods.add(mk("Lxt/A;", "walldangle", 1, insns(
+                new ImmutableInstruction35c(Opcode.INVOKE_STATIC, 1, 0, 0, 0, 0, 0,
+                        call("Lxt/Gone;", "poof")),
+                new ImmutableInstruction10x(Opcode.RETURN_VOID))));
+        // finding #11: a shell-shaped donor calling the boot classpath —
+        // resolvable without universe membership
+        srcMethods.add(mk("Lxt/A;", "wallboot", 1, insns(
+                new ImmutableInstruction35c(Opcode.INVOKE_STATIC, 1, 0, 0, 0, 0, 0,
+                        call("Ljava/lang/System;", "gc")),
+                new ImmutableInstruction10x(Opcode.RETURN_VOID))));
 
         File in = Files.createTempFile("restore-st-in", ".dex").toFile();
         File src = Files.createTempFile("restore-st-src", ".dex").toFile();
         File out = Files.createTempFile("restore-st-out", ".dex").toFile();
+        File uni = Files.createTempFile("restore-st-universe", ".txt").toFile();
         in.deleteOnExit();
         src.deleteOnExit();
         out.deleteOnExit();
+        uni.deleteOnExit();
         writeDex(in, opcodes, Collections.singletonList(mkClass("Lxt/A;", tgtMethods)));
         writeDex(src, opcodes, Collections.singletonList(mkClass("Lxt/A;", srcMethods)));
+        Files.write(uni.toPath(), "Lxt/A;\nxt.Help\n".getBytes("UTF-8"));
 
-        main(new String[]{in.getPath(), src.getPath(), out.getPath()});
+        main(new String[]{in.getPath(), src.getPath(), out.getPath(), uni.getPath()});
 
         DexFile od = DexFileFactory.loadDexFile(out, opcodes);
         check(insnCount(theMethod(od, "Lxt/A;", "wall")) == 3,
@@ -442,11 +724,18 @@ public class Restore {
         check(insnCount(theMethod(od, "Lxt/A;", "shell")) == 3,
                 "forwarding-shell target must be grafted (3 insns from donor)");
         check(insnCount(theMethod(od, "Lxt/A;", "trivial")) == 2,
-                "genuine trivial method: hollow donor rejected, no graft");
+                "instruction-identical donor: zero information, no graft");
         Method realAfter = theMethod(od, "Lxt/A;", "real");
         check(insnCount(realAfter) == 2, "real body must stay untouched");
+        check(firstOpcode(theMethod(od, "Lxt/A;", "wallfw")) == Opcode.INVOKE_STATIC,
+                "finding #11: shell-shaped genuine delegate must donate");
+        check(firstOpcode(theMethod(od, "Lxt/A;", "walldangle")) == Opcode.NOP,
+                "finding #11: donor with dangling (bridge) ref must be rejected");
+        check(firstOpcode(theMethod(od, "Lxt/A;", "wallboot")) == Opcode.INVOKE_STATIC,
+                "finding #11: boot-classpath ref is resolvable without universe");
         System.out.println("Restore --selftest OK: graft e2e "
-                + "(wall+shell grafted, trivial donor rejected, real untouched)");
+                + "(wall+shell grafted, identical skipped, real untouched, "
+                + "shell-delegate donated, bridge ref rejected, boot ref donated)");
         System.out.println("Restore --selftest: ALL GREEN");
     }
 }

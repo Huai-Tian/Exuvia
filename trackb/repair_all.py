@@ -145,7 +145,11 @@ def main():
                     'methods are restored from any source that carries the '
                     'body; may be given multiple times, sources are tried in '
                     'order and are complementary; each value may itself be a '
-                    'dex / directory / container')
+                    'dex / directory / container. A large dump SET (mHook/'
+                    'FART per-class output runs to thousands of dexes — one '
+                    'restore pass each) should be collapsed first: '
+                    'DonorMerge out.dex <dir> merges every donatable body '
+                    'into a single donor (finding #11)')
     ap.add_argument('--reference', help='reference DEX (the unpacked original — '
                     'INTERNAL TESTING ONLY; production runs have no original) — '
                     'same merge mechanism as --dump, highest-trust source')
@@ -265,6 +269,16 @@ def main():
         open(sp, 'wb').write(b)
         src_paths.append((kind, lbl, sp))
 
+    # shippable-class universe for Restore's donor reference gate (finding
+    # #11): a donor body calling into a class that ships nowhere (a packer
+    # bridge cleaned away) must stay an honest wall, not become a dangling
+    # call that NoSuchMethodErrors at runtime
+    universe_path = args.out + '.universe.txt'
+    with open(universe_path, 'w') as uf:
+        for _, _, keep in stage_dexes:
+            for _, n, _ in keep:
+                uf.write(n + '\n')
+
     if have_dexlib:
         for di, (label, cleaned, keep) in enumerate(stage_dexes):
             cur = args.out + '.stage%d.dex' % di
@@ -275,7 +289,7 @@ def main():
                     break
                 nxt = restore_stage_path(args.out, di, si)
                 r = subprocess.run(['java', '-Xmx2g', '-cp', jars,
-                                    'Restore', cur, sp, nxt],
+                                    'Restore', cur, sp, nxt, universe_path],
                                    cwd=repack_dir, capture_output=True, text=True, timeout=600)
                 if r.returncode == 0 and os.path.exists(nxt):
                     os.remove(cur)
@@ -331,6 +345,8 @@ def main():
     for _, _, sp in src_paths:
         if os.path.exists(sp):
             os.remove(sp)
+    if os.path.exists(universe_path):
+        os.remove(universe_path)
 
     # 2. repair (reuse the module's main flow). The definitive wrapper test
     #    cross-references the UNION of every surviving dex's classes.

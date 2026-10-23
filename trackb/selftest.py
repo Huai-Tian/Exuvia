@@ -937,6 +937,30 @@ def test_repair_multi_donor_stage_names():
           'no stage/final collision' % len(names))
 
 
+def test_donormerge():
+    """Finding #11 (family-3 爱加密 empirical): DonorMerge collapses N dump
+    dexes into one donor carrying the union of donatable bodies (first donor
+    wins on conflict; nop walls never survive the merge; shell-shaped genuine
+    one-line delegates MUST survive — Restore's universe gate, not a shape
+    test, rejects bridge impostors at graft time). Anchored Java-side by
+    `DonorMerge --selftest`; SKIP loudly when the dexlib toolchain is not
+    provisioned (jars live user-side by policy)."""
+    repack_dir = os.environ.get('EXUVIA_DEXLIB', '/workspace/tools/dexlib')
+    jars = 'dexlib2-2.5.2.jar:util-2.5.2.jar:guava-31.1-jre.jar:.'
+    if not (os.path.exists(os.path.join(repack_dir, 'DonorMerge.class'))
+            and os.path.exists(os.path.join(repack_dir, 'dexlib2-2.5.2.jar'))):
+        print('donormerge anchor: SKIP '
+              '(dexlib toolchain not provisioned — DonorMerge --selftest runs '
+              'wherever the jars live)')
+        return
+    r = subprocess.run(['java', '-cp', jars, 'DonorMerge', '--selftest'],
+                       cwd=repack_dir, capture_output=True, text=True,
+                       timeout=300)
+    assert r.returncode == 0 and 'ALL GREEN' in r.stdout, r.stdout + r.stderr
+    for line in [l for l in r.stdout.strip().split('\n') if l.strip()]:
+        print('  ' + line)
+
+
 def test_restore_forwarding_shell():
     """Finding #9 (family-3 爱加密 empirical): Restore's hollow-shell
     predicates and graft behavior are anchored Java-side by
@@ -1440,6 +1464,7 @@ if __name__ == '__main__':
     test_repair_pipeline()
     test_repair_multi_donor_stage_names()
     test_restore_forwarding_shell()
+    test_donormerge()
     test_shell_asset_rule()
     test_dexdoctor()
     test_fidelity()
