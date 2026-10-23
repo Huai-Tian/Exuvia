@@ -34,32 +34,46 @@ import zipfile
 import zlib
 
 # wrapper-class patterns seen across the industry packers (360/secneo/qihoo
-# family + generic stubs). A <application android:name> matching these gets
-# removed; the pattern list is heuristic — the definitive test is "the class
-# is absent from the dumped DEX" (checked when the DEX is parseable).
+# family + generic stubs). A <application> launch attribute matching these
+# gets removed; the pattern list is heuristic — the definitive test is "the
+# class is absent from the shipped DEX set" (checked when dex_classes is
+# given), which is prefix-agnostic by construction.
 WRAPPER_PATTERNS = (
     'com.stub.', 'StubApp', '.stub.', 'com.secneo.', 'com.qihoo.',
     'com.tencent.bugly.', 'protect.', 'com.morgoo.', 'dxloader.',
     'com.wrapper.', 'com.app.plugin.', 'android.support.multidex',
 )
 
+# <application> attributes that NAME a class the runtime must instantiate at
+# launch: android:name -> the Application subclass; android:appComponentFactory
+# (API 28+) -> the factory consulted even earlier. If such a class is a packer
+# wrapper — or simply absent from the shipped dexes — keeping the attribute
+# kills the process with ClassNotFoundException before any app code runs.
+# Removing it restores the platform default, which is exactly what an unpacked
+# app needs.
+APP_CLASS_ATTRS = ('name', 'appComponentFactory')
+
 
 def find_manifest_surgery(axml: bytes, dex_classes=None):
-    """Locate the <application android:name> surgery point. Returns
-    (attr_abs_offset, attr_size, chunk_off, pool_stub_string) or None."""
+    """Locate EVERY wrapper launch attribute on <application>. Returns a list
+    of (attr_abs_offset, attr_size, chunk_off, chunk_csize, attr_name, value),
+    possibly empty. Two removal tests, both zero-sample:
+      * heuristic: the value matches WRAPPER_PATTERNS;
+      * definitive: dex_classes was given and the class is absent from the
+        shipped DEX set — a launch-time class that does not exist in the APK
+        is a dead wrapper no matter which namespace it hides behind (no
+        'com.'-style prefix assumptions)."""
     d = axml
     if d[:2] != struct.pack('<H', 3):
         raise ValueError('manifest is not AXML')
     # string pool
     off = 8
     strings = []
-    pool_off = None
     while off < len(d) - 8:
         ctype, hsize, csize = struct.unpack_from('<HHI', d, off)
         if csize < hsize or off + csize > len(d):
             break
         if ctype == 0x0001:
-            pool_off = off
             (s_count, _sc, flags, data_start, _ss) = struct.unpack_from('<IIIII', d, off + 8)
             offsets = struct.unpack_from('<%dI' % s_count, d, off + hsize)
             for so in offsets:
@@ -75,7 +89,7 @@ def find_manifest_surgery(axml: bytes, dex_classes=None):
             ns, name = struct.unpack_from('<II', d, off + 16)
             (attr_start, attr_size, attr_count, id_idx, _cl, _st) = struct.unpack_from('<HHHHHH', d, off + 24)
             if name < len(strings) and strings[name] == 'application':
-                # scan the attributes for android:name with a wrapper-class value
+                hits = []
                 for k in range(attr_count):
                     a = off + 16 + attr_start + k * attr_size
                     if a + 20 > len(d):
@@ -83,29 +97,38 @@ def find_manifest_surgery(axml: bytes, dex_classes=None):
                     a_ns, a_name, a_raw, _vs, _vr, _vt, _vd = struct.unpack_from('<IIIHBBI', d, a)
                     nm = strings[a_name] if a_name < len(strings) else ''
                     val = strings[a_raw] if a_raw < len(strings) else ''
-                    if nm == 'name' and val:
+                    if nm in APP_CLASS_ATTRS and val:
                         if val in WRAPPER_PATTERNS or any(p in val for p in WRAPPER_PATTERNS):
-                            return (a, attr_size, off, csize, val)
-                        # definitive: the class is NOT in the dumped DEX
-                        if dex_classes is not None and val not in dex_classes and val.startswith('com.'):
-                            return (a, attr_size, off, csize, val)
+                            hits.append((a, attr_size, off, csize, nm, val))
+                            continue
+                        # definitive: the class is NOT in the shipped DEX set
+                        if dex_classes is not None and val not in dex_classes:
+                            hits.append((a, attr_size, off, csize, nm, val))
+                if hits:
+                    return hits
         off += csize
-    return None
+    return []
 
 
-def apply_surgery(axml: bytes, attr_off: int, attr_size: int, chunk_off: int, chunk_csize: int) -> bytes:
-    """Remove the attribute entry at attr_off; fix attrCount, chunk size, file size."""
+def apply_surgery(axml: bytes, items) -> bytes:
+    """Remove every attribute entry listed in items (find_manifest_surgery
+    hits); fix attrCount, element chunk size and file size per deletion.
+    Deletions run in descending-offset order so the remaining offsets stay
+    valid, and size fields are re-read each round so multiple removals from
+    the SAME element chunk compose correctly."""
     d = bytearray(axml)
-    # 1. extract the attribute entry
-    del d[attr_off:attr_off + attr_size]
-    # 2. attrCount -= 1 (u16 at chunk_off+28)
-    cnt = struct.unpack_from('<H', d, chunk_off + 28)[0]
-    struct.pack_into('<H', d, chunk_off + 28, cnt - 1)
-    # 3. the element chunk size -= attr_size
-    struct.pack_into('<I', d, chunk_off + 4, chunk_csize - attr_size)
-    # 4. the file-level chunk size -= attr_size (the XML chunk header @0)
-    total = struct.unpack_from('<I', d, 4)[0]
-    struct.pack_into('<I', d, 4, total - attr_size)
+    for attr_off, attr_size, chunk_off, _cs, _nm, _val in sorted(items, reverse=True):
+        # 1. drop the attribute entry
+        del d[attr_off:attr_off + attr_size]
+        # 2. attrCount -= 1 (u16 at chunk_off+28)
+        cnt = struct.unpack_from('<H', d, chunk_off + 28)[0]
+        struct.pack_into('<H', d, chunk_off + 28, cnt - 1)
+        # 3. the element chunk size -= attr_size
+        cur = struct.unpack_from('<I', d, chunk_off + 4)[0]
+        struct.pack_into('<I', d, chunk_off + 4, cur - attr_size)
+        # 4. the file-level chunk size -= attr_size (the XML chunk header @0)
+        total = struct.unpack_from('<I', d, 4)[0]
+        struct.pack_into('<I', d, 4, total - attr_size)
     return bytes(d)
 
 
@@ -200,11 +223,12 @@ def main():
         klasses = dex_classes_set(dex)
         surgery = find_manifest_surgery(manifest, klasses)
         if surgery:
-            attr_off, attr_size, chunk_off, chunk_csize, val = surgery
-            print('manifest surgery: removing android:name="%s" (attr @0x%x, 20B)' % (val, attr_off))
-            manifest = apply_surgery(manifest, attr_off, attr_size, chunk_off, chunk_csize)
+            for attr_off, _size, _co, _cs, aname, val in surgery:
+                print('manifest surgery: removing android:%s="%s" (attr @0x%x, 20B)'
+                      % (aname, val, attr_off))
+            manifest = apply_surgery(manifest, surgery)
         else:
-            print('manifest: no wrapper android:name found (nothing to remove)')
+            print('manifest: no wrapper launch attribute found (nothing to remove)')
 
     removed = []
     with zipfile.ZipFile(out, 'w') as zo:

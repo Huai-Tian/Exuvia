@@ -326,11 +326,11 @@ def main():
     manifest = zipfile.ZipFile(args.packed).read('AndroidManifest.xml')
     surgery = repair.find_manifest_surgery(manifest, klasses)
     if surgery:
-        attr_off, attr_size, chunk_off, chunk_csize, val = surgery
-        manifest = repair.apply_surgery(manifest, attr_off, attr_size, chunk_off, chunk_csize)
-        print('[surgery] removed android:name="%s"' % val)
+        for attr_off, _size, _co, _cs, aname, val in surgery:
+            print('[surgery] removed android:%s="%s" (attr @0x%x)' % (aname, val, attr_off))
+        manifest = repair.apply_surgery(manifest, surgery)
     else:
-        print('[surgery] no wrapper attribute found')
+        print('[surgery] no wrapper launch attribute found')
     for di, (label, cleaned, _) in enumerate(stage_dexes):
         dex_fixed, fixes = repair.dex_validate_fix(cleaned)
         if fixes:

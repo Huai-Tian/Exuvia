@@ -340,7 +340,7 @@ guidance = [
 ## 9. Version anchors
 
 ```text
-SKILL_VERSION: 1.10.0
+SKILL_VERSION: 1.10.1
 handoff_version: 1    goal_version: 1    proposal_version: 1
 ```
 
@@ -354,4 +354,5 @@ handoff_version: 1    goal_version: 1    proposal_version: 1
 - 1.8.0: repair CLI gains the `--from-handoff` source channel — collects merge-gate products (`handoff/workspace/*/recovered.dex`) straight into the ship channels (sha256-dedup vs explicit channels; explicit positionals present → collected all go to `--extra-dex` in debt_id order; none → the largest collected dex promotes to the triaged positional, rest to `--extra-dex`; empty inputs = structured error). Closes the unpack→repair loop without manual file plumbing; §0/§7 usage synced; no protocol change.
 - 1.9.0: repair gains hollow auto-fill (the completeness precondition's machine execution): ship-channel dexes are scanned for `native` lifecycle-name stubs (the family-2 tell — StubSafe's lifecycle table is the trigger set, verbatim), the shell .so is picked from the packed APK (`assets/*.so`, ELF64 AArch64, largest; `lib/` never selected), and the embedded four-step fill (hollowfill.py orchestrating jnitrace/trace2smali/baksmali/smali, now embedded with so_emulator.py) replaces the hollow dex in-channel before surgery — fill set = ALL native methods of the dex; `--allow-hollow` escape hatch (triage/debug only); missing deps (unicorn/dexlib2) or locate failure = structured error with the full suspect list, never a silent hollow ship; output JSON gains `hollow_filled`; no protocol change.
 - 1.10.0: restore/stubsafe close the nop-wall gap (the extraction+nop-fill family shape — 爱加密-style: gutted bodies remain as LEGAL code_items of nops + zero-literal consts + return, so the old `implementation == null` fill predicate never saw them): Restore's fillable set gains nop-wall methods and its donor index rejects nop-wall source bodies (wall over wall = fake restore); StubSafe synthesizes contract bodies for nop-wall LIFECYCLE bodies on framework-carrier classes (superclass chain must exit the dex at a non-`Object` ancestor — a lifecycle name on a POJO is not the tell) and keeps non-lifecycle walls (verify as no-ops; only a source truly refills); residual try tables don't disqualify (handler code is gutted to nops too, and grafting replaces the implementation wholesale). Sample-validated: 8771/10290 walls on the 爱加密-free sample (85.1%), zero fake restores with an all-wall source, 44 lifecycle walls synthesized. No protocol change.
+- 1.10.1: repair 清单手术盲区修复（族 3 爱加密实证）：wrapper 检测的兜底判定去掉 `com.` 前缀窄化——"类不在随包 dex 集内"本就是定案判据，与前缀无关（爱加密的壳 Application 在非 com 命名空间下逃过检测）；手术范围从单一 `android:name` 扩到全部启动期类属性（`android:name` + `android:appComponentFactory`，API 28+ 工厂劫持是族 3 的实际引导链），支持同一 `<application>` 元素多属性一次摘除（降序偏移删除 + 尺寸字段逐轮重读）；自检新增双属性合成锚点（正例双摘/兄弟属性保留/负例随包类不误伤）；无协议变更。
 - Before adapting to a new environment, compare `exuvia --version` against these.

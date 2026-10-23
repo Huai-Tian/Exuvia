@@ -490,6 +490,54 @@ def _build_synthetic_axml():
     return hdr + pool + se + ee
 
 
+def _build_synthetic_axml_dual():
+    """A minimal AXML: string pool + one <application> carrying BOTH launch
+    attributes (android:name + android:appComponentFactory) whose classes live
+    in a generic non-com namespace, plus an allowBackup sibling.
+    Layout: file hdr | string pool | start elem (3 attrs) | end elem."""
+    import struct as _s
+
+    def _u16(v):
+        return _s.pack('<H', v)
+
+    def _u32(v):
+        return _s.pack('<I', v)
+
+    strings = ['application', 'name', 'x.y.z.Wrapper', 'allowBackup',
+               'appComponentFactory', 'x.y.z.Factory']
+    offsets = []
+    data = b''
+    for sstr in strings:
+        enc = _u16(len(sstr)) + sstr.encode('utf-16-le') + b'\x00\x00'
+        offsets.append(len(data))
+        data += enc
+    strings_start = 28 + 4 * len(strings)
+    pool = (_u16(0x0001) + _u16(28) + _u32(0)  # csize patched below
+            + _u32(len(strings)) + _u32(0) + _u32(0) + _u32(strings_start) + _u32(0)
+            + b''.join(_u32(o) for o in offsets) + data)
+    pool = bytearray(pool)
+    _s.pack_into('<I', pool, 4, len(pool))
+    pool = bytes(pool)
+    # attrs: name="x.y.z.Wrapper" (idx 1/2), allowBackup (idx 3 raw=-1 data=0),
+    # appComponentFactory="x.y.z.Factory" (idx 4/5)
+    a1 = _u32(0xFFFFFFFF) + _u32(1) + _u32(2) + _u16(8) + bytes([0, 0x03]) + _u32(2)
+    a2 = _u32(0xFFFFFFFF) + _u32(3) + _u32(0xFFFFFFFF) + _u16(8) + bytes([0, 0x12]) + _u32(0)
+    a3 = _u32(0xFFFFFFFF) + _u32(4) + _u32(5) + _u16(8) + bytes([0, 0x03]) + _u32(5)
+    attrs = a1 + a2 + a3
+    body = (_u32(1) + _u32(0xFFFFFFFF)   # line, comment
+            + _u32(0xFFFFFFFF) + _u32(0)  # ns=-1, name=0 ('application')
+            + _u16(20) + _u16(20) + _u16(3) + _u16(0) + _u16(0) + _u16(0)  # attrExt
+            + attrs)
+    se = _u16(0x0102) + _u16(16) + _u32(0) + body  # size patched below
+    se = bytearray(se)
+    _s.pack_into('<I', se, 4, len(se))
+    se = bytes(se)
+    ee = _u16(0x0103) + _u16(16) + _u32(24) + _u32(1) + _u32(0xFFFFFFFF) + _u32(0xFFFFFFFF)
+    total = 8 + len(pool) + len(se) + len(ee)
+    hdr = _u16(0x0003) + _u16(8) + _u32(total)
+    return hdr + pool + se + ee
+
+
 def test_repair_pipeline():
     """The repair pipeline (r30): AXML surgery + the v2 sign round-trip +
     the dexclean classification on a synthetic DEX — all synthetic, zero-sample."""
@@ -504,15 +552,35 @@ def test_repair_pipeline():
     axml = _build_synthetic_axml()
     surgery = repair.find_manifest_surgery(axml, None)
     assert surgery, 'surgery point not found in the synthetic AXML'
-    attr_off, attr_size, chunk_off, chunk_csize, val = surgery
-    assert val == 'com.stub.StubApp', val
-    fixed = repair.apply_surgery(axml, attr_off, attr_size, chunk_off, chunk_csize)
+    assert len(surgery) == 1 and surgery[0][5] == 'com.stub.StubApp', surgery
+    fixed = repair.apply_surgery(axml, surgery)
     from axmltool import Axml
     ax2 = Axml(fixed)
     app = [n for n in ax2.tree if n['name'] == 'application'][0]
     assert all(a['name'] != 'name' for a in app['attrs']), 'stub attr still present'
     assert any(a['name'] == 'allowBackup' for a in app['attrs']), 'sibling attr lost'
     print('repair pipeline OK: synthetic manifest surgery (stub attr removed, siblings kept)')
+
+    # --- A2. prefix-agnostic wrapper detection + appComponentFactory + multi-removal.
+    # A wrapper need not live in a com.* namespace, and packers also hijack
+    # android:appComponentFactory (API 28+) — BOTH launch attributes must go
+    # when their classes are absent from the shipped dex set.
+    axml2 = _build_synthetic_axml_dual()
+    surgery2 = repair.find_manifest_surgery(axml2, {'com.example.Real'})
+    assert len(surgery2) == 2, surgery2
+    assert {(h[4], h[5]) for h in surgery2} == {
+        ('name', 'x.y.z.Wrapper'), ('appComponentFactory', 'x.y.z.Factory')}, surgery2
+    fixed2 = repair.apply_surgery(axml2, surgery2)
+    ax3 = Axml(fixed2)
+    app2 = [n for n in ax3.tree if n['name'] == 'application'][0]
+    assert all(a['name'] not in ('name', 'appComponentFactory')
+               for a in app2['attrs']), 'wrapper attrs still present'
+    assert any(a['name'] == 'allowBackup' for a in app2['attrs']), 'sibling attr lost'
+    # negative control: classes that ARE shipped must never be touched
+    surgery3 = repair.find_manifest_surgery(axml2, {'x.y.z.Wrapper', 'x.y.z.Factory'})
+    assert surgery3 == [], surgery3
+    print('repair pipeline OK: dual launch-attr surgery '
+          '(name+appComponentFactory removed, shipped classes kept)')
 
     # --- B. the v2 sign round-trip on a synthetic zip
     buf = io.BytesIO()
