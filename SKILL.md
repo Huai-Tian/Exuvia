@@ -1,6 +1,6 @@
 # SKILL — Exuvia
 
-Exuvia: deterministic Android unpacking + repair pipeline. Two product lines in one binary: (a) `exuvia packed.apk` → dissection handoff (L1 skeleton + debt + evidence), zero LLM tokens; (b) `exuvia repair` → one-command dump-to-runnable-APK repair (§7). §3/§4 are format DRAFT v0 (maintainer audits fields); fixtures here are the source of truth for serde types.
+Exuvia: deterministic Android unpacking + repair pipeline. Two product lines in one binary: (a) `exuvia packed.apk` → dissection handoff (L1 skeleton + debt + evidence), zero LLM tokens; (b) `exuvia repair` → one-command dump-to-runnable-APK repair (§7). Extraction doctrine is dual-engine (§9): the static engine keeps reconnaissance and repair; the dynamic engine — a standalone collector binary, never part of this one — does shell-agnostic runtime extraction, coupled to exuvia only by versioned contracts. §3/§4 are format DRAFT v0 (maintainer audits fields); fixtures here are the source of truth for serde types.
 
 ## 1. Actions
 
@@ -339,10 +339,27 @@ guidance = [
 ]
 ```
 
-## 9. Version anchors
+## 9. Dynamic extraction doctrine（动态脱壳理念）
+
+2026-10-24 maintainer 拍板：exuvia 从纯静态扩展为**双引擎**。静态引擎是重资产——每壳都付 token 税（KDF、容器格式、加载链逐壳逆向）；它降级为**侦察 + 修复**：家族分类、工单生成、env-gate 情报，以及两引擎共享的 DonorMerge / `exuvia repair`。动态引擎是轻资产、壳家族无关：壳再硬，最终必须把合法 dex 交给 ART——族 3 实证：爱加密运行时 rodata 含 `openInMemoryDexFilesNative` / `openDexFileNative` / `dvmRawDexFileOpenArray` / 四重载 `ClassLinker::VerifyClassUsingOatFile`——挂住 ART 标准入口即挂住所有壳；且真机环境天然通过全部 env-gate，静态侧的门答案推导问题在动态线整体消失。
+
+**采集器六铁律**（maintainer 原话决定，违反即设计错误）：
+
+1. root 是硬前提——无 root 即不可用，样本应交有 root 的操作者采集；
+2. 不重签名——目标默认带强签名校验，重打包路线否决；
+3. 采集器是**独立二进制**（独立发行物、独立版本号），exuvia 仅产出它的参数（采集工单 JSON）——两物的唯一耦合是版本化契约（采集工单 / manifest / 工件卫生三件套）；
+4. 自包含运行环境（frida 等）；不得不落盘的目录与文件名一律随机（随机长度 + 随机字符），或放应用层无权访问处；
+5. 无 adb——用户手动安装、手动回传采集结果；
+6. 非 APK——包名注册表项即 IOC；形态 = 裸静态 ELF（Termux + su 执行）。
+
+**隐身分级（tell-surface 思维）**：L0 纯用户态（随机工件 + 环回 + 错过 init 窗口 attach）→ L1 用户态强化（去 TCP、注入即分离、GOT/PLT-only 挂钩）→ L2 内核辅助。定律：进程内扫描者对进程内 agent 有主场优势（每条用户态隐藏手段本身就是新痕迹），耐久隐身必须比观察者高一个权限层级——观察者在用户态，故 L2 = 内核。反不对称约束升级节奏：采集是**一次性**（拿到字节即赢，所需隐身时长秒级），外挂是持续对抗（月级）——故 L0 先行，L2 是保险不是地基。内核侧纪律：zero-sample 延伸到内核——KPM 只做壳无关原语（/proc 过滤、跨进程内存读写、进程隐藏），一切壳特征逻辑留在用户态。
+
+**L2 参考实现已入库**：ditPro KPM 1.4.2（mumulin；读写覆盖内核 4.4–6.12，内置 BTF 解析器自适配结构偏移，故长期免更新）。接口已逆向存档：钩 `lookup_dcookie`(18) / `quotactl`(60) 两个死 syscall，`"nomi"` 握手 + 指纹令牌；命令集 = 按 pid 物理内存读（单点/批量）/写、进程隐藏/解除、按名查 pid、模块基址查询（输入事件隐藏与采集无关）。红利：被动采集（加载期整 dex 解密族）可无 frida 全内核侧完成——目标进程零痕迹。缺口：目标进程自身 maps 视图过滤它不管——靠 agent 随机化缓解，远期以自研零逻辑 KPM 补齐（ditPro 即 ABI 参考）。集成面冻结为 kpm_client 四动词：`probe`（nomi 握手 + 版本）/ `protect`（注册保护：pid + 区域 + 通道）/ `release`（注销）/ `status`（回读实际生效通道，写入 manifest）；工单要求 L2 而握手失败 = 大声拒绝运行——静默降级 = 裸奔，比不采更糟。
+
+## 10. Version anchors
 
 ```text
-SKILL_VERSION: 1.10.11
+SKILL_VERSION: 1.11.0
 handoff_version: 1    goal_version: 1    proposal_version: 1
 ```
 
@@ -367,4 +384,5 @@ handoff_version: 1    goal_version: 1    proposal_version: 1
 - 1.10.9: 发现 #11（族 3 爱加密真机实证，v5 闪退根因）——Restore 供体侧的转发壳外形拒收（`isHollowShell = 墙 || 转发壳`）会误杀真实的一行委托体：androidx 里大量真身恰好长成转发壳模样（单 invoke + return，如 `WindowInsetsControllerCompat$Api30Impl.getInsetsController(window)` = `invoke-virtual Window.getInsetsController; move-result-object; return-object`），被当作壳桥拒绝捐献 → 墙体残留 → v5 成品 `ia1.d` 返回 null → 控制器字段 null → `MainActivity.onCreate` 边缘到边缘路径 NPE 闪退（v5 dexopt 已全绿——#10 的 ctor-stub 生效，闪退是全新的覆盖欠债失效模式而非 VerifyError 回潮）。供体准入改为按信息量判、不按外形判：仅拒 (a) nop 墙（零信息）、(b) 与目标指令级全同（嫁接会虚增 restored 计数）、(c) 引用在可发货类全集 ∪ 引导类路径中悬空（壳桥调用永不得引入——NoSuchMethodError 风险）；外形像壳的真身委托照捐（墙目标本身已是被抽取的铁证）。新增 universe 门：repair_all 在 restore 前导出可发货类全集文件（镜像 is_boot_class 前缀豁免），Restore 逐供体核 `MethodReference`/`FieldReference` 定义类与 `TypeReference` 类型可解析，悬空即拒并大声记 `restore-skip-unresolved`；`toLForm` 单字符歧义修正——仅 `VZBSCIJFD` 算原始类型描述符，混淆后的单字母类名（"a"→"La;"）不是原始类型（首版误判致 210 条假悬空拒收、ctor-stub 反升 673→691）。新增 DonorMerge 工具：mHook/FART 扫荡产出数千个 per-dump dex（逐个跑 Restore 要数小时），两阶段坍缩 N 供体 → 1 合并供体 dex——阶段一并行扫描（ExecutorCompletionService 8 线程，边扫边并，全量驻留必 OOM：3062 供体 3.6GB RSS 撞 4GB 容器），同签名冲突取序号最小者（含乱序接管），墙永不胜出；阶段二只重开胜出供体，`ImmutableMethod.of` 深拷贝脱钩（防 mmap/FD 驻留）；`--universe` 过滤限制在可发货类（否则并集超 64k 类型引用写不出单 dex："Unsigned short value out of range: 66338"）；baseClass 取首个被重开的携类供体（类属性供体可能一无所获而永不重开，漏判会静默丢类）。实证：3062 供体（与 v5 的 7 供体同一会话，winners=14、0 冲突——尚无新增覆盖，收敛仍需 Test B 重扫）→ 1367 类 6913 体；packed+合并供体 graft 5758、23 全同跳过、0 悬空拒收；v6 对比 v5：墙 2509→2319、ctor-stub 673→651、债务 3182→2970，启动链 ia1.d/sa1.<init>/jr.b/cr.run/onCreate 全部真身。自检新增 `DonorMerge --selftest`（墙被丢、壳形委托被留、冲突首者胜）+ Restore 锚点（壳形真身委托可捐、悬空引用被拒、boot 前缀引用可捐）；无协议变更。
 - 1.10.10: 发现 #12（族 3 爱加密真机实证，v6 闪退根因）——**墙体谓词的 nop 要求本身是盲区**：isNopWall 要求 `nops >= 1`，但抽取家族对 getter 尺寸的小方法不垫 nop——两指令挖空不需要填充，墙形就是裸零值存根（`const-wide/16 0; return-wide`，甚至孤 `return-void`）。实证：v6 越过 ia1.d NPE 后崩在 `MainActivity.onCreate:175`——Compose 快照 `readError`（"Reading a state that was created after the snapshot was taken…"），根因是 `Snapshot.getId`（lz0.g）是裸零值墙：恒返回 0 → StateRecord 盖上 0 号章（INVALID_SNAPSHOT）→ 第一次 `setValue` 读校验必炸。供体里明明有真身（3062 供体中 1 个，`iget-wide b; return-wide`），DonorMerge 也带上了——是 Restore 压根不把它当 graft 目标；covdebt/WallSafeCheck 同一谓词同样漏计。四处谓词语义级同步放宽：Restore.isNopWall / StubSafe.isNopWall / DonorMerge.isNopWall / covdebt.is_nop_wall 全部去掉 nop 要求（墙 = 指令集 ∈ {nop, 零值 const, return} 且 ≥1 return）。真身零值体（`return 0`、空回调）与墙同形、无供体不可分，但全链安全：全同供体触发 identical-skip（不虚增计数、字节不变），无供体则验证安全原样保留；真身 `<init>` 恒带 super/this invoke，永不落入此形（packed 实证 307 条零值墙 0 条构造器——ctor-stub 分支不受影响）；StubSafe 生命周期合成分支产物带 invoke，不构成墙。metrics 口径转为"无法证明为真的体皆债务"（真零值体计入墙桶，宁可多计不可漏计）。实证：packed 307 条零值墙此前全部隐形；v7 restore 5766 graft（+8，零值墙中有供体覆盖者）、DonorMerge 重建丢弃 310 条零形供体体（与目标墙字节相同，本就 identical-skip）1367→1304 类/6913→6603 体、快照启动链（sz0/lz0/dm0/l11/yz0/qz0/xx/fg0/y8）全真身、16 条"return this/参数"形墙验证安全（v6 dexopt PERFORMED 即实证）、CtorCheck 1543 构造器 0 非法；债务口径修正：v6 报告的 2970 漏算了 307 条零值墙，v7 诚实债务 = 2618 墙 + 651 ctor-stub = 3269。自检新增：Restore 谓词锚点（裸 const-wide 零值墙、孤 return-void 皆墙）+ graft e2e 锚点（零值墙从供体嫁接）；DonorMerge 锚点（低序号零值墙输给高序号真身）；covdebt 锚点翻转（bare return-void 计入墙）。无协议变更。
 - 1.10.11: 发现 #13（族 3 爱加密真机实证，v7 倒计时结束闪退根因）——**被真代码可达的债务才是崩溃候选，而虚分派墙在 dex 里根本无名**。实证：v7 装机后无任何交互、倒计时归 0 瞬间确定性崩（启动后 30.4s，两次完全同点）：`ArrayIndexOutOfBoundsException: length=1280; index=-4`，链 `fz0.l ← gx.G ← gx.O ← gx.n ← … ← c7.doFrame`。根因不是谓词盲区而是供体覆盖缺口：Compose changelist 的 7 个结构性 `Operation.execute` 重写（dk0/ek0/kk0/sj0/vj0/wj0/yj0 `.a(Lrk0;La9;Ljz0;Lwr0;Lqk0;)V`）是无供体墙；槽位值更新走真身的 zj0，故前 30s 无恙——倒计时归 0 时同意按钮的 `if (countdown > 0) Text("…($countdown)") else Text("…")` 分支翻转是 App 的第一次**结构性**槽表编辑，真身执行循环 `sk0.B` 虚分派进墙，墙静默空转 → 槽表与 composer 状态发散 → 随后 `recomposeToGroupEnd` 祖先 walk（parentOf/hasMark 循环）越过根到组 −1 → `groups[-4]` 炸。教训落成工具：朴素引用扫描恰恰漏掉这类崩溃——虚分派重写者在 dex 内**从不被点名**（invoke 点只名基类 `pk0.a`）。covdebt 新增 `hot` 标记（墙体被 dex 内 invoke 点名 = 直接热；或与被点名方法同签名且其类的祖先闭包命中引用的定义类 = 分派热——墙体不含 invoke 指令，故任何引用者必为真代码，语义可靠；invoke-super 非虚分派的过近似刻意保留——多扫荡几堵墙、绝不漏崩溃候选）+ 每条目 `method_idx` + `stats['hot']`；fart_plan 新增 hot 层排在 component/rest 之前、summary 增 hot/by_tier。潜伏修复：dex 扫描 opcode 长度表补 0xfa–0xff（invoke-polymorphic/custom、const-method-handle/type——真机 dex 反同步曾致引用扫描 IndexError）+ 引用 midx 越界防护。实证：v7 债务 2618 墙中 hot=1737，7 条肇事墙全部命中 hot 层（计划位次 235–1553，冷界 1737）；HomeCompose 门脸（sz，供体整类缺席）与 CompositionContext（gi，9 墙）等同因缺口同被 hot 捕获。自检新增：合成 dex 三锚点——直接热（invoke-static 点名墙）/ 分派热（同体墙仅基类被 invoke-virtual 点名）/ 同形冷墙（字节全同但无引用，可达性而非外形定热）；fart_plan 热层排序锚点。设备侧修复路径不变：对 v7 跑 fart_sweep（热层先行）→ 重 dump → `repair_all --dump` → v8。无协议变更。
+- 1.11.0: 理念增订（无协议变更）——新增 §9 动态脱壳理念：双引擎分工（静态 = 侦察 + 修复，动态 = 提取主力；挂钩 ART 标准入口故壳家族无关，族 3 rodata 四符号实证）；采集器六铁律（root 硬前提 / 不重签名 / 独立二进制仅工单耦合 / 自包含 + 随机工件 / 无 adb / 非 APK 裸 ELF）；隐身 L0–L2 分级与"比观察者高一层"定律、一次性采集 vs 持续对抗的升级节奏约束、内核侧 zero-sample 纪律；ditPro KPM 1.4.2 接口入库（lookup_dcookie/quotactl 双死 syscall 钩、nomi 握手 + 指纹令牌、物理内存读写命令集——被动采集可无 frida，maps 自视图过滤缺口记录在案）；kpm_client 四动词接口面冻结（L2 握手失败 = 大声拒绝，不静默降级）。原 §9 Version anchors 顺延为 §10；工具链行为零变化。
 - Before adapting to a new environment, compare `exuvia --version` against these.

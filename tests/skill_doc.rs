@@ -95,9 +95,9 @@ fn skill_json_fixtures_parse_through_serde_types() {
 #[test]
 fn version_anchors_match_source_constants() {
     let md = skill_md();
-    // 限定在 §9 Version anchors 节内解析，避免匹配到 §3/§4 fixture 中的同名字段
+    // 限定在 §10 Version anchors 节内解析，避免匹配到 §3/§4 fixture 中的同名字段
     let anchors = md
-        .split("## 9. Version anchors")
+        .split("## 10. Version anchors")
         .nth(1)
         .expect("version anchors section exists");
     let skill_v = anchors
@@ -108,7 +108,7 @@ fn version_anchors_match_source_constants() {
         .nth(1)
         .unwrap()
         .trim();
-    assert_eq!(skill_v, exuvia::version::SKILL_VERSION, "SKILL.md §8 anchor must equal src/version.rs");
+    assert_eq!(skill_v, exuvia::version::SKILL_VERSION, "SKILL.md §10 anchor must equal src/version.rs");
     for (name, got) in [
         ("handoff_version", exuvia::version::HANDOFF_VERSION),
         ("goal_version", exuvia::version::GOAL_VERSION),

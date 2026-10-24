@@ -17,7 +17,7 @@ Exuvia 是一个**面向 AI Agent 的 Android 通用脱壳 / 修复流水线**�
 - **产品线 a（脱壳外包循环）**：`exuvia packed.apk` → 剖析包（L1 骨架 + 欠账清单 + 证据切片），智能缺口压缩成工作包外包给 LLM，回流经四层闸门销账。零 token 机械层全在二进制内。
 - **产品线 b（修复管线，SKILL §7）**：`exuvia repair packed.apk [dumped.dex]... -o out.apk [--dump <dex>]... [--extra-dex <dex>]... [--from-handoff]` → 单命令把第三方 dump 修成可安装可运行的 APK——壳的手术标记全清（wrapper Application、壳 dex、壳资产、织入字节码、native stub），v2 重签。**这是当前的主用例**：第三方 dump 服务遍地，但没人把 dump 修回可启动的 APK。三条 dex 通道不可互换：位置参数分诊后重打包为 classes.dex；`--dump` 只作还原来源、永不进成品；`--extra-dex` 原样直挂为 classes2..N（脱壳阶段闸门产物专用，不重序列化）。**源头通道 `--from-handoff`**：直接收集闸门产物（`handoff/workspace/*/recovered.dex`）进发货通道——sha256 去重、无显式位置参数时最大者提升为主 dex、其余保序直挂；脱壳到修复一条命令，无需手工搬文件。
 - **形态**：Rust 单二进制（Linux musl / Windows exe），**不携带任何 Python 发行物**——系统 python3 是前提假设（IDA 模式）；修复管线的 Python 工具链以 `include_bytes!` 内嵌于二进制（编译时嵌入、运行时提取到临时目录，不改"不发行 Python"纪律——发行物是二进制，工具链是二进制的内嵌资源）；重依赖（dexlib2 jar / apktool.jar）用户侧安置，git 只发源码。
-- **本体论**：躯体（单二进制，内含全部自身代码）· 灵魂（SKILL.md 单文件）· 接口（三条协议数据流：handoff / goal / proposal）+ 修复管线（SKILL §7 文档化）
+- **本体论**：躯体（单二进制，内含全部自身代码）· 灵魂（SKILL.md 单文件）· 接口（三条协议数据流：handoff / goal / proposal）+ 修复管线（SKILL §7 文档化）· 动态采集器（独立二进制、独立发行，仅经采集工单契约耦合——SKILL §9 理念节）
 - **名字**：Exuvia（蝉蜕）——壳留在原地，代码恢复生命
 - **口号**：*"Separate the shell from what lives inside."*
 
@@ -27,7 +27,7 @@ Exuvia 是一个**面向 AI Agent 的 Android 通用脱壳 / 修复流水线**�
 - **修复战役**：**v12 产物真机双双成功**（12 轮交付、11 个根因、2 个产物、2 次真机成功）——两个不同脱壳器的 dump（56.al 紧凑重排 1.85MB / fulldump 内存展开 4.5MB）经同一修复管线产出均正常运行（Oppo/Android 15+/targetSdk 36）。五重验收门（verify_all.py）+ 修复工具链产品化。
 - **第二战（dex2c 翻译族）**：**闭环 APK 维护者真机确认（2026-10-21/22）**——无 dump、无参照，从 JNI 语义重建方法体。工具链自动化已收官：dexcontainer.py 尾容器重建、jnitrace.py（`--init` 运行时预热 / `--seed-dex` clinit 静态域播种 / `--arms` 空值守卫双臂枚举）、TLS 字符串离线物化（so_emulator emutls 契约仿真）、trace2smali.py（`--sigs-dex` 空心 stub 签名自动提取）、verify_all V4 多 dex 并集修正。SKILL §8 族 2 入册。
 - **产品化**：`exuvia repair` 子命令上线（Rust 壳 + 内嵌 Python——不重写 12 轮真机验证的工具链）；方法体**四来源体系**：`--dump`（第三方 dump，多来源互补，**生产主路径**）/ `--reference`（原包，**内部测试专用**）/ StubSafe **框架契约兜底** / dex2c 源（jnitrace→trace2smali，无 dump 可恢复，SKILL §7）。
-- **契约层**：六协议物 fixture 双向锚定、SKILL_VERSION 1.10.11、CI 全绿。**锚点纪律（血泪教训）**：SKILL_VERSION 升版必须**同一 commit** 改 `src/version.rs`——1e5b601 只改文档导致锚点漂移、CI 连红（1fdc8df 修复）。
+- **契约层**：六协议物 fixture 双向锚定、SKILL_VERSION 1.11.0、CI 全绿。**锚点纪律（血泪教训）**：SKILL_VERSION 升版必须**同一 commit** 改 `src/version.rs`——1e5b601 只改文档导致锚点漂移、CI 连红（1fdc8df 修复）。
 - 产品线 a 契约面：卡点两类（method-native-stub：ACC_NATIVE stub + JNI 符号定位 + 方法体切片；encrypted-payload：坏 DEX 文件 / 声明区域内未申报尾区 / so 内明文 DEX 扫描命中 / assets ELF 零命中负事实四机械来源）+ 解密例程候选机械定位（JNI_OnLoad / init_array 双路径：PT_DYNAMIC 运行时视角优先）。
 - 外循环闭合且留痕：`exuvia packed.apk → next --goal → [LLM 解卡点] → unpack merge（四层闸门 + 沙箱双锚 + 销账）→ validate`；merge 拒绝时 attempts.log 记 merge-rejected + 被认领卡点 attempts 递增；recovered DEX 形状产物归档 workspace/<debt_id>/recovered.dex；洋葱二次分析 `analyze --dex` 回注解卡产物 → 下一层欠账地图。
 - CLI 契约表全兑现：--version / --profile / --goal / --json / --resume、next、schema --dump、unpack validate / merge、analyze --dex、hunt（含变体 RC4 参数）、repair。
@@ -400,13 +400,13 @@ OS 沙箱按平台分文件实现（单一接口 `run_sandboxed(code, args)`）�
 
 **第一个 commit 是 spec，不是源码**：
 
-1. **SKILL.md**：30 秒版 → 工作流决策树 → 格式章节与示例（**示例 = CI golden fixture**）→ profile fence（TOML 代码块，info string 为 `toml profile`）→ 族知识 guidance → 版本锚点。SKILL 版本 = 文档内容 + fence 快照的联合版本。
+1. **SKILL.md**：30 秒版 → 工作流决策树 → 格式章节与示例（**示例 = CI golden fixture**）→ profile fence（TOML 代码块，info string 为 `toml profile`）→ 族知识 guidance → 动态脱壳理念（§9）→ 版本锚点（§10）。SKILL 版本 = 文档内容 + fence 快照的联合版本。
 2. **三条协议**（handoff / goal / proposal）：格式的初始事实源 = SKILL 格式章节，实现期翻译为 serde 类型，此后**双向锚定**——SKILL 示例必须能被 serde 类型解析通过，CI 强制执行（tests/skill_doc.rs）。
 3. **默认 profile**：就在 SKILL fence 里（判断外置 = fence + `--profile` 覆盖通道）。
 
 **schema 文件不存在（勿新增）**：schema 是视图不是实体——格式的机器事实源是 serde 类型，语义解释在 SKILL 格式章节，`--dump` 按需派生。两份独立描述必然漂移；**文档即测试**（SKILL 示例 = CI fixture）比 schema 文件的单向声明强得多。
 
-**版本锚点三向绑定**：SKILL.md §9 锚点节 ↔ src/version.rs 常量 ↔ `exuvia --version` 输出。**升版纪律：SKILL_VERSION 变更必须同一 commit 修改 version.rs**（1e5b601 漂移致 CI 连红的教训——测试替文档站岗，红得正确）。
+**版本锚点三向绑定**：SKILL.md §10 锚点节 ↔ src/version.rs 常量 ↔ `exuvia --version` 输出。**升版纪律：SKILL_VERSION 变更必须同一 commit 修改 version.rs**（1e5b601 漂移致 CI 连红的教训——测试替文档站岗，红得正确）。
 
 ---
 
