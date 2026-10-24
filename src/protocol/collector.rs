@@ -104,10 +104,63 @@ pub struct WoFamily {
 #[serde(deny_unknown_fields)]
 pub struct WoExtraction {
     pub mode: ExtractionMode,
+    /// 挂钩引擎存在时 = 挂钩规范；被动模式 = 计时/侦察提示。
     /// 只挂 ART 标准入口（§9 教义集），永不挂壳符号
     pub art_anchors: Vec<String>,
     /// active 模式专用：fart_plan 产物文件引用（与工单同包交付）
     pub seed_plan: Option<SeedPlanRef>,
+    /// AGENT 按族给出的动态扫描配置——采集器零内置扫描策略
+    /// （zero-sample 从"无壳特征"延伸到"无扫描策略"，2026-10-24 维护者裁定）
+    pub scan: WoScan,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WoScan {
+    pub regions: WoScanRegions,
+    pub magic: Vec<WoScanMagic>,
+    pub poll: WoScanPoll,
+    pub carve: WoScanCarve,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WoScanRegions {
+    /// maps 权限过滤（如 "rw-p"）
+    pub perms: String,
+    pub anonymous_only: bool,
+    pub min_size: u64,
+    pub max_size: u64,
+    /// 路径名排除表（如 "[stack]"）
+    pub exclude: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WoScanMagic {
+    /// 回报用标识（如 "dex035"）
+    pub name: String,
+    /// 无前缀字节串 hex（如 "6465780a30333500"）
+    pub hex: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WoScanPoll {
+    pub interval_ms: u64,
+    /// 同一命中连续 N 轮 sha256 一致判稳（防解密进行中的半成品快照）
+    pub stable_rounds: u64,
+    /// 总窗口封顶（秒）
+    pub window_s: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WoScanCarve {
+    /// 魔数 + file_size 自洽 + map_off 非零
+    pub verify_header: bool,
+    /// 单体上限（字节）
+    pub max_size: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]

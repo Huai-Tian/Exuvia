@@ -352,20 +352,20 @@ guidance = [
 5. 无 adb——用户手动安装、手动回传采集结果；
 6. 非 APK——包名注册表项即 IOC；形态 = 裸静态 ELF（Termux + su 执行）。
 
-**隐身分级（tell-surface 思维）**：L0 纯用户态（随机工件 + 环回 + 错过 init 窗口 attach）→ L1 用户态强化（去 TCP、注入即分离、GOT/PLT-only 挂钩）→ L2 内核辅助。定律：进程内扫描者对进程内 agent 有主场优势（每条用户态隐藏手段本身就是新痕迹），耐久隐身必须比观察者高一个权限层级——观察者在用户态，故 L2 = 内核。反不对称约束升级节奏：采集是**一次性**（拿到字节即赢，所需隐身时长秒级），外挂是持续对抗（月级）——故 L0 先行，L2 是保险不是地基。内核侧纪律：zero-sample 延伸到内核——KPM 只做壳无关原语（/proc 过滤、跨进程内存读写、进程隐藏），一切壳特征逻辑留在用户态。
+**隐身分级（tell-surface 思维）**：L0 纯用户态（随机工件 + 环回 + 错过 init 窗口 attach）→ L1 用户态强化（去 TCP、注入即分离、GOT/PLT-only 挂钩）→ L2 内核辅助。定律：进程内扫描者对进程内 agent 有主场优势（每条用户态隐藏手段本身就是新痕迹），耐久隐身必须比观察者高一个权限层级——观察者在用户态，故 L2 = 内核。反不对称约束升级节奏：采集是**一次性**（拿到字节即赢，所需隐身时长秒级），外挂是持续对抗（月级）——故 L0 先行，L2 是保险不是地基（2026-10-24 精确化：**作为隐身手段** L2 是保险；**作为读传输**，内核物理读写零 ptrace 零注入、in-target 痕迹为零，是被动模式的地基——SELinux ptrace 豁免需求随之消失，frida 移出采集器 MVP、降格为主动模式触发器）。内核侧纪律：zero-sample 延伸到内核——KPM 只做壳无关原语（/proc 过滤、跨进程内存读写、进程隐藏），一切壳特征逻辑留在用户态。
 
 **L2 参考实现已入库**：ditPro KPM 1.4.2（mumulin；读写覆盖内核 4.4–6.12，内置 BTF 解析器自适配结构偏移，故长期免更新）。接口已逆向存档：钩 `lookup_dcookie`(18) / `quotactl`(60) 两个死 syscall，`"nomi"` 握手 + 指纹令牌；命令集 = 按 pid 物理内存读（单点/批量）/写、进程隐藏/解除、按名查 pid、模块基址查询（输入事件隐藏与采集无关）。红利：被动采集（加载期整 dex 解密族）可无 frida 全内核侧完成——目标进程零痕迹。缺口：目标进程自身 maps 视图过滤它不管——靠 agent 随机化缓解，远期以自研零逻辑 KPM 补齐（ditPro 即 ABI 参考）。集成面冻结为 kpm_client 四动词：`probe`（nomi 握手 + 版本）/ `protect`（注册保护：pid + 区域 + 通道）/ `release`（注销）/ `status`（回读实际生效通道，写入 manifest）；工单要求 L2 而握手失败 = 大声拒绝运行——静默降级 = 裸奔，比不采更糟。
 
 ## 10. Collector contracts — DRAFT v0（采集契约三件套）
 
-三个版本化协议物是 exuvia 与采集器之间的**唯一耦合面**（§9 铁律 3：独立二进制、独立发行、独立版本号）。流向：exuvia 静态侦察产出**采集工单**（10.1）→ 采集器执行后回传 **manifest**（10.2）+ 工件（tar.gz）；**工件卫生目录**（10.3）是双方共享的 tell-surface 基准——工单按它声明策略与版本对齐，manifest 按它登记残余。机器字段只用技术族名（§8 围栏规则延伸到采集线：厂商名永不出现在本节任何字段）。转正条件：首个采集器版本完成 passive + active 双回路真机验证。生成/解析接线随采集器 epic 落地；本节先立格式，fixture 即锚定。
+三个版本化协议物是 exuvia 与采集器之间的**唯一耦合面**（§9 铁律 3：独立二进制、独立发行、独立版本号）。流向：exuvia 静态侦察产出**采集工单**（10.1）→ 采集器执行后回传 **manifest**（10.2）+ 工件（tar.gz）；**工件卫生目录**（10.3）是双方共享的 tell-surface 基准——工单按它声明策略与版本对齐，manifest 按它登记残余。机器字段只用技术族名（§8 围栏规则延伸到采集线：厂商名永不出现在本节任何字段）。驱动对接配置（driver profile）属**用户设备侧**：由采集器自定义版本化格式承载（随附 ditPro 默认 profile），不进工单——工单只声明能力要求（`stealth.kpm.channels`），永不出现驱动标识。转正条件：首个采集器版本完成 passive + active 双回路真机验证。生成/解析接线随采集器 epic 落地；本节先立格式，fixture 即锚定。
 
 **10.1 workorder.json（exuvia → 采集器）**
 
 | Field | Semantics |
 |---|---|
 | `$schema` | literal `"exuvia.collector.workorder"` |
-| `workorder_version` | `1` |
+| `workorder_version` | `2` |
 | `order_id` | opaque string；manifest 原样回显（建议取工单正文 sha256 派生） |
 | `target.package` | 已安装加壳包名 |
 | `target.apk_sha256` | exuvia 分析对象锚——采集器动作前必须核对已安装应用，不符 = 大声拒绝 |
@@ -373,8 +373,13 @@ guidance = [
 | `family.id` | §8 技术族 id（如 `family-3-extract-nop`）；未知 = `"unknown"` |
 | `family.evidence` | 分类依据事实串（如 rodata 符号命中），无判断 |
 | `extraction.mode` | `"passive"`（加载期整 dex 解密族，零进程内触发）/ `"active"`（FART 式方法触发） |
-| `extraction.art_anchors` | 要挂的 ART 标准入口符号（§9 教义集）——只挂 ART，永不挂壳符号 |
+| `extraction.art_anchors` | ART 标准入口符号（§9 教义集）——挂钩引擎存在时 = 挂钩规范；被动模式 = 计时/侦察提示。只挂 ART，永不挂壳符号 |
 | `extraction.seed_plan` | nullable，active 模式专用：`file`+`sha256` 引用 fart_plan 产物文件（与工单同包交付），`hot_first` = 热层先行（§7 fart_plan hot 层） |
+| `extraction.scan` | **AGENT 按族给出的动态扫描配置**——采集器零内置扫描策略（zero-sample 从"无壳特征"延伸到"无扫描策略"，2026-10-24 维护者裁定） |
+| `extraction.scan.regions` | maps 过滤：`perms`（如 `"rw-p"`）/ `anonymous_only` / `min_size` / `max_size` / `exclude` 路径名排除表 |
+| `extraction.scan.magic[]` | `{ name, hex }` 魔数表——族参数入口；hex 为无前缀字节串，name 供 manifest/runtime-log 回报 |
+| `extraction.scan.poll` | `interval_ms` 轮询节奏 / `stable_rounds` 同一命中连续 N 轮 sha256 一致判稳（防解密进行中的半成品快照）/ `window_s` 总窗口封顶 |
+| `extraction.scan.carve` | `verify_header`（魔数 + file_size 自洽 + map_off 非零）/ `max_size` 单体上限 |
 | `env_gates[]` | 环境检查投喂表：`gate` 检查点标识 / `expected` 真机期望值 / `evidence` 侦察依据引用；采集器 preflight 记录用，不做强制 |
 | `stealth.tier` | `"L0"`/`"L1"`/`"L2"` 最低档；可超档执行，禁止静默降档 |
 | `stealth.kpm` | nullable，L2 必填；`required` 为 true 时握手失败 = 大声拒绝运行（§9 冻结面）；`channels` ⊆ `["phys_read","phys_write","hide_proc"]` |
@@ -389,7 +394,7 @@ Example (CI fixture):
 ```json
 {
   "$schema": "exuvia.collector.workorder",
-  "workorder_version": 1,
+  "workorder_version": 2,
   "order_id": "wo-20261024-001",
   "target": {
     "package": "com.example.app",
@@ -407,7 +412,17 @@ Example (CI fixture):
   "extraction": {
     "mode": "passive",
     "art_anchors": ["openInMemoryDexFilesNative", "openDexFileNative", "dvmRawDexFileOpenArray"],
-    "seed_plan": null
+    "seed_plan": null,
+    "scan": {
+      "regions": { "perms": "rw-p", "anonymous_only": true, "min_size": 65536, "max_size": 67108864, "exclude": ["[stack]"] },
+      "magic": [
+        { "name": "dex035", "hex": "6465780a30333500" },
+        { "name": "dex037", "hex": "6465780a30333700" },
+        { "name": "dex039", "hex": "6465780a30333900" }
+      ],
+      "poll": { "interval_ms": 200, "stable_rounds": 2, "window_s": 120 },
+      "carve": { "verify_header": true, "max_size": 33554432 }
+    }
   },
   "env_gates": [
     { "gate": "ro.debuggable", "expected": "0", "evidence": "recon: shell reads build props during init" }
@@ -556,9 +571,9 @@ Example (CI fixture)——即当前目录全量内容：
 ## 11. Version anchors
 
 ```text
-SKILL_VERSION: 1.12.0
+SKILL_VERSION: 1.13.0
 handoff_version: 1    goal_version: 1    proposal_version: 1
-workorder_version: 1    manifest_version: 1    hygiene_version: 1
+workorder_version: 2    manifest_version: 1    hygiene_version: 1
 ```
 
 - File version = methodology + §8 fence snapshot. Format changes start in fixtures, serde types follow, CI binds both directions.
@@ -584,4 +599,5 @@ workorder_version: 1    manifest_version: 1    hygiene_version: 1
 - 1.10.11: 发现 #13（族 3 爱加密真机实证，v7 倒计时结束闪退根因）——**被真代码可达的债务才是崩溃候选，而虚分派墙在 dex 里根本无名**。实证：v7 装机后无任何交互、倒计时归 0 瞬间确定性崩（启动后 30.4s，两次完全同点）：`ArrayIndexOutOfBoundsException: length=1280; index=-4`，链 `fz0.l ← gx.G ← gx.O ← gx.n ← … ← c7.doFrame`。根因不是谓词盲区而是供体覆盖缺口：Compose changelist 的 7 个结构性 `Operation.execute` 重写（dk0/ek0/kk0/sj0/vj0/wj0/yj0 `.a(Lrk0;La9;Ljz0;Lwr0;Lqk0;)V`）是无供体墙；槽位值更新走真身的 zj0，故前 30s 无恙——倒计时归 0 时同意按钮的 `if (countdown > 0) Text("…($countdown)") else Text("…")` 分支翻转是 App 的第一次**结构性**槽表编辑，真身执行循环 `sk0.B` 虚分派进墙，墙静默空转 → 槽表与 composer 状态发散 → 随后 `recomposeToGroupEnd` 祖先 walk（parentOf/hasMark 循环）越过根到组 −1 → `groups[-4]` 炸。教训落成工具：朴素引用扫描恰恰漏掉这类崩溃——虚分派重写者在 dex 内**从不被点名**（invoke 点只名基类 `pk0.a`）。covdebt 新增 `hot` 标记（墙体被 dex 内 invoke 点名 = 直接热；或与被点名方法同签名且其类的祖先闭包命中引用的定义类 = 分派热——墙体不含 invoke 指令，故任何引用者必为真代码，语义可靠；invoke-super 非虚分派的过近似刻意保留——多扫荡几堵墙、绝不漏崩溃候选）+ 每条目 `method_idx` + `stats['hot']`；fart_plan 新增 hot 层排在 component/rest 之前、summary 增 hot/by_tier。潜伏修复：dex 扫描 opcode 长度表补 0xfa–0xff（invoke-polymorphic/custom、const-method-handle/type——真机 dex 反同步曾致引用扫描 IndexError）+ 引用 midx 越界防护。实证：v7 债务 2618 墙中 hot=1737，7 条肇事墙全部命中 hot 层（计划位次 235–1553，冷界 1737）；HomeCompose 门脸（sz，供体整类缺席）与 CompositionContext（gi，9 墙）等同因缺口同被 hot 捕获。自检新增：合成 dex 三锚点——直接热（invoke-static 点名墙）/ 分派热（同体墙仅基类被 invoke-virtual 点名）/ 同形冷墙（字节全同但无引用，可达性而非外形定热）；fart_plan 热层排序锚点。设备侧修复路径不变：对 v7 跑 fart_sweep（热层先行）→ 重 dump → `repair_all --dump` → v8。无协议变更。
 - 1.11.0: 理念增订（无协议变更）——新增 §9 动态脱壳理念：双引擎分工（静态 = 侦察 + 修复，动态 = 提取主力；挂钩 ART 标准入口故壳家族无关，族 3 rodata 四符号实证）；采集器六铁律（root 硬前提 / 不重签名 / 独立二进制仅工单耦合 / 自包含 + 随机工件 / 无 adb / 非 APK 裸 ELF）；隐身 L0–L2 分级与"比观察者高一层"定律、一次性采集 vs 持续对抗的升级节奏约束、内核侧 zero-sample 纪律；ditPro KPM 1.4.2 接口入库（lookup_dcookie/quotactl 双死 syscall 钩、nomi 握手 + 指纹令牌、物理内存读写命令集——被动采集可无 frida，maps 自视图过滤缺口记录在案）；kpm_client 四动词接口面冻结（L2 握手失败 = 大声拒绝，不静默降级）。原 §9 Version anchors 顺延为 §10；工具链行为零变化。
 - 1.12.0: 协议变更——新增 §10 采集契约三件套（DRAFT v0，fixture 即锚定，生成/解析接线随采集器 epic 落地）：**workorder.json**（exuvia→采集器：目标 package+apk_sha256 锚定——不符大声拒绝；family 仅技术族 id + 证据，§8 围栏规则延伸到采集线；extraction 双模式 passive/active + ART 锚点集 + fart_plan 种子文件引用（file+sha256+hot_first）；env-gate 投喂表；stealth.tier 最低档禁止静默降档 + kpm(required/min_version/channels⊆phys_read/phys_write/hide_proc)；卫生策略布尔集对齐目录版本；deliverables ⊆ dex/runtime-log/maps；manual-transfer + tar.gz 唯一回传形态）；**manifest.json**（采集器→exuvia：order_id+workorder_sha256 回显；采集器/设备事实（root 形态在档）；stealth_tier_used + kpm.status 回读实际生效通道——非请求值；anchors_hit 命中证据；工件 sha256 清单；errors；residuals_accepted 挂接卫生目录）；**hygiene.json**（工件卫生目录，六通道 tell-surface 基准：fs-artifacts / transport / in-process-agent / proc-visibility / kernel-hook-residual / timing-window，每通道 surface×observer×L0–L2 缓解×残余×裁定；kernel-hook-residual 落档 maintainer 2026-10-24 裁定——应用层无法检测内核侧残留，非魔法参数原样透传，接受）。CI 三向锚定照 §3/§4 模式：新增 src/protocol/collector.rs（三 serde 类型 + 共用枚举，deny_unknown_fields + JsonSchema）；tests/skill_doc.rs 三新臂（kinds 63→511）+ 锚点循环扩三常量；version.rs 新增 WORKORDER/MANIFEST/HYGIENE_VERSION=1，protocol_line 与 --version JSON 同步扩展。原 §10 Version anchors 顺延为 §11（测试 split 串同步）。采集器本体不在本仓——契约先立，实现另起（铁律 3）。
+- 1.13.0: 协议变更——工单 v2（`workorder_version` 1→2，`extraction` 增 `scan` 对象）：**扫描配置动态化**——regions（maps 过滤）/ magic（魔数表，族参数入口）/ poll（轮询节奏 + sha256 连续判稳 + window 封顶）/ carve（header 自洽校验 + 上限）全部经工单由 AGENT 按族给出，采集器零内置扫描策略——zero-sample 从"无壳特征"延伸到"无扫描策略"（2026-10-24 维护者裁定）。`art_anchors` 语义精确化：挂钩引擎存在时 = 挂钩规范，被动模式 = 计时/侦察提示。§10 边界声明：driver profile 属用户设备侧（采集器自定义版本化格式、随附 ditPro 默认 profile），工单只声明能力要求、永不出现驱动标识。§9 隐身分级注记精确化：作为隐身手段 L2 是保险，作为读传输内核路径是被动模式地基（零 ptrace 零注入，SELinux 豁免需求随 frida 移出采集器 MVP 而消失）。serde 侧 WoExtraction 增 `scan` 字段 + WoScan 四子结构；锚点三向同步。
 - Before adapting to a new environment, compare `exuvia --version` against these.
