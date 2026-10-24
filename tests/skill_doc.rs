@@ -1,7 +1,7 @@
 //! 文档即测试：SKILL.md 的 fixture 与版本锚点是活契约。
 //! 三向锚定：SKILL 示例 ↔ serde 类型 ↔ 版本常量。任一侧漂移，此测试即红。
 
-use exuvia::protocol::{Goal, Proposal};
+use exuvia::protocol::{CollectorManifest, Goal, HygieneCatalog, Proposal, WorkOrder};
 use exuvia::report::{DebtFile, EvidenceManifest, Report, WorkPackage};
 
 fn skill_md() -> String {
@@ -49,7 +49,7 @@ fn fence_extracts_parses_and_has_first_family() {
 #[test]
 fn skill_json_fixtures_parse_through_serde_types() {
     let blocks = json_blocks(&skill_md());
-    assert!(blocks.len() >= 6, "expected goal + proposal + report + debt + workpackage + evidence fixtures");
+    assert!(blocks.len() >= 9, "expected goal + proposal + report + debt + workpackage + evidence + workorder + manifest + hygiene fixtures");
     let mut kinds = 0;
     for b in &blocks {
         let v: serde_json::Value = serde_json::from_str(b).expect("fixture is valid JSON");
@@ -86,18 +86,35 @@ fn skill_json_fixtures_parse_through_serde_types() {
                 assert_eq!(e.debt_id, "debt-0001");
                 kinds |= 32;
             }
+            Some("exuvia.collector.workorder") => {
+                let w: WorkOrder = serde_json::from_str(b).expect("workorder fixture matches WorkOrder type (deny_unknown_fields)");
+                assert_eq!(w.workorder_version, exuvia::version::WORKORDER_VERSION);
+                assert_eq!(w.hygiene.hygiene_version, exuvia::version::HYGIENE_VERSION);
+                assert_eq!(w.schema, "exuvia.collector.workorder");
+                kinds |= 64;
+            }
+            Some("exuvia.collector.manifest") => {
+                let m: CollectorManifest = serde_json::from_str(b).expect("manifest fixture matches CollectorManifest type (deny_unknown_fields)");
+                assert_eq!(m.manifest_version, exuvia::version::MANIFEST_VERSION);
+                kinds |= 128;
+            }
+            Some("exuvia.collector.hygiene") => {
+                let h: HygieneCatalog = serde_json::from_str(b).expect("hygiene fixture matches HygieneCatalog type (deny_unknown_fields)");
+                assert_eq!(h.hygiene_version, exuvia::version::HYGIENE_VERSION);
+                kinds |= 256;
+            }
             other => panic!("fixture with unknown $schema {other:?} — every json block in SKILL.md must be an anchored fixture"),
         }
     }
-    assert_eq!(kinds, 63, "all six protocol fixtures must be present");
+    assert_eq!(kinds, 511, "all nine protocol fixtures must be present");
 }
 
 #[test]
 fn version_anchors_match_source_constants() {
     let md = skill_md();
-    // 限定在 §10 Version anchors 节内解析，避免匹配到 §3/§4 fixture 中的同名字段
+    // 限定在 §11 Version anchors 节内解析，避免匹配到 §3/§4/§10 fixture 中的同名字段
     let anchors = md
-        .split("## 10. Version anchors")
+        .split("## 11. Version anchors")
         .nth(1)
         .expect("version anchors section exists");
     let skill_v = anchors
@@ -108,11 +125,14 @@ fn version_anchors_match_source_constants() {
         .nth(1)
         .unwrap()
         .trim();
-    assert_eq!(skill_v, exuvia::version::SKILL_VERSION, "SKILL.md §10 anchor must equal src/version.rs");
+    assert_eq!(skill_v, exuvia::version::SKILL_VERSION, "SKILL.md §11 anchor must equal src/version.rs");
     for (name, got) in [
         ("handoff_version", exuvia::version::HANDOFF_VERSION),
         ("goal_version", exuvia::version::GOAL_VERSION),
         ("proposal_version", exuvia::version::PROPOSAL_VERSION),
+        ("workorder_version", exuvia::version::WORKORDER_VERSION),
+        ("manifest_version", exuvia::version::MANIFEST_VERSION),
+        ("hygiene_version", exuvia::version::HYGIENE_VERSION),
     ] {
         let line = anchors.lines().find(|l| l.contains(name)).unwrap_or_else(|| panic!("{name} anchor exists"));
         let doc: i64 = line

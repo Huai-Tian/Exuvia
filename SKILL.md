@@ -1,6 +1,6 @@
 # SKILL — Exuvia
 
-Exuvia: deterministic Android unpacking + repair pipeline. Two product lines in one binary: (a) `exuvia packed.apk` → dissection handoff (L1 skeleton + debt + evidence), zero LLM tokens; (b) `exuvia repair` → one-command dump-to-runnable-APK repair (§7). Extraction doctrine is dual-engine (§9): the static engine keeps reconnaissance and repair; the dynamic engine — a standalone collector binary, never part of this one — does shell-agnostic runtime extraction, coupled to exuvia only by versioned contracts. §3/§4 are format DRAFT v0 (maintainer audits fields); fixtures here are the source of truth for serde types.
+Exuvia: deterministic Android unpacking + repair pipeline. Two product lines in one binary: (a) `exuvia packed.apk` → dissection handoff (L1 skeleton + debt + evidence), zero LLM tokens; (b) `exuvia repair` → one-command dump-to-runnable-APK repair (§7). Extraction doctrine is dual-engine (§9): the static engine keeps reconnaissance and repair; the dynamic engine — a standalone collector binary, never part of this one — does shell-agnostic runtime extraction, coupled to exuvia only by versioned contracts (§10). §3/§4/§10 are format DRAFT v0 (maintainer audits fields); fixtures here are the source of truth for serde types.
 
 ## 1. Actions
 
@@ -356,11 +356,209 @@ guidance = [
 
 **L2 参考实现已入库**：ditPro KPM 1.4.2（mumulin；读写覆盖内核 4.4–6.12，内置 BTF 解析器自适配结构偏移，故长期免更新）。接口已逆向存档：钩 `lookup_dcookie`(18) / `quotactl`(60) 两个死 syscall，`"nomi"` 握手 + 指纹令牌；命令集 = 按 pid 物理内存读（单点/批量）/写、进程隐藏/解除、按名查 pid、模块基址查询（输入事件隐藏与采集无关）。红利：被动采集（加载期整 dex 解密族）可无 frida 全内核侧完成——目标进程零痕迹。缺口：目标进程自身 maps 视图过滤它不管——靠 agent 随机化缓解，远期以自研零逻辑 KPM 补齐（ditPro 即 ABI 参考）。集成面冻结为 kpm_client 四动词：`probe`（nomi 握手 + 版本）/ `protect`（注册保护：pid + 区域 + 通道）/ `release`（注销）/ `status`（回读实际生效通道，写入 manifest）；工单要求 L2 而握手失败 = 大声拒绝运行——静默降级 = 裸奔，比不采更糟。
 
-## 10. Version anchors
+## 10. Collector contracts — DRAFT v0（采集契约三件套）
+
+三个版本化协议物是 exuvia 与采集器之间的**唯一耦合面**（§9 铁律 3：独立二进制、独立发行、独立版本号）。流向：exuvia 静态侦察产出**采集工单**（10.1）→ 采集器执行后回传 **manifest**（10.2）+ 工件（tar.gz）；**工件卫生目录**（10.3）是双方共享的 tell-surface 基准——工单按它声明策略与版本对齐，manifest 按它登记残余。机器字段只用技术族名（§8 围栏规则延伸到采集线：厂商名永不出现在本节任何字段）。转正条件：首个采集器版本完成 passive + active 双回路真机验证。生成/解析接线随采集器 epic 落地；本节先立格式，fixture 即锚定。
+
+**10.1 workorder.json（exuvia → 采集器）**
+
+| Field | Semantics |
+|---|---|
+| `$schema` | literal `"exuvia.collector.workorder"` |
+| `workorder_version` | `1` |
+| `order_id` | opaque string；manifest 原样回显（建议取工单正文 sha256 派生） |
+| `target.package` | 已安装加壳包名 |
+| `target.apk_sha256` | exuvia 分析对象锚——采集器动作前必须核对已安装应用，不符 = 大声拒绝 |
+| `target.launch_activity` | nullable；null = 操作者手动启动（铁律 5 无 adb） |
+| `family.id` | §8 技术族 id（如 `family-3-extract-nop`）；未知 = `"unknown"` |
+| `family.evidence` | 分类依据事实串（如 rodata 符号命中），无判断 |
+| `extraction.mode` | `"passive"`（加载期整 dex 解密族，零进程内触发）/ `"active"`（FART 式方法触发） |
+| `extraction.art_anchors` | 要挂的 ART 标准入口符号（§9 教义集）——只挂 ART，永不挂壳符号 |
+| `extraction.seed_plan` | nullable，active 模式专用：`file`+`sha256` 引用 fart_plan 产物文件（与工单同包交付），`hot_first` = 热层先行（§7 fart_plan hot 层） |
+| `env_gates[]` | 环境检查投喂表：`gate` 检查点标识 / `expected` 真机期望值 / `evidence` 侦察依据引用；采集器 preflight 记录用，不做强制 |
+| `stealth.tier` | `"L0"`/`"L1"`/`"L2"` 最低档；可超档执行，禁止静默降档 |
+| `stealth.kpm` | nullable，L2 必填；`required` 为 true 时握手失败 = 大声拒绝运行（§9 冻结面）；`channels` ⊆ `["phys_read","phys_write","hide_proc"]` |
+| `hygiene.hygiene_version` | 生单时对齐的卫生目录版本（10.3） |
+| `hygiene.random_artifacts` / `.no_tcp` / `.one_shot` | 铁律 4 与隐身教义落下的布尔策略约束 |
+| `deliverables` | subset of `["dex","runtime-log","maps"]` |
+| `result_channel.method` | `"manual-transfer"`（铁律 5） |
+| `result_channel.archive` | `"tar.gz"`——二进制转储唯一传输形态 |
+
+Example (CI fixture):
+
+```json
+{
+  "$schema": "exuvia.collector.workorder",
+  "workorder_version": 1,
+  "order_id": "wo-20261024-001",
+  "target": {
+    "package": "com.example.app",
+    "apk_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "launch_activity": null
+  },
+  "family": {
+    "id": "family-3-extract-nop",
+    "evidence": [
+      "rodata: openInMemoryDexFilesNative present in shell runtime",
+      "rodata: dvmRawDexFileOpenArray present in shell runtime",
+      "assets: encrypted container with declared-length header"
+    ]
+  },
+  "extraction": {
+    "mode": "passive",
+    "art_anchors": ["openInMemoryDexFilesNative", "openDexFileNative", "dvmRawDexFileOpenArray"],
+    "seed_plan": null
+  },
+  "env_gates": [
+    { "gate": "ro.debuggable", "expected": "0", "evidence": "recon: shell reads build props during init" }
+  ],
+  "stealth": {
+    "tier": "L2",
+    "kpm": { "required": true, "min_version": "1.4.2", "channels": ["phys_read", "hide_proc"] }
+  },
+  "hygiene": { "hygiene_version": 1, "random_artifacts": true, "no_tcp": true, "one_shot": true },
+  "deliverables": ["dex", "runtime-log"],
+  "result_channel": { "method": "manual-transfer", "archive": "tar.gz" }
+}
+```
+
+**10.2 manifest.json（采集器 → exuvia）**
+
+| Field | Semantics |
+|---|---|
+| `$schema` | literal `"exuvia.collector.manifest"` |
+| `manifest_version` | `1` |
+| `order_id` / `workorder_sha256` | 工单回显 + 所消费工单字节的 sha256 锚 |
+| `collector.name` / `.version` | 采集器身份与独立版本号（铁律 3） |
+| `device.abi` / `.android_release` / `.kernel` / `.root` | 运行事实；`root` 例：`"ksu-lkm"` / `"ksu"` / `"magisk"` |
+| `stealth_tier_used` | 实际执行档（≥ 工单要求） |
+| `kpm` | null 或 status 回读：`handshake` + `channels_used` = 实际生效通道（不是请求值，§9 status 动词落点） |
+| `anchors_hit` | 实际命中的 ART 锚点——提取路径执行过的证据 |
+| `env_gates[].gate` / `.passed` | preflight 观察结果 |
+| `artifacts[]` | `{ name, kind, sha256, size_bytes }`；`kind` ∈ deliverables 集合 |
+| `errors[]` | `{ code, detail }` |
+| `residuals_accepted` | 本次运行适用的卫生目录通道 id（10.3 引用键） |
+
+Example (CI fixture):
+
+```json
+{
+  "$schema": "exuvia.collector.manifest",
+  "manifest_version": 1,
+  "order_id": "wo-20261024-001",
+  "workorder_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "collector": { "name": "exuvia-collector", "version": "0.1.0" },
+  "device": { "abi": "arm64-v8a", "android_release": "15", "kernel": "5.15.167", "root": "ksu-lkm" },
+  "stealth_tier_used": "L2",
+  "kpm": { "name": "ditpro-kpm-read/write", "version": "1.4.2", "handshake": true, "channels_used": ["phys_read", "hide_proc"] },
+  "anchors_hit": ["openInMemoryDexFilesNative"],
+  "env_gates": [{ "gate": "ro.debuggable", "passed": true }],
+  "artifacts": [
+    { "name": "classes_0xd0000000.dex", "kind": "dex", "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size_bytes": 4194304 },
+    { "name": "collector.log", "kind": "runtime-log", "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size_bytes": 4096 }
+  ],
+  "errors": [],
+  "residuals_accepted": ["kernel-hook-residual", "proc-visibility"]
+}
+```
+
+**10.3 hygiene.json（工件卫生目录，双向基准）**
+
+tell-surface 思维（§9）：一行 = 一个可观察面 = surface（能被看到什么）× observer（谁在看）× L0–L2 缓解 × residual（做满仍剩什么）× 裁定。工单按 `hygiene_version` 对齐目录版本，manifest 按通道 id 登记残余；改目录 = 协议变更，走版本升版。定律不变：进程内扫描者对进程内 agent 有主场优势，耐久隐身必须比观察者高一个权限层级。
+
+| Field | Semantics |
+|---|---|
+| `$schema` | literal `"exuvia.collector.hygiene"` |
+| `hygiene_version` | `1` |
+| `channels[].id` | 通道标识（kebab-case，manifest.residuals_accepted 的引用键） |
+| `channels[].surface` / `.observer` | 可观察内容 / 观察者位置 |
+| `channels[].l0` / `.l1` / `.l2` | 各隐身档缓解手段（不适用 = `"n/a"`） |
+| `channels[].residual` | 做满缓解后的残余痕迹 |
+| `channels[].residual_accepted` / `.decision` | 残余是否已裁定；裁定原文 + 日期（无 = null） |
+
+Example (CI fixture)——即当前目录全量内容：
+
+```json
+{
+  "$schema": "exuvia.collector.hygiene",
+  "hygiene_version": 1,
+  "channels": [
+    {
+      "id": "fs-artifacts",
+      "surface": "释放到文件系统的运行组件（采集器本体、frida-server/gadget、临时目录与文件名）",
+      "observer": "in-process scanner + app-layer filesystem view",
+      "l0": "目录与文件名随机（随机长度 + 随机字符），或放应用层无权限路径",
+      "l1": "memfd 内存文件执行，零文件系统落盘",
+      "l2": "内核侧加载执行，应用层无句柄",
+      "residual": "memfd 句柄仍见于 /proc/self/fd（随机名承载）",
+      "residual_accepted": true,
+      "decision": null
+    },
+    {
+      "id": "transport",
+      "surface": "采集链路 IPC 痕迹（frida 默认端口、命名管道、socket 对）",
+      "observer": "in-process scanner (connect/枚举)",
+      "l0": "仅环回 + 随机端口",
+      "l1": "去 TCP：注入即分离，控制面走内存通道",
+      "l2": "内核死 syscall 通道（lookup_dcookie/quotactl），零 socket",
+      "residual": "L2 下无独立残余（钩子残余归入 kernel-hook-residual）",
+      "residual_accepted": true,
+      "decision": null
+    },
+    {
+      "id": "in-process-agent",
+      "surface": "目标进程内 agent/gadget：maps 条目、额外线程、hook 痕迹",
+      "observer": "in-process scanner（主场优势方）",
+      "l0": "错过 init 窗口再 attach；maps 名随机化",
+      "l1": "GOT/PLT-only 挂钩；dump 完成即分离，驻留秒级",
+      "l2": "passive 模式零 agent（全内核侧读写）；active 模式 agent 仅触发，批量读走内核通道",
+      "residual": "active 模式仍有秒级驻留窗口——一次性采集可承受（反不对称）",
+      "residual_accepted": true,
+      "decision": null
+    },
+    {
+      "id": "proc-visibility",
+      "surface": "采集器/frida-server 进程对目标与系统扫描可见（/proc walk、进程名）",
+      "observer": "system-wide scanner + in-process /proc walk",
+      "l0": "argv 随机化、短生命周期",
+      "l1": "工作目录与父进程链清理",
+      "l2": "KPM hide_proc 隐藏采集链全部进程",
+      "residual": "ditPro 不过滤目标自身 /proc/self/maps 视图——agent 随机化承载，远期自研零逻辑 KPM 补齐",
+      "residual_accepted": true,
+      "decision": null
+    },
+    {
+      "id": "kernel-hook-residual",
+      "surface": "被钩的两个死 syscall：lookup_dcookie(18)、quotactl(60)",
+      "observer": "理论信道：应用层对这两个号码做行为探测（构造参数观察返回值）",
+      "l0": "n/a",
+      "l1": "n/a",
+      "l2": "非魔法参数原样透传，行为与未钩内核一致",
+      "residual": "钩子本体在内核侧存在",
+      "residual_accepted": true,
+      "decision": "maintainer 裁定 2026-10-24：即使内核侧有残留，应用层也检测不到，不构成问题——无壳审计 syscall 行为"
+    },
+    {
+      "id": "timing-window",
+      "surface": "采集行为的时序暴露（CPU/IO 突刺、启动耗时变化）",
+      "observer": "in-process 行为分析",
+      "l0": "一次性采集：所需隐身窗口秒级",
+      "l1": "错峰执行，错过 init 窗口",
+      "l2": "内核侧读写，目标进程内零活动",
+      "residual": "秒级窗口无法归零；持续对抗（月级暴露）的隐身标准不适用于一次性采集",
+      "residual_accepted": true,
+      "decision": null
+    }
+  ]
+}
+```
+
+## 11. Version anchors
 
 ```text
-SKILL_VERSION: 1.11.0
+SKILL_VERSION: 1.12.0
 handoff_version: 1    goal_version: 1    proposal_version: 1
+workorder_version: 1    manifest_version: 1    hygiene_version: 1
 ```
 
 - File version = methodology + §8 fence snapshot. Format changes start in fixtures, serde types follow, CI binds both directions.
@@ -385,4 +583,5 @@ handoff_version: 1    goal_version: 1    proposal_version: 1
 - 1.10.10: 发现 #12（族 3 爱加密真机实证，v6 闪退根因）——**墙体谓词的 nop 要求本身是盲区**：isNopWall 要求 `nops >= 1`，但抽取家族对 getter 尺寸的小方法不垫 nop——两指令挖空不需要填充，墙形就是裸零值存根（`const-wide/16 0; return-wide`，甚至孤 `return-void`）。实证：v6 越过 ia1.d NPE 后崩在 `MainActivity.onCreate:175`——Compose 快照 `readError`（"Reading a state that was created after the snapshot was taken…"），根因是 `Snapshot.getId`（lz0.g）是裸零值墙：恒返回 0 → StateRecord 盖上 0 号章（INVALID_SNAPSHOT）→ 第一次 `setValue` 读校验必炸。供体里明明有真身（3062 供体中 1 个，`iget-wide b; return-wide`），DonorMerge 也带上了——是 Restore 压根不把它当 graft 目标；covdebt/WallSafeCheck 同一谓词同样漏计。四处谓词语义级同步放宽：Restore.isNopWall / StubSafe.isNopWall / DonorMerge.isNopWall / covdebt.is_nop_wall 全部去掉 nop 要求（墙 = 指令集 ∈ {nop, 零值 const, return} 且 ≥1 return）。真身零值体（`return 0`、空回调）与墙同形、无供体不可分，但全链安全：全同供体触发 identical-skip（不虚增计数、字节不变），无供体则验证安全原样保留；真身 `<init>` 恒带 super/this invoke，永不落入此形（packed 实证 307 条零值墙 0 条构造器——ctor-stub 分支不受影响）；StubSafe 生命周期合成分支产物带 invoke，不构成墙。metrics 口径转为"无法证明为真的体皆债务"（真零值体计入墙桶，宁可多计不可漏计）。实证：packed 307 条零值墙此前全部隐形；v7 restore 5766 graft（+8，零值墙中有供体覆盖者）、DonorMerge 重建丢弃 310 条零形供体体（与目标墙字节相同，本就 identical-skip）1367→1304 类/6913→6603 体、快照启动链（sz0/lz0/dm0/l11/yz0/qz0/xx/fg0/y8）全真身、16 条"return this/参数"形墙验证安全（v6 dexopt PERFORMED 即实证）、CtorCheck 1543 构造器 0 非法；债务口径修正：v6 报告的 2970 漏算了 307 条零值墙，v7 诚实债务 = 2618 墙 + 651 ctor-stub = 3269。自检新增：Restore 谓词锚点（裸 const-wide 零值墙、孤 return-void 皆墙）+ graft e2e 锚点（零值墙从供体嫁接）；DonorMerge 锚点（低序号零值墙输给高序号真身）；covdebt 锚点翻转（bare return-void 计入墙）。无协议变更。
 - 1.10.11: 发现 #13（族 3 爱加密真机实证，v7 倒计时结束闪退根因）——**被真代码可达的债务才是崩溃候选，而虚分派墙在 dex 里根本无名**。实证：v7 装机后无任何交互、倒计时归 0 瞬间确定性崩（启动后 30.4s，两次完全同点）：`ArrayIndexOutOfBoundsException: length=1280; index=-4`，链 `fz0.l ← gx.G ← gx.O ← gx.n ← … ← c7.doFrame`。根因不是谓词盲区而是供体覆盖缺口：Compose changelist 的 7 个结构性 `Operation.execute` 重写（dk0/ek0/kk0/sj0/vj0/wj0/yj0 `.a(Lrk0;La9;Ljz0;Lwr0;Lqk0;)V`）是无供体墙；槽位值更新走真身的 zj0，故前 30s 无恙——倒计时归 0 时同意按钮的 `if (countdown > 0) Text("…($countdown)") else Text("…")` 分支翻转是 App 的第一次**结构性**槽表编辑，真身执行循环 `sk0.B` 虚分派进墙，墙静默空转 → 槽表与 composer 状态发散 → 随后 `recomposeToGroupEnd` 祖先 walk（parentOf/hasMark 循环）越过根到组 −1 → `groups[-4]` 炸。教训落成工具：朴素引用扫描恰恰漏掉这类崩溃——虚分派重写者在 dex 内**从不被点名**（invoke 点只名基类 `pk0.a`）。covdebt 新增 `hot` 标记（墙体被 dex 内 invoke 点名 = 直接热；或与被点名方法同签名且其类的祖先闭包命中引用的定义类 = 分派热——墙体不含 invoke 指令，故任何引用者必为真代码，语义可靠；invoke-super 非虚分派的过近似刻意保留——多扫荡几堵墙、绝不漏崩溃候选）+ 每条目 `method_idx` + `stats['hot']`；fart_plan 新增 hot 层排在 component/rest 之前、summary 增 hot/by_tier。潜伏修复：dex 扫描 opcode 长度表补 0xfa–0xff（invoke-polymorphic/custom、const-method-handle/type——真机 dex 反同步曾致引用扫描 IndexError）+ 引用 midx 越界防护。实证：v7 债务 2618 墙中 hot=1737，7 条肇事墙全部命中 hot 层（计划位次 235–1553，冷界 1737）；HomeCompose 门脸（sz，供体整类缺席）与 CompositionContext（gi，9 墙）等同因缺口同被 hot 捕获。自检新增：合成 dex 三锚点——直接热（invoke-static 点名墙）/ 分派热（同体墙仅基类被 invoke-virtual 点名）/ 同形冷墙（字节全同但无引用，可达性而非外形定热）；fart_plan 热层排序锚点。设备侧修复路径不变：对 v7 跑 fart_sweep（热层先行）→ 重 dump → `repair_all --dump` → v8。无协议变更。
 - 1.11.0: 理念增订（无协议变更）——新增 §9 动态脱壳理念：双引擎分工（静态 = 侦察 + 修复，动态 = 提取主力；挂钩 ART 标准入口故壳家族无关，族 3 rodata 四符号实证）；采集器六铁律（root 硬前提 / 不重签名 / 独立二进制仅工单耦合 / 自包含 + 随机工件 / 无 adb / 非 APK 裸 ELF）；隐身 L0–L2 分级与"比观察者高一层"定律、一次性采集 vs 持续对抗的升级节奏约束、内核侧 zero-sample 纪律；ditPro KPM 1.4.2 接口入库（lookup_dcookie/quotactl 双死 syscall 钩、nomi 握手 + 指纹令牌、物理内存读写命令集——被动采集可无 frida，maps 自视图过滤缺口记录在案）；kpm_client 四动词接口面冻结（L2 握手失败 = 大声拒绝，不静默降级）。原 §9 Version anchors 顺延为 §10；工具链行为零变化。
+- 1.12.0: 协议变更——新增 §10 采集契约三件套（DRAFT v0，fixture 即锚定，生成/解析接线随采集器 epic 落地）：**workorder.json**（exuvia→采集器：目标 package+apk_sha256 锚定——不符大声拒绝；family 仅技术族 id + 证据，§8 围栏规则延伸到采集线；extraction 双模式 passive/active + ART 锚点集 + fart_plan 种子文件引用（file+sha256+hot_first）；env-gate 投喂表；stealth.tier 最低档禁止静默降档 + kpm(required/min_version/channels⊆phys_read/phys_write/hide_proc)；卫生策略布尔集对齐目录版本；deliverables ⊆ dex/runtime-log/maps；manual-transfer + tar.gz 唯一回传形态）；**manifest.json**（采集器→exuvia：order_id+workorder_sha256 回显；采集器/设备事实（root 形态在档）；stealth_tier_used + kpm.status 回读实际生效通道——非请求值；anchors_hit 命中证据；工件 sha256 清单；errors；residuals_accepted 挂接卫生目录）；**hygiene.json**（工件卫生目录，六通道 tell-surface 基准：fs-artifacts / transport / in-process-agent / proc-visibility / kernel-hook-residual / timing-window，每通道 surface×observer×L0–L2 缓解×残余×裁定；kernel-hook-residual 落档 maintainer 2026-10-24 裁定——应用层无法检测内核侧残留，非魔法参数原样透传，接受）。CI 三向锚定照 §3/§4 模式：新增 src/protocol/collector.rs（三 serde 类型 + 共用枚举，deny_unknown_fields + JsonSchema）；tests/skill_doc.rs 三新臂（kinds 63→511）+ 锚点循环扩三常量；version.rs 新增 WORKORDER/MANIFEST/HYGIENE_VERSION=1，protocol_line 与 --version JSON 同步扩展。原 §10 Version anchors 顺延为 §11（测试 split 串同步）。采集器本体不在本仓——契约先立，实现另起（铁律 3）。
 - Before adapting to a new environment, compare `exuvia --version` against these.

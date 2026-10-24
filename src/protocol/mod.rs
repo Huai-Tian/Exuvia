@@ -2,9 +2,11 @@
 //! 严格对齐 SKILL.md §3/§4（DRAFT v0）：不发明契约外的字段；
 //! deny_unknown_fields 实现"未知字段拒绝"（闸门第①层）。
 
+pub mod collector;
 pub mod goal;
 pub mod proposal;
 
+pub use collector::{CollectorManifest, HygieneCatalog, WorkOrder};
 pub use goal::{Goal, Target, Track};
 pub use proposal::{Claim, ClaimKind, Proposal};
 
