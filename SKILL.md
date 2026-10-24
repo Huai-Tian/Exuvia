@@ -352,13 +352,13 @@ guidance = [
 5. 无 adb——用户手动安装、手动回传采集结果；
 6. 非 APK——包名注册表项即 IOC；形态 = 裸静态 ELF（Termux + su 执行）。
 
-**隐身分级（tell-surface 思维）**：L0 纯用户态（随机工件 + 环回 + 错过 init 窗口 attach）→ L1 用户态强化（去 TCP、注入即分离、GOT/PLT-only 挂钩）→ L2 内核辅助。定律：进程内扫描者对进程内 agent 有主场优势（每条用户态隐藏手段本身就是新痕迹），耐久隐身必须比观察者高一个权限层级——观察者在用户态，故 L2 = 内核。反不对称约束升级节奏：采集是**一次性**（拿到字节即赢，所需隐身时长秒级），外挂是持续对抗（月级）——故 L0 先行，L2 是保险不是地基（2026-10-24 精确化：**作为隐身手段** L2 是保险；**作为读传输**，内核物理读写零 ptrace 零注入、in-target 痕迹为零，是被动模式的地基——SELinux ptrace 豁免需求随之消失，frida 移出采集器 MVP、降格为主动模式触发器）。内核侧纪律：zero-sample 延伸到内核——KPM 只做壳无关原语（/proc 过滤、跨进程内存读写、进程隐藏），一切壳特征逻辑留在用户态。
+**隐身分级（tell-surface 思维）**：L0 纯用户态（随机工件 + 环回 + 错过 init 窗口 attach）→ L1 用户态强化（去 TCP、注入即分离、GOT/PLT-only 挂钩）→ L2 内核辅助。定律：进程内扫描者对进程内 agent 有主场优势（每条用户态隐藏手段本身就是新痕迹），耐久隐身必须比观察者高一个权限层级——观察者在用户态，故 L2 = 内核。反不对称约束升级节奏：采集是**一次性**（拿到字节即赢，所需隐身时长秒级），外挂是持续对抗（月级）——故 L0 先行，L2 是保险不是地基（2026-10-24 精确化：**作为隐身手段** L2 是保险；**作为读传输**，内核物理读写零 ptrace 零注入、in-target 痕迹为零，是被动模式的地基——SELinux ptrace 豁免需求随之消失。同日裁定：**frida 整体移除出采集器架构**——不做 MVP 降级、不留 M4 触发器备胎，任何降级/保底策略均为多余；内核读写作业路径唯一，失败 = 大声拒绝，不静默降档）。内核侧纪律：zero-sample 延伸到内核——内核驱动只做壳无关原语（/proc 过滤、跨进程内存读写、进程隐藏），一切壳特征逻辑留在用户态。
 
-**L2 参考实现已入库**：ditPro KPM 1.4.2（mumulin；读写覆盖内核 4.4–6.12，内置 BTF 解析器自适配结构偏移，故长期免更新）。接口已逆向存档：钩 `lookup_dcookie`(18) / `quotactl`(60) 两个死 syscall，`"nomi"` 握手 + 指纹令牌；命令集 = 按 pid 物理内存读（单点/批量）/写、进程隐藏/解除、按名查 pid、模块基址查询（输入事件隐藏与采集无关）。红利：被动采集（加载期整 dex 解密族）可无 frida 全内核侧完成——目标进程零痕迹。缺口：目标进程自身 maps 视图过滤它不管——靠 agent 随机化缓解，远期以自研零逻辑 KPM 补齐（ditPro 即 ABI 参考）。集成面冻结为 kpm_client 四动词：`probe`（nomi 握手 + 版本）/ `protect`（注册保护：pid + 区域 + 通道）/ `release`（注销）/ `status`（回读实际生效通道，写入 manifest）；工单要求 L2 而握手失败 = 大声拒绝运行——静默降级 = 裸奔，比不采更糟。
+**L2 参考实现已入库**：ditPro KPM 1.4.2（mumulin；读写覆盖内核 4.4–6.12，内置 BTF 解析器自适配结构偏移，故长期免更新）。接口已逆向存档：钩 `lookup_dcookie`(18) / `quotactl`(60) 两个死 syscall，`"nomi"` 握手 + 指纹令牌；命令集 = 按 pid 物理内存读（单点/批量）/写、进程隐藏/解除、按名查 pid、模块基址查询（输入事件隐藏与采集无关）。红利：被动采集（加载期整 dex 解密族）可无 frida 全内核侧完成——目标进程零痕迹。缺口：目标进程自身 maps 视图过滤它不管——靠 agent 随机化缓解，远期以自研零逻辑 KPM 补齐（ditPro 即 ABI 参考）。集成面 = profile 驱动的 driver-client（2026-10-24 泛化裁定）：**任何支持读写的内核驱动皆可对接**——不限 KPM，独立 .ko 等形态皆可，通道不限死 syscall（ioctl / proc 节点等由 profile transport 段描述）；对接参数由用户按自设备驱动自调，ditPro KPM profile **内置为默认方案**。op 集由 profile.ops 实例化：`probe`（握手 + 版本）/ `read` / `read_list` / `write` / `hide` / `status`（回读实际生效通道，写入 manifest）；工单要求内核传输而握手失败 = 大声拒绝运行——静默降级 = 裸奔，比不采更糟。
 
 ## 10. Collector contracts — DRAFT v0（采集契约三件套）
 
-三个版本化协议物是 exuvia 与采集器之间的**唯一耦合面**（§9 铁律 3：独立二进制、独立发行、独立版本号）。流向：exuvia 静态侦察产出**采集工单**（10.1）→ 采集器执行后回传 **manifest**（10.2）+ 工件（tar.gz）；**工件卫生目录**（10.3）是双方共享的 tell-surface 基准——工单按它声明策略与版本对齐，manifest 按它登记残余。机器字段只用技术族名（§8 围栏规则延伸到采集线：厂商名永不出现在本节任何字段）。驱动对接配置（driver profile）属**用户设备侧**：由采集器自定义版本化格式承载（随附 ditPro 默认 profile），不进工单——工单只声明能力要求（`stealth.kpm.channels`），永不出现驱动标识。转正条件：首个采集器版本完成 passive + active 双回路真机验证。生成/解析接线随采集器 epic 落地；本节先立格式，fixture 即锚定。
+三个版本化协议物是 exuvia 与采集器之间的**唯一耦合面**（§9 铁律 3：独立二进制、独立发行、独立版本号）。流向：exuvia 静态侦察产出**采集工单**（10.1）→ 采集器执行后回传 **manifest**（10.2）+ 工件（tar.gz）；**工件卫生目录**（10.3）是双方共享的 tell-surface 基准——工单按它声明策略与版本对齐，manifest 按它登记残余。机器字段只用技术族名（§8 围栏规则延伸到采集线：厂商名永不出现在本节任何字段）。驱动对接配置（driver profile）属**用户设备侧**：由采集器自定义版本化格式承载（通道形态不限——死 syscall / ioctl / proc 节点等；**任何读写内核驱动皆可对接**，ditPro KPM profile 内置为默认方案），不进工单——工单只声明能力要求（`stealth.kpm.channels`），永不出现驱动标识。转正条件：首个采集器版本完成 passive + active 双回路真机验证。生成/解析接线随采集器 epic 落地；本节先立格式，fixture 即锚定。
 
 **10.1 workorder.json（exuvia → 采集器）**
 
@@ -571,7 +571,7 @@ Example (CI fixture)——即当前目录全量内容：
 ## 11. Version anchors
 
 ```text
-SKILL_VERSION: 1.13.0
+SKILL_VERSION: 1.13.1
 handoff_version: 1    goal_version: 1    proposal_version: 1
 workorder_version: 2    manifest_version: 1    hygiene_version: 1
 ```
@@ -600,4 +600,5 @@ workorder_version: 2    manifest_version: 1    hygiene_version: 1
 - 1.11.0: 理念增订（无协议变更）——新增 §9 动态脱壳理念：双引擎分工（静态 = 侦察 + 修复，动态 = 提取主力；挂钩 ART 标准入口故壳家族无关，族 3 rodata 四符号实证）；采集器六铁律（root 硬前提 / 不重签名 / 独立二进制仅工单耦合 / 自包含 + 随机工件 / 无 adb / 非 APK 裸 ELF）；隐身 L0–L2 分级与"比观察者高一层"定律、一次性采集 vs 持续对抗的升级节奏约束、内核侧 zero-sample 纪律；ditPro KPM 1.4.2 接口入库（lookup_dcookie/quotactl 双死 syscall 钩、nomi 握手 + 指纹令牌、物理内存读写命令集——被动采集可无 frida，maps 自视图过滤缺口记录在案）；kpm_client 四动词接口面冻结（L2 握手失败 = 大声拒绝，不静默降级）。原 §9 Version anchors 顺延为 §10；工具链行为零变化。
 - 1.12.0: 协议变更——新增 §10 采集契约三件套（DRAFT v0，fixture 即锚定，生成/解析接线随采集器 epic 落地）：**workorder.json**（exuvia→采集器：目标 package+apk_sha256 锚定——不符大声拒绝；family 仅技术族 id + 证据，§8 围栏规则延伸到采集线；extraction 双模式 passive/active + ART 锚点集 + fart_plan 种子文件引用（file+sha256+hot_first）；env-gate 投喂表；stealth.tier 最低档禁止静默降档 + kpm(required/min_version/channels⊆phys_read/phys_write/hide_proc)；卫生策略布尔集对齐目录版本；deliverables ⊆ dex/runtime-log/maps；manual-transfer + tar.gz 唯一回传形态）；**manifest.json**（采集器→exuvia：order_id+workorder_sha256 回显；采集器/设备事实（root 形态在档）；stealth_tier_used + kpm.status 回读实际生效通道——非请求值；anchors_hit 命中证据；工件 sha256 清单；errors；residuals_accepted 挂接卫生目录）；**hygiene.json**（工件卫生目录，六通道 tell-surface 基准：fs-artifacts / transport / in-process-agent / proc-visibility / kernel-hook-residual / timing-window，每通道 surface×observer×L0–L2 缓解×残余×裁定；kernel-hook-residual 落档 maintainer 2026-10-24 裁定——应用层无法检测内核侧残留，非魔法参数原样透传，接受）。CI 三向锚定照 §3/§4 模式：新增 src/protocol/collector.rs（三 serde 类型 + 共用枚举，deny_unknown_fields + JsonSchema）；tests/skill_doc.rs 三新臂（kinds 63→511）+ 锚点循环扩三常量；version.rs 新增 WORKORDER/MANIFEST/HYGIENE_VERSION=1，protocol_line 与 --version JSON 同步扩展。原 §10 Version anchors 顺延为 §11（测试 split 串同步）。采集器本体不在本仓——契约先立，实现另起（铁律 3）。
 - 1.13.0: 协议变更——工单 v2（`workorder_version` 1→2，`extraction` 增 `scan` 对象）：**扫描配置动态化**——regions（maps 过滤）/ magic（魔数表，族参数入口）/ poll（轮询节奏 + sha256 连续判稳 + window 封顶）/ carve（header 自洽校验 + 上限）全部经工单由 AGENT 按族给出，采集器零内置扫描策略——zero-sample 从"无壳特征"延伸到"无扫描策略"（2026-10-24 维护者裁定）。`art_anchors` 语义精确化：挂钩引擎存在时 = 挂钩规范，被动模式 = 计时/侦察提示。§10 边界声明：driver profile 属用户设备侧（采集器自定义版本化格式、随附 ditPro 默认 profile），工单只声明能力要求、永不出现驱动标识。§9 隐身分级注记精确化：作为隐身手段 L2 是保险，作为读传输内核路径是被动模式地基（零 ptrace 零注入，SELinux 豁免需求随 frida 移出采集器 MVP 而消失）。serde 侧 WoExtraction 增 `scan` 字段 + WoScan 四子结构；锚点三向同步。
+- 1.13.1: 理念勘定（无协议变更）——2026-10-24 维护者两项裁定落档：① **frida 整体移除出采集器架构**（不做 MVP 降级、不留 M4 触发器备胎；任何降级/保底策略均为多余——内核读写作业路径唯一，失败 = 大声拒绝，不静默降档），修正 1.13.0 "降格为 M4 触发器"的过渡表述；② **驱动形态泛化**——不限 KPM，任何支持读写的内核驱动（独立 .ko 等）皆可对接，通道形态不限死 syscall，用户经 driver profile 自调对接参数，ditPro KPM profile 内置为默认方案；§9 kpm_client 四动词冻结面相应改写为 profile 驱动 op 集（probe/read/read_list/write/hide/status）。
 - Before adapting to a new environment, compare `exuvia --version` against these.
