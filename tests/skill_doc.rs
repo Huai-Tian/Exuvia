@@ -86,19 +86,19 @@ fn skill_json_fixtures_parse_through_serde_types() {
                 assert_eq!(e.debt_id, "debt-0001");
                 kinds |= 32;
             }
-            Some("exuvia.collector.workorder") => {
+            Some("exuvia.workorder") => {
                 let w: WorkOrder = serde_json::from_str(b).expect("workorder fixture matches WorkOrder type (deny_unknown_fields)");
                 assert_eq!(w.workorder_version, exuvia::version::WORKORDER_VERSION);
                 assert_eq!(w.hygiene.hygiene_version, exuvia::version::HYGIENE_VERSION);
-                assert_eq!(w.schema, "exuvia.collector.workorder");
+                assert_eq!(w.schema, "exuvia.workorder");
                 kinds |= 64;
             }
-            Some("exuvia.collector.manifest") => {
+            Some("exuvia.manifest") => {
                 let m: CollectorManifest = serde_json::from_str(b).expect("manifest fixture matches CollectorManifest type (deny_unknown_fields)");
                 assert_eq!(m.manifest_version, exuvia::version::MANIFEST_VERSION);
                 kinds |= 128;
             }
-            Some("exuvia.collector.hygiene") => {
+            Some("exuvia.hygiene") => {
                 let h: HygieneCatalog = serde_json::from_str(b).expect("hygiene fixture matches HygieneCatalog type (deny_unknown_fields)");
                 assert_eq!(h.hygiene_version, exuvia::version::HYGIENE_VERSION);
                 kinds |= 256;

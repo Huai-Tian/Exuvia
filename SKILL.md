@@ -348,28 +348,30 @@ guidance = [
 1. root 是硬前提——无 root 即不可用，样本应交有 root 的操作者采集；
 2. 不重签名——目标默认带强签名校验，重打包路线否决；
 3. 采集器是**独立二进制**（独立发行物、独立版本号），exuvia 仅产出它的参数（采集工单 JSON）——两物的唯一耦合是版本化契约（采集工单 / manifest / 工件卫生三件套）；
-4. 自包含运行环境（frida 等）；不得不落盘的目录与文件名一律随机（随机长度 + 随机字符），或放应用层无权访问处；
-5. 无 adb——用户手动安装、手动回传采集结果；
+4. 自包含运行环境；不得不落盘的目录与文件名一律随机（随机长度 + 随机字符），或放应用层无权访问处；
+5. 无 adb——传输与执行走 E2EE 加密 TCP 会话：守护进程反向拨号主机、设备零监听口，配对共享秘密 + 门闩机钥认证，逐会话新密钥、流量形状混淆；守护进程由用户手动启动、支持关闭；无降级、无备选；
 6. 非 APK——包名注册表项即 IOC；形态 = 裸静态 ELF（Termux + su 执行）。
 
 **隐身分级（tell-surface 思维）**：L0 纯用户态（随机工件 + 环回 + 错过 init 窗口 attach）→ L1 用户态强化（去 TCP、注入即分离、GOT/PLT-only 挂钩）→ L2 内核辅助。定律：进程内扫描者对进程内 agent 有主场优势（每条用户态隐藏手段本身就是新痕迹），耐久隐身必须比观察者高一个权限层级——观察者在用户态，故 L2 = 内核。反不对称约束升级节奏：采集是**一次性**（拿到字节即赢，所需隐身时长秒级），外挂是持续对抗（月级）——故 L0 先行，L2 是保险不是地基（2026-10-24 精确化：**作为隐身手段** L2 是保险；**作为读传输**，内核物理读写零 ptrace 零注入、in-target 痕迹为零，是被动模式的地基——SELinux ptrace 豁免需求随之消失。同日裁定：**frida 整体移除出采集器架构**——不做 MVP 降级、不留 M4 触发器备胎，任何降级/保底策略均为多余；内核读写作业路径唯一，失败 = 大声拒绝，不静默降档）。内核侧纪律：zero-sample 延伸到内核——内核驱动只做壳无关原语（/proc 过滤、跨进程内存读写、进程隐藏），一切壳特征逻辑留在用户态。
 
-**L2 参考实现已入库**：ditPro KPM 1.4.2（mumulin；读写覆盖内核 4.4–6.12，内置 BTF 解析器自适配结构偏移，故长期免更新）。接口已逆向存档：钩 `lookup_dcookie`(18) / `quotactl`(60) 两个死 syscall，`"nomi"` 握手 + 指纹令牌；命令集 = 按 pid 物理内存读（单点/批量）/写、进程隐藏/解除、按名查 pid、模块基址查询（输入事件隐藏与采集无关）。红利：被动采集（加载期整 dex 解密族）可无 frida 全内核侧完成——目标进程零痕迹。缺口：目标进程自身 maps 视图过滤它不管——靠 agent 随机化缓解，远期以自研零逻辑 KPM 补齐（ditPro 即 ABI 参考）。集成面 = profile 驱动的 driver-client（2026-10-24 泛化裁定）：**任何支持读写的内核驱动皆可对接**——不限 KPM，独立 .ko 等形态皆可，通道不限死 syscall（ioctl / proc 节点等由 profile transport 段描述）；对接参数由用户按自设备驱动自调，ditPro KPM profile **内置为默认方案**。op 集由 profile.ops 实例化：`probe`（握手 + 版本）/ `read` / `read_list` / `write` / `hide` / `status`（回读实际生效通道，写入 manifest）；工单要求内核传输而握手失败 = 大声拒绝运行——静默降级 = 裸奔，比不采更糟。
+**L2 参考实现已入库**：ditPro KPM 1.4.2（mumulin；读写覆盖内核 4.4–6.12，内置 BTF 解析器自适配结构偏移，故长期免更新）。接口已逆向存档：钩 `lookup_dcookie`(18) / `quotactl`(60) 两个死 syscall，`"nomi"` 握手 + 指纹令牌；命令集 = 按 pid 物理内存读（单点/批量）/写、进程隐藏/解除、按名查 pid、模块基址查询（输入事件隐藏与采集无关）。红利：被动采集（加载期整 dex 解密族）全内核侧完成——目标进程零痕迹。缺口：目标进程自身 maps 视图过滤它不管——靠 agent 随机化缓解，远期以自研零逻辑内核驱动补齐（ditPro 即 ABI 参考）。集成面 = profile 驱动的 driver-client（2026-10-24 泛化裁定）：**任何支持读写的内核驱动皆可对接**——不限 KPM，独立 .ko 等形态皆可，通道不限死 syscall（ioctl / proc 节点等由 profile transport 段描述）；对接参数由用户按自设备驱动自调，ditPro KPM profile **内置为默认方案**。op 集由 profile.ops 实例化：`probe`（握手 + 版本）/ `read` / `read_list` / `write` / `hide` / `status`（回读实际生效通道，写入 manifest）；工单要求内核传输而握手失败 = 大声拒绝运行——静默降级 = 裸奔，比不采更糟。
 
 ## 10. Collector contracts — DRAFT v0（采集契约三件套）
 
-三个版本化协议物是 exuvia 与采集器之间的**唯一耦合面**（§9 铁律 3：独立二进制、独立发行、独立版本号）。流向：exuvia 静态侦察产出**采集工单**（10.1）→ 采集器执行后回传 **manifest**（10.2）+ 工件（tar.gz）；**工件卫生目录**（10.3）是双方共享的 tell-surface 基准——工单按它声明策略与版本对齐，manifest 按它登记残余。机器字段只用技术族名（§8 围栏规则延伸到采集线：厂商名永不出现在本节任何字段）。驱动对接配置（driver profile）属**用户设备侧**：由采集器自定义版本化格式承载（通道形态不限——死 syscall / ioctl / proc 节点等；**任何读写内核驱动皆可对接**，ditPro KPM profile 内置为默认方案），不进工单——工单只声明能力要求（`stealth.kpm.channels`），永不出现驱动标识。转正条件：首个采集器版本完成 passive + active 双回路真机验证。生成/解析接线随采集器 epic 落地；本节先立格式，fixture 即锚定。
+三个版本化协议物是 exuvia 与采集器之间的**唯一耦合面**（§9 铁律 3：独立二进制、独立发行、独立版本号）。流向：exuvia 静态侦察产出**采集工单**（10.1）→ E2EE 加密会话下发（§9 铁律 5：无 adb）→ 采集器执行 → 同一会话回传 **manifest**（10.2）+ 工件（tar.gz 唯一归档形态）；**工件卫生目录**（10.3）是双方共享的 tell-surface 基准——工单按它声明策略与版本对齐，manifest 按它登记残余。机器字段只用技术族名（§8 围栏规则延伸到采集线：厂商名永不出现在本节任何字段）。驱动对接配置（driver profile）属**用户设备侧**：由采集器自定义版本化格式承载（通道形态不限——死 syscall / ioctl / proc 节点等；**任何读写内核驱动皆可对接**，ditPro KPM profile 内置为默认方案），不进工单——工单只声明能力要求（`stealth.driver.channels`），永不出现驱动标识。转正条件：首个采集器版本完成 passive + active 双回路真机验证。生成/解析接线随采集器 epic 落地；本节先立格式，fixture 即锚定。
+
+**外包循环五角色——静态/修复线（§3/§4）与采集线同构**：目标 = goal.json（两线同物，targets 指向欠账方法）；派单 = workpackage.json ↔ 采集工单 + 种子计划文件；回包 = proposal.json ↔ manifest + tar.gz；闸门 = 修复门四层（§5）↔ 采集验收门——同四层骨架：①语法 = 魔数 + 结构可解析；②范围+哈希 = 产物 sha256 对账 + deliverables 齐套；③语义 = 驱动通道回读对账（实际生效 vs 工单要求）+ env-gates 核验；④判决 = 覆盖增量进 agent 判定；台账 = debt.json ↔ covdebt 欠账报告（格式各自治）。两门拒绝一律 = 错误码 + detail + hint，大声拒绝。
 
 **10.1 workorder.json（exuvia → 采集器）**
 
 | Field | Semantics |
 |---|---|
-| `$schema` | literal `"exuvia.collector.workorder"` |
-| `workorder_version` | `2` |
+| `$schema` | literal `"exuvia.workorder"` |
+| `workorder_version` | `3` |
 | `order_id` | opaque string；manifest 原样回显（建议取工单正文 sha256 派生） |
 | `target.package` | 已安装加壳包名 |
 | `target.apk_sha256` | exuvia 分析对象锚——采集器动作前必须核对已安装应用，不符 = 大声拒绝 |
-| `target.launch_activity` | nullable；null = 操作者手动启动（铁律 5 无 adb） |
+| `target.launch_activity` | 采集器 am start 启动的组件名——启动目标恒为采集器职责（铁律 5 会话线）；侦察机械提取 |
 | `family.id` | §8 技术族 id（如 `family-3-extract-nop`）；未知 = `"unknown"` |
 | `family.evidence` | 分类依据事实串（如 rodata 符号命中），无判断 |
 | `extraction.mode` | `"passive"`（加载期整 dex 解密族，零进程内触发）/ `"active"`（FART 式方法触发） |
@@ -382,24 +384,22 @@ guidance = [
 | `extraction.scan.carve` | `verify_header`（魔数 + file_size 自洽 + map_off 非零）/ `max_size` 单体上限 |
 | `env_gates[]` | 环境检查投喂表：`gate` 检查点标识 / `expected` 真机期望值 / `evidence` 侦察依据引用；采集器 preflight 记录用，不做强制 |
 | `stealth.tier` | `"L0"`/`"L1"`/`"L2"` 最低档；可超档执行，禁止静默降档 |
-| `stealth.kpm` | nullable，L2 必填；`required` 为 true 时握手失败 = 大声拒绝运行（§9 冻结面）；`channels` ⊆ `["phys_read","phys_write","hide_proc"]` |
+| `stealth.driver` | nullable，L2 必填；`required` 为 true 时握手失败 = 大声拒绝运行（§9 冻结面）；`channels` ⊆ `["phys_read","phys_write","hide_proc"]`——任何读写内核驱动同走此字段（KPM / 独立 .ko 等形态），永不出现驱动标识 |
 | `hygiene.hygiene_version` | 生单时对齐的卫生目录版本（10.3） |
-| `hygiene.random_artifacts` / `.no_tcp` / `.one_shot` | 铁律 4 与隐身教义落下的布尔策略约束 |
+| `hygiene.random_artifacts` / `.one_shot` | 铁律 4 与隐身教义落下的布尔策略约束（传输唯一线 = E2EE 会话，不再设传输布尔） |
 | `deliverables` | subset of `["dex","runtime-log","maps"]` |
-| `result_channel.method` | `"manual-transfer"`（铁律 5） |
-| `result_channel.archive` | `"tar.gz"`——二进制转储唯一传输形态 |
 
 Example (CI fixture):
 
 ```json
 {
-  "$schema": "exuvia.collector.workorder",
-  "workorder_version": 2,
+  "$schema": "exuvia.workorder",
+  "workorder_version": 3,
   "order_id": "wo-20261024-001",
   "target": {
     "package": "com.example.app",
     "apk_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "launch_activity": null
+    "launch_activity": "com.example.app/.MainActivity"
   },
   "family": {
     "id": "family-3-extract-nop",
@@ -429,11 +429,10 @@ Example (CI fixture):
   ],
   "stealth": {
     "tier": "L2",
-    "kpm": { "required": true, "min_version": "1.4.2", "channels": ["phys_read", "hide_proc"] }
+    "driver": { "required": true, "min_version": "1.4.2", "channels": ["phys_read", "hide_proc"] }
   },
-  "hygiene": { "hygiene_version": 1, "random_artifacts": true, "no_tcp": true, "one_shot": true },
-  "deliverables": ["dex", "runtime-log"],
-  "result_channel": { "method": "manual-transfer", "archive": "tar.gz" }
+  "hygiene": { "hygiene_version": 2, "random_artifacts": true, "one_shot": true },
+  "deliverables": ["dex", "runtime-log"]
 }
 ```
 
@@ -441,13 +440,13 @@ Example (CI fixture):
 
 | Field | Semantics |
 |---|---|
-| `$schema` | literal `"exuvia.collector.manifest"` |
-| `manifest_version` | `1` |
+| `$schema` | literal `"exuvia.manifest"` |
+| `manifest_version` | `2` |
 | `order_id` / `workorder_sha256` | 工单回显 + 所消费工单字节的 sha256 锚 |
 | `collector.name` / `.version` | 采集器身份与独立版本号（铁律 3） |
 | `device.abi` / `.android_release` / `.kernel` / `.root` | 运行事实；`root` 例：`"ksu-lkm"` / `"ksu"` / `"magisk"` |
 | `stealth_tier_used` | 实际执行档（≥ 工单要求） |
-| `kpm` | null 或 status 回读：`handshake` + `channels_used` = 实际生效通道（不是请求值，§9 status 动词落点） |
+| `driver` | null 或驱动 status 回读：`handshake` + `channels_used` = 实际生效通道（不是请求值，§9 status 动词落点） |
 | `anchors_hit` | 实际命中的 ART 锚点——提取路径执行过的证据 |
 | `env_gates[].gate` / `.passed` | preflight 观察结果 |
 | `artifacts[]` | `{ name, kind, sha256, size_bytes }`；`kind` ∈ deliverables 集合 |
@@ -458,14 +457,14 @@ Example (CI fixture):
 
 ```json
 {
-  "$schema": "exuvia.collector.manifest",
-  "manifest_version": 1,
+  "$schema": "exuvia.manifest",
+  "manifest_version": 2,
   "order_id": "wo-20261024-001",
   "workorder_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "collector": { "name": "exuvia-collector", "version": "0.1.0" },
   "device": { "abi": "arm64-v8a", "android_release": "15", "kernel": "5.15.167", "root": "ksu-lkm" },
   "stealth_tier_used": "L2",
-  "kpm": { "name": "ditpro-kpm-read/write", "version": "1.4.2", "handshake": true, "channels_used": ["phys_read", "hide_proc"] },
+  "driver": { "name": "ditpro-kpm-read/write", "version": "1.4.2", "handshake": true, "channels_used": ["phys_read", "hide_proc"] },
   "anchors_hit": ["openInMemoryDexFilesNative"],
   "env_gates": [{ "gate": "ro.debuggable", "passed": true }],
   "artifacts": [
@@ -483,8 +482,8 @@ tell-surface 思维（§9）：一行 = 一个可观察面 = surface（能被看
 
 | Field | Semantics |
 |---|---|
-| `$schema` | literal `"exuvia.collector.hygiene"` |
-| `hygiene_version` | `1` |
+| `$schema` | literal `"exuvia.hygiene"` |
+| `hygiene_version` | `2` |
 | `channels[].id` | 通道标识（kebab-case，manifest.residuals_accepted 的引用键） |
 | `channels[].surface` / `.observer` | 可观察内容 / 观察者位置 |
 | `channels[].l0` / `.l1` / `.l2` | 各隐身档缓解手段（不适用 = `"n/a"`） |
@@ -495,12 +494,12 @@ Example (CI fixture)——即当前目录全量内容：
 
 ```json
 {
-  "$schema": "exuvia.collector.hygiene",
-  "hygiene_version": 1,
+  "$schema": "exuvia.hygiene",
+  "hygiene_version": 2,
   "channels": [
     {
       "id": "fs-artifacts",
-      "surface": "释放到文件系统的运行组件（采集器本体、frida-server/gadget、临时目录与文件名）",
+      "surface": "释放到文件系统的运行组件（采集器本体、临时目录与文件名）",
       "observer": "in-process scanner + app-layer filesystem view",
       "l0": "目录与文件名随机（随机长度 + 随机字符），或放应用层无权限路径",
       "l1": "memfd 内存文件执行，零文件系统落盘",
@@ -511,18 +510,18 @@ Example (CI fixture)——即当前目录全量内容：
     },
     {
       "id": "transport",
-      "surface": "采集链路 IPC 痕迹（frida 默认端口、命名管道、socket 对）",
-      "observer": "in-process scanner (connect/枚举)",
-      "l0": "仅环回 + 随机端口",
-      "l1": "去 TCP：注入即分离，控制面走内存通道",
-      "l2": "内核死 syscall 通道（lookup_dcookie/quotactl），零 socket",
-      "residual": "L2 下无独立残余（钩子残余归入 kernel-hook-residual）",
+      "surface": "主机↔守护进程会话（E2EE 加密 TCP，铁律 5）与采集链路痕迹",
+      "observer": "in-process scanner（/proc/net/tcp 枚举、connect 扫描）",
+      "l0": "反向拨号：设备零监听口",
+      "l1": "逐会话新密钥 + 随机填充，线上无明文、无尺寸指纹",
+      "l2": "内核 /proc 过滤隐藏会话条目（壳无关原语）",
+      "residual": "/proc/net/tcp 中已建立连接（未过滤时可见；内容恒为密文）",
       "residual_accepted": true,
       "decision": null
     },
     {
       "id": "in-process-agent",
-      "surface": "目标进程内 agent/gadget：maps 条目、额外线程、hook 痕迹",
+      "surface": "目标进程内触发器/agent：maps 条目、额外线程、hook 痕迹",
       "observer": "in-process scanner（主场优势方）",
       "l0": "错过 init 窗口再 attach；maps 名随机化",
       "l1": "GOT/PLT-only 挂钩；dump 完成即分离，驻留秒级",
@@ -533,12 +532,12 @@ Example (CI fixture)——即当前目录全量内容：
     },
     {
       "id": "proc-visibility",
-      "surface": "采集器/frida-server 进程对目标与系统扫描可见（/proc walk、进程名）",
+      "surface": "采集链进程对目标与系统扫描可见（/proc walk、进程名）",
       "observer": "system-wide scanner + in-process /proc walk",
       "l0": "argv 随机化、短生命周期",
       "l1": "工作目录与父进程链清理",
-      "l2": "KPM hide_proc 隐藏采集链全部进程",
-      "residual": "ditPro 不过滤目标自身 /proc/self/maps 视图——agent 随机化承载，远期自研零逻辑 KPM 补齐",
+      "l2": "内核驱动 hide_proc 通道隐藏采集链全部进程",
+      "residual": "ditPro 不过滤目标自身 /proc/self/maps 视图——agent 随机化承载，远期自研零逻辑内核驱动补齐",
       "residual_accepted": true,
       "decision": null
     },
@@ -571,9 +570,9 @@ Example (CI fixture)——即当前目录全量内容：
 ## 11. Version anchors
 
 ```text
-SKILL_VERSION: 1.13.1
+SKILL_VERSION: 1.13.2
 handoff_version: 1    goal_version: 1    proposal_version: 1
-workorder_version: 2    manifest_version: 1    hygiene_version: 1
+workorder_version: 3    manifest_version: 2    hygiene_version: 2
 ```
 
 - File version = methodology + §8 fence snapshot. Format changes start in fixtures, serde types follow, CI binds both directions.
@@ -601,4 +600,5 @@ workorder_version: 2    manifest_version: 1    hygiene_version: 1
 - 1.12.0: 协议变更——新增 §10 采集契约三件套（DRAFT v0，fixture 即锚定，生成/解析接线随采集器 epic 落地）：**workorder.json**（exuvia→采集器：目标 package+apk_sha256 锚定——不符大声拒绝；family 仅技术族 id + 证据，§8 围栏规则延伸到采集线；extraction 双模式 passive/active + ART 锚点集 + fart_plan 种子文件引用（file+sha256+hot_first）；env-gate 投喂表；stealth.tier 最低档禁止静默降档 + kpm(required/min_version/channels⊆phys_read/phys_write/hide_proc)；卫生策略布尔集对齐目录版本；deliverables ⊆ dex/runtime-log/maps；manual-transfer + tar.gz 唯一回传形态）；**manifest.json**（采集器→exuvia：order_id+workorder_sha256 回显；采集器/设备事实（root 形态在档）；stealth_tier_used + kpm.status 回读实际生效通道——非请求值；anchors_hit 命中证据；工件 sha256 清单；errors；residuals_accepted 挂接卫生目录）；**hygiene.json**（工件卫生目录，六通道 tell-surface 基准：fs-artifacts / transport / in-process-agent / proc-visibility / kernel-hook-residual / timing-window，每通道 surface×observer×L0–L2 缓解×残余×裁定；kernel-hook-residual 落档 maintainer 2026-10-24 裁定——应用层无法检测内核侧残留，非魔法参数原样透传，接受）。CI 三向锚定照 §3/§4 模式：新增 src/protocol/collector.rs（三 serde 类型 + 共用枚举，deny_unknown_fields + JsonSchema）；tests/skill_doc.rs 三新臂（kinds 63→511）+ 锚点循环扩三常量；version.rs 新增 WORKORDER/MANIFEST/HYGIENE_VERSION=1，protocol_line 与 --version JSON 同步扩展。原 §10 Version anchors 顺延为 §11（测试 split 串同步）。采集器本体不在本仓——契约先立，实现另起（铁律 3）。
 - 1.13.0: 协议变更——工单 v2（`workorder_version` 1→2，`extraction` 增 `scan` 对象）：**扫描配置动态化**——regions（maps 过滤）/ magic（魔数表，族参数入口）/ poll（轮询节奏 + sha256 连续判稳 + window 封顶）/ carve（header 自洽校验 + 上限）全部经工单由 AGENT 按族给出，采集器零内置扫描策略——zero-sample 从"无壳特征"延伸到"无扫描策略"（2026-10-24 维护者裁定）。`art_anchors` 语义精确化：挂钩引擎存在时 = 挂钩规范，被动模式 = 计时/侦察提示。§10 边界声明：driver profile 属用户设备侧（采集器自定义版本化格式、随附 ditPro 默认 profile），工单只声明能力要求、永不出现驱动标识。§9 隐身分级注记精确化：作为隐身手段 L2 是保险，作为读传输内核路径是被动模式地基（零 ptrace 零注入，SELinux 豁免需求随 frida 移出采集器 MVP 而消失）。serde 侧 WoExtraction 增 `scan` 字段 + WoScan 四子结构；锚点三向同步。
 - 1.13.1: 理念勘定（无协议变更）——2026-10-24 维护者两项裁定落档：① **frida 整体移除出采集器架构**（不做 MVP 降级、不留 M4 触发器备胎；任何降级/保底策略均为多余——内核读写作业路径唯一，失败 = 大声拒绝，不静默降档），修正 1.13.0 "降格为 M4 触发器"的过渡表述；② **驱动形态泛化**——不限 KPM，任何支持读写的内核驱动（独立 .ko 等）皆可对接，通道形态不限死 syscall，用户经 driver profile 自调对接参数，ditPro KPM profile 内置为默认方案；§9 kpm_client 四动词冻结面相应改写为 profile 驱动 op 集（probe/read/read_list/write/hide/status）。
+- 1.13.2: 协议变更——传输线与命名单元重裁（2026-10-24 维护者裁定链）：① `$schema` 去 collector 中缀（`exuvia.workorder` / `exuvia.manifest` / `exuvia.hygiene`，与静态六物平齐——执行者身份退出协议字段）；② 工单删 `result_channel`（`ResultMethod`/`ArchiveKind`/`WoResultChannel` 随废）——传输唯一线 = E2EE 加密 TCP 会话、归档唯一形态 = tar.gz，文字约定不占字段；③ `target.launch_activity` 改必填（启动目标恒为采集器职责，采集器 am start）；④ `stealth.kpm`→`stealth.driver`、manifest `kpm`→`driver`（KpmReq/KpmChannel/KpmStatus → DriverReq/DriverChannel/DriverStatus——任何读写内核驱动同走一字段，KPM / 独立 .ko 等形态皆可，通道值 phys_read/phys_write/hide_proc 不变）；⑤ 卫生布尔 `no_tcp` 删除（会话线是唯一网络通道为构造事实）；⑥ §9 铁律 5 重写：无 adb——传输与执行走 E2EE 加密 TCP 会话（守护进程反向拨号、设备零监听口、配对共享秘密 + 门闩机钥认证、逐会话新密钥、流量形状混淆），守护进程由用户手动启停，无降级无备选；铁律 4 括注与 §9/§10 残留 frida 字样扫净，卫生目录 transport 通道重写为 E2EE 会话面（残余 = /proc/net/tcp 已建立连接，内核 /proc 过滤原语承载）；⑦ §10 引言增外包循环五角色两线对照表 + 采集验收门四层骨架对齐（①语法 = 魔数+结构可解析 ②范围+哈希 = 产物对账+齐套 ③语义 = 驱动通道回读+env-gates 核验 ④判决 = 覆盖增量）。WORKORDER_VERSION 3 / MANIFEST_VERSION 2 / HYGIENE_VERSION 2，SKILL_VERSION 1.13.2 同 commit。
 - Before adapting to a new environment, compare `exuvia --version` against these.

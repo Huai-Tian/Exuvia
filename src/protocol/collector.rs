@@ -23,9 +23,9 @@ pub enum ExtractionMode {
     Active,
 }
 
-/// KPM 能力通道（kpm_client 冻结面；ditPro ABI 参考——壳无关原语，zero-sample 延伸到内核）
+/// 内核驱动能力通道（驱动 client 冻结面；ditPro ABI 参考——壳无关原语，zero-sample 延伸到内核）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
-pub enum KpmChannel {
+pub enum DriverChannel {
     #[serde(rename = "phys_read")]
     PhysRead,
     #[serde(rename = "phys_write")]
@@ -45,20 +45,6 @@ pub enum Deliverable {
     Maps,
 }
 
-/// 回传方式（§9 铁律 5：无 adb，人工搬运）
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
-pub enum ResultMethod {
-    #[serde(rename = "manual-transfer")]
-    ManualTransfer,
-}
-
-/// 二进制转储唯一传输形态
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
-pub enum ArchiveKind {
-    #[serde(rename = "tar.gz")]
-    TarGz,
-}
-
 // ─── 10.1 workorder.json（exuvia → 采集器）───
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -76,7 +62,6 @@ pub struct WorkOrder {
     pub stealth: WoStealth,
     pub hygiene: WoHygiene,
     pub deliverables: Vec<Deliverable>,
-    pub result_channel: WoResultChannel,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -86,8 +71,8 @@ pub struct WoTarget {
     pub package: String,
     /// exuvia 分析对象锚——采集器动作前必须核对已安装应用，不符 = 大声拒绝
     pub apk_sha256: String,
-    /// null = 操作者手动启动（铁律 5 无 adb）
-    pub launch_activity: Option<String>,
+    /// 采集器 am start 启动的组件名——启动目标恒为采集器职责（§9 铁律 5：E2EE 会话线）
+    pub launch_activity: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -188,17 +173,18 @@ pub struct WoEnvGate {
 pub struct WoStealth {
     /// 最低档；采集器可超档执行，禁止静默降档
     pub tier: Tier,
-    /// L2 必填；required=true 时握手失败 = 大声拒绝运行（§9 冻结面：静默降级 = 裸奔）
-    pub kpm: Option<KpmReq>,
+    /// L2 必填；required=true 时握手失败 = 大声拒绝运行（§9 冻结面：静默降级 = 裸奔）。
+    /// 任何读写内核驱动同走此字段（KPM / 独立 .ko 等形态皆可），字段永不出现驱动标识
+    pub driver: Option<DriverReq>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct KpmReq {
+pub struct DriverReq {
     pub required: bool,
-    /// KPM ABI 最低版本（semver 串）
+    /// 驱动 ABI 最低版本（semver 串）
     pub min_version: String,
-    pub channels: Vec<KpmChannel>,
+    pub channels: Vec<DriverChannel>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -207,15 +193,7 @@ pub struct WoHygiene {
     /// 生单时对齐的卫生目录版本
     pub hygiene_version: i64,
     pub random_artifacts: bool,
-    pub no_tcp: bool,
     pub one_shot: bool,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct WoResultChannel {
-    pub method: ResultMethod,
-    pub archive: ArchiveKind,
 }
 
 // ─── 10.2 manifest.json（采集器 → exuvia）───
@@ -234,8 +212,8 @@ pub struct CollectorManifest {
     pub device: DeviceInfo,
     /// 实际执行档（≥ 工单要求）
     pub stealth_tier_used: Tier,
-    /// kpm_client status 回读：实际生效通道落在这里（不是请求值）
-    pub kpm: Option<KpmStatus>,
+    /// 驱动 client status 回读：实际生效通道落在这里（不是请求值）
+    pub driver: Option<DriverStatus>,
     /// 实际命中的 ART 锚点——提取路径执行过的证据
     pub anchors_hit: Vec<String>,
     pub env_gates: Vec<GateResult>,
@@ -265,11 +243,11 @@ pub struct DeviceInfo {
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct KpmStatus {
+pub struct DriverStatus {
     pub name: String,
     pub version: String,
     pub handshake: bool,
-    pub channels_used: Vec<KpmChannel>,
+    pub channels_used: Vec<DriverChannel>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
