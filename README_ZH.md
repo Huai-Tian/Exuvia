@@ -8,8 +8,9 @@
 
 - **脱壳（剖析 + 卡点外包）**：`exuvia packed.apk` 产出完整剖析包（L1 骨架 + 欠账清单 + 证据切片），智能缺口压缩成工作包外包给外部 LLM，回流经四层闸门销账。全程零 token 消耗，工具本体不调用任何模型、也不假装理解——每一处需要判断的位置，都被一道格式化接口推给了真正拥有智能的那一侧；"通过"两个字只有 Rust 有资格说。
 - **修复（dump → 可运行 APK）**：`exuvia repair packed.apk dumped.dex -o out.apk` 单命令修复——第三方脱壳服务遍地都是，但没人把 dump 出的 DEX 修回能启动的 APK（壳的 wrapper Application、stub dex、native 加载资产、织入字节码、native stub 都还在包里）。管线：病理分诊 → 类清理 → 解织入 → 方法体还原 → manifest 手术 → zipalign → v2 签名。
+- **动态采集（壳家族无关的引擎）**：壳再硬，最终都必须把合法 DEX 交给 ART——动态引擎因此从运行时提取，设计上与壳家族无关。采集由**独立的采集器二进制**完成（root 硬前提；内核驱动物理内存读写，被动模式下零 ptrace 零注入痕迹），与 Exuvia 的唯一耦合是三件套版本化契约——采集工单 / manifest / 工件卫生目录（SKILL §10，CI 锚定 DRAFT）。传输与执行走一条 E2EE 加密 TCP 会话（设备守护进程反向拨号主机、零监听口、全程无 adb）；采集器零内置扫描策略（由 agent 按族写进工单）、零内置驱动协议（任何支持读写的内核驱动经用户自调的 profile 对接，ditPro KPM profile 内置为默认方案）。采集器本体为独立发行物，不在本仓。
 
-本体论是刻意的：**躯体**（单二进制，内嵌沙箱执行器——全程零落盘）、**灵魂**（单文件 SKILL.md：方法论、同时充当 CI golden fixture 的格式示例、profile fence）、**接口**（三条协议数据流：handoff / goal / proposal）。schema 文件不存在——serde 类型即格式；`exuvia schema --dump` 按需派生机器可读视图。
+本体论是刻意的：**躯体**（单二进制，内嵌沙箱执行器——全程零落盘）、**灵魂**（单文件 SKILL.md：方法论、同时充当 CI golden fixture 的格式示例、profile fence）、**接口**（三条协议数据流：handoff / goal / proposal，外加采集契约三件套：workorder / manifest / hygiene）。schema 文件不存在——serde 类型即格式；`exuvia schema --dump` 按需派生机器可读视图。
 
 **零学习曲线是设计出来的**：Exuvia 不依赖经验积累。对未知壳的第一次分析即以峰值性能运行——判断力通过架构注入（结构化起点、预置常识、按卡点打包的工作包、双锚验证），而不是靠随历史生长的指纹库。新代壳出现之时，就是又一次"像第二次一样的第一次"。
 
@@ -75,6 +76,8 @@ exuvia packed.apk ──► handoff/   (REPORT.json+md · debt.json · evidence/
 ```
 
 每个卡点两条产出路径，按成本比较选择（你的比较）：`recovered`（还原原始字节）vs `equivalent`（写出功能等效实现）——后者要求 goal 里 `accepts_equivalent`，且过的是行为差分而非字节测试。
+
+**双引擎，一个循环。** 动态采集线复用同一个外包循环形状：goal 对象两线同物（targets 指向覆盖欠账方法）、采集工单对工作包、manifest + tar.gz 对 proposal、采集验收门同四层骨架、covdebt 欠账报告作台账。静态侦察写工单；采到的 DEX 直接进上面的修复流水线。
 
 ## 🚀 快速开始
 
