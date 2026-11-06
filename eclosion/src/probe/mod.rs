@@ -14,12 +14,21 @@ use std::process::exit;
 pub fn dispatch(args: &[String]) {
     if args.is_empty() { usage(); }
     let mut pkg: Option<String> = None;
+    let mut out: Option<String> = None;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
             "--pkg" if i + 1 < args.len() => { pkg = Some(args[i + 1].clone()); i += 2; }
+            "--out" if i + 1 < args.len() => { out = Some(args[i + 1].clone()); i += 2; }
             _ => i += 1,
         }
+    }
+    if let Some(p) = &out {
+        if let Err(e) = crate::set_out(p) {
+            eprintln!("--out 打开失败: {e}");
+            exit(1);
+        }
+        eprintln!("[probe] 结果同时写入 {p}");
     }
     match args[0].as_str() {
         "env" => env_probe(),
@@ -31,7 +40,7 @@ pub fn dispatch(args: &[String]) {
 }
 
 fn usage() -> ! {
-    eprintln!("probe 子命令: env | art --pkg <包名> | kpm | all --pkg <包名>");
+    eprintln!("probe 子命令: env | art --pkg <包名> | kpm | all --pkg <包名>(均可加 --out <文件>)");
     exit(2);
 }
 

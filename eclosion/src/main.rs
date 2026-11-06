@@ -23,7 +23,24 @@ fn jescape(s: &str) -> String {
 }
 fn emit(fields: &[(&str, String)]) {
     let body: Vec<String> = fields.iter().map(|(k, v)| format!("\"{k}\":{v}")).collect();
-    println!("{{{}}}", body.join(","));
+    let line = format!("{{{}}}", body.join(","));
+    println!("{line}");
+    // --out 落盘(手机终端不吃 `>` 重定向——2026-11-05 实测 MT 管理器终端)
+    if let Some(m) = OUT_SINK.get() {
+        if let Some(f) = m.lock().unwrap().as_mut() {
+            use std::io::Write;
+            writeln!(f, "{line}").ok();
+        }
+    }
+}
+
+static OUT_SINK: std::sync::OnceLock<std::sync::Mutex<Option<std::fs::File>>> =
+    std::sync::OnceLock::new();
+
+/// probe --out <路径>:结果同时写文件(手机屏幕拷贝之外的可靠通道)
+pub fn set_out(path: &str) -> Result<(), String> {
+    let f = std::fs::File::create(path).map_err(|e| format!("create {path}: {e}"))?;
+    OUT_SINK.set(std::sync::Mutex::new(Some(f))).map_err(|_| "out sink already set".to_string())
 }
 fn js(s: &str) -> String { format!("\"{}\"", jescape(s)) }
 fn jn<T: std::fmt::Display>(v: T) -> String { v.to_string() }
