@@ -3,6 +3,7 @@
 pub mod fence;
 pub mod gate;
 pub mod install;
+pub mod collect;
 pub mod next;
 pub mod protocol;
 pub mod repair;

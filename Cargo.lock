@@ -562,6 +562,7 @@ dependencies = [
 name = "exuvia"
 version = "0.1.0"
 dependencies = [
+ "E2EE-Experiment",
  "aes 0.8.4",
  "clap",
  "flate2",
@@ -570,6 +571,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.1",
+ "tar",
+ "tokio",
  "toml",
  "zip",
 ]

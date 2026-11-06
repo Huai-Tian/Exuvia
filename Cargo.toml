@@ -34,6 +34,22 @@ libc = "0.2.191"
 flate2 = "1"
 # hunt 的 aes-128-cbc-tail 容器谓词块原语（第二战挣得的族知识；纯 Rust，CBC 手工链接无填充库）
 aes = "0.8"
+# 采集会话控制面（SKILL §10.4 E2EE 传输；与羽化共用内嵌 4.1.0）
+e2ee = { path = "eclosion/vendor/e2ee", package = "E2EE-Experiment" }
+# 会话层异步运行时（与 e2ee 同一 runtime）
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal"] }
+# collect 工件 tar.gz 验货（manifest.artifacts 逐件对账）
+tar = "0.4"
+
+# 测试专属：collect_e2e 的假守护剧本（e2ee/tokio 会话对端 + tar 造包）
+[dev-dependencies]
+e2ee = { path = "eclosion/vendor/e2ee", package = "E2EE-Experiment" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tar = "0.4"
+flate2 = "1"
+sha2 = "0.11.1"
+serde_json = "1"
+libc = "0.2.191"
 
 [profile.release]
 lto = true

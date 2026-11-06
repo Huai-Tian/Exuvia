@@ -57,6 +57,24 @@ enum Cmd {
         #[command(subcommand)]
         cmd: UnpackCmd,
     },
+    /// 采集会话主机端（SKILL §10.4）：监听等守护反拨 → 派单 → 事件流水 → 收讫验货
+    Collect {
+        /// 跑一次采集会话
+        #[arg(long)]
+        run: bool,
+        /// 监听地址（守护反向拨号的落点）
+        #[arg(long, default_value = "127.0.0.1:9000")]
+        listen: String,
+        /// workorder.json（§10.1 v4；主机侧闸门同纪律）
+        #[arg(long, value_name = "FILE")]
+        workorder: Option<std::path::PathBuf>,
+        /// 工件落点目录（默认 collect-<order_id>/）
+        #[arg(long, value_name = "DIR")]
+        out: Option<std::path::PathBuf>,
+        /// 总窗口秒数（0 = 不限）
+        #[arg(long, default_value = "0")]
+        timeout: u64,
+    },
     /// 洋葱二次分析：对解卡产物（recovered DEX）再剖析 → 下一层欠账地图
     Analyze {
         /// 单个 DEX 文件（如 workspace/<debt_id>/recovered.dex）
@@ -226,6 +244,40 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Some(Cmd::Collect { run, listen, workorder, out, timeout }) => {
+            if !run || workorder.is_none() {
+                eprintln!("{{\"error\":\"collect 需要 --run --workorder <FILE>\"}}");
+                return ExitCode::FAILURE;
+            }
+            let cfg = exuvia::collect::RunConfig {
+                listen,
+                workorder: workorder.unwrap(),
+                out,
+                timeout_s: timeout,
+            };
+            match exuvia::collect::run(&cfg) {
+                Ok(s) => {
+                    let arts: Vec<String> = s
+                        .artifacts
+                        .iter()
+                        .map(|(n, h, b)| format!("{{\"name\":\"{n}\",\"sha256\":\"{h}\",\"size_bytes\":{b}}}"))
+                        .collect();
+                    println!(
+                        "{{\"status\":\"ok\",\"order_id\":\"{}\",\"out\":\"{}\",\"artifacts\":[{}],\"events\":{},\"elapsed_ms\":{}}}",
+                        s.order_id,
+                        s.out_dir.display(),
+                        arts.join(","),
+                        s.events,
+                        s.elapsed_ms
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("{{\"error\":\"{}\"}}", e.replace('"', "'"));
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Some(Cmd::Analyze { dex, out }) => {
             match exuvia::track_a::reanalyze::analyze_dex(&dex, &out) {
                 Ok(debt) => {
