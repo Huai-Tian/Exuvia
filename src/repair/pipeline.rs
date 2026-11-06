@@ -706,7 +706,7 @@ mod tests {
         };
         let (pos, ext) = resolve_ship_inputs_at(&args, &dir.join("handoff")).unwrap();
 
-        assert_eq!(pos, vec![PathBuf::from("/tmp/test.dex")]);
+        assert_eq!(pos, vec![PathBuf::from(ap("/tmp/test.dex"))]);
         assert_eq!(ext, vec![product]);  // 仅显式那一份
         let _ = std::fs::remove_dir_all(&dir);
     }
