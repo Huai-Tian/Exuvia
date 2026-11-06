@@ -1,0 +1,35 @@
+# 内嵌副本：E2EE-Experiment 4.1.0 库件（维护者自研会话库，羽化↔主机唯一传输线，SKILL §9 铁律 5）
+# 与上游差异（仅打包面，库逻辑逐字节一致）：
+#   1. 去 [workspace]/[[bin]]/ffi 成员与 src/main.rs（CLI）——zbus 随之不入境（上游本就仅 CLI 引用）
+#   2. [patch.crates-io] snow 上移至 Exuvia 仓根 Cargo.toml（依赖方的 patch 段不生效，cargo 规则）
+#   3. 源树 = 4.1.0 tarball 的 src/*.rs（除 main.rs）+ vendor/snow（精简至构建必需：src/build.rs/许可）
+# 上游校验：E2EE-Experiment-4.1.0.tar.gz 随 2026-11-03 交接包存档。
+[package]
+name = "E2EE-Experiment"
+version = "4.1.0"
+edition = "2024"
+description = "一个像人一样的端到端加密对话实验：能听，能说，转身即忘"
+license = "AGPL-3.0-only"
+
+[lib]
+name = "e2ee"
+path = "src/lib.rs"
+
+[features]
+rogue = []
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "io-std", "time", "sync", "fs", "signal"] }
+snow = { version = "0.10", features = ["hfs", "pqclean_kyber1024"] }
+thiserror = "2"
+if-addrs = "0.15.0"
+spake2 = "0.4"
+getrandom = { version = "0.4.3", features = ["std"] }
+sha2 = "0.11.0"
+hkdf = "0.13.0"
+chacha20poly1305 = "0.11.0"
+zeroize = "1"
+ed25519-dalek = { version = "2", default-features = false, features = ["fast", "zeroize"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

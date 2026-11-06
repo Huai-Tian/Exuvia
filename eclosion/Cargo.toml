@@ -1,6 +1,6 @@
 [package]
 name = "eclosion"
-version = "0.1.3"
+version = "0.2.0"
 edition = "2021"
 license = "AGPL-3.0-only"
 description = "羽化——Exuvia 脱壳功能的动态手段执行端(SKILL §9 六铁律;零策略纯执行引擎)"
@@ -10,10 +10,27 @@ description = "羽化——Exuvia 脱壳功能的动态手段执行端(SKILL §9
 name = "exuvia-eclosion"
 path = "src/main.rs"
 
+# 库件:守护/会话/采集引擎(契约类型的羽化侧手写镜像,CI 经 ../SKILL.md fixture 锚定)
+[lib]
+name = "eclosion"
+path = "src/lib.rs"
+
 [dependencies]
 # 进程/内存/系统调用原语
 libc = "0.2"
+# E2EE 会话唯一线(§9 铁律 5):内嵌 4.1.0(vendor/e2ee;无 adb、无降级)
+e2ee = { path = "vendor/e2ee", package = "E2EE-Experiment" }
+# 会话层异步运行时(与 e2ee 同一 runtime)
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal", "fs"] }
+# 契约三件套 + 会话词表(§10)的羽化侧镜像:serde 类型即格式
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# 工件 sha256(manifest 对账)
+sha2 = "0.11"
+# 回传归档唯一形态:tar.gz(纯 Rust 链,musl 静态友好)
+tar = "0.4"
+flate2 = "1"
+# 随机工件名(铁律 4:随机长度+随机字符)
+getrandom = "0.4"
 
-[profile.release]
-strip = true
-lto = true
+# release 剖面由 workspace 根统一指定(lto + strip)
