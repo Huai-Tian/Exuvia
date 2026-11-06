@@ -586,11 +586,16 @@ pub fn run_repair(args: &RepairArgs) -> RepairResult {
 mod tests {
     use super::*;
 
+    /// 双平台绝对路径："/x" 只在 unix 绝对，Windows 要盘符（2026-11-06 Windows 宿主实测）。
+    fn ap(s: &str) -> String {
+        if cfg!(windows) { format!("C:{s}") } else { s.to_string() }
+    }
+
     fn base_args() -> RepairArgs {
         RepairArgs {
-            packed_apk: PathBuf::from("/tmp/test.apk"),
-            dumped_dexes: vec![PathBuf::from("/tmp/test.dex")],
-            out_apk: PathBuf::from("/tmp/out.apk"),
+            packed_apk: PathBuf::from(ap("/tmp/test.apk")),
+            dumped_dexes: vec![PathBuf::from(ap("/tmp/test.dex"))],
+            out_apk: PathBuf::from(ap("/tmp/out.apk")),
             reference_dex: None,
             extra_dumps: vec![],
             extra_dex: vec![],
@@ -604,7 +609,7 @@ mod tests {
     #[test]
     fn test_repair_args_default() {
         let args = base_args();
-        assert_eq!(args.packed_apk, Path::new("/tmp/test.apk"));
+        assert_eq!(args.packed_apk, PathBuf::from(ap("/tmp/test.apk")));
         assert!(args.reference_dex.is_none());
         assert!(args.extra_dumps.is_empty());
         assert!(args.extra_dex.is_empty());
@@ -617,11 +622,11 @@ mod tests {
         // 唯一携带 MainActivity 的子 dex 若被塞进 --dump，重打包出的 APK 会
         // 静默丢失整个 classes2.dex。直挂成品必须走 --extra-dex。
         let args = RepairArgs {
-            extra_dumps: vec![PathBuf::from("/x/src_only.dex")],
+            extra_dumps: vec![PathBuf::from(ap("/x/src_only.dex"))],
             ..base_args()
         };
-        let extras = vec![PathBuf::from("/x/sub1.dex"), PathBuf::from("/x/sub2.dex")];
-        let cmd = repair_all_args(&args, &[PathBuf::from("/x/main.doctor.dex")], &extras);
+        let extras = vec![PathBuf::from(ap("/x/sub1.dex")), PathBuf::from(ap("/x/sub2.dex"))];
+        let cmd = repair_all_args(&args, &[PathBuf::from(ap("/x/main.doctor.dex"))], &extras);
         // --dump / --extra-dex 各自恰好出现一次调用、值正确且保序
         let dump_pos: Vec<usize> = cmd.iter().enumerate()
             .filter(|(_, a)| *a == "--dump").map(|(i, _)| i).collect();
@@ -629,12 +634,12 @@ mod tests {
             .filter(|(_, a)| *a == "--extra-dex").map(|(i, _)| i).collect();
         assert_eq!(dump_pos.len(), 1);
         assert_eq!(extra_pos.len(), 2);
-        assert_eq!(cmd[dump_pos[0] + 1], "/x/src_only.dex");
-        assert_eq!(cmd[extra_pos[0] + 1], "/x/sub1.dex");
-        assert_eq!(cmd[extra_pos[1] + 1], "/x/sub2.dex");
+        assert_eq!(cmd[dump_pos[0] + 1], ap("/x/src_only.dex"));
+        assert_eq!(cmd[extra_pos[0] + 1], ap("/x/sub1.dex"));
+        assert_eq!(cmd[extra_pos[1] + 1], ap("/x/sub2.dex"));
         assert!(extra_pos[0] < extra_pos[1]);
         // 位置参数仍是「壳 APK + doctor 产物」两件，直挂 dex 绝不混入位置参数
-        assert_eq!(&cmd[..4], ["/tmp/test.apk", "/x/main.doctor.dex", "-o", "/tmp/out.apk"]);
+        assert_eq!(&cmd[..4], [ap("/tmp/test.apk").as_str(), ap("/x/main.doctor.dex").as_str(), "-o", ap("/tmp/out.apk").as_str()]);
     }
 
     #[test]

@@ -88,6 +88,7 @@ fn free_port() -> u16 {
 }
 
 /// 搭假现场：内存映像 + maps + 假已装应用 + 模拟 profile；回各路径
+#[cfg(unix)] // 仅互操作皇冠案消费（守护实体只跑 unix）
 fn stage_fake_device(tmp: &std::path::Path) -> (Vec<u8>, std::path::PathBuf, String) {
     let dex = make_dex();
     let mut image = vec![0u8; 0x6000];
