@@ -1,6 +1,6 @@
 [package]
 name = "eclosion"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 license = "AGPL-3.0-only"
 description = "羽化——Exuvia 脱壳功能的动态手段执行端(SKILL §9 六铁律;零策略纯执行引擎)"

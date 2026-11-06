@@ -3,7 +3,7 @@
 use super::elf;
 use super::memio::{cross_check, find_pid_by_pkg, read_maps, tracer_pid, Reader};
 use crate::{emit, jh, jn, js};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 const SCAN_SPAN: u64 = 0x1000;       // 常规节点扫 4KB
 const ROOT_SPAN: u64 = 0x4000;       // Runtime 是大对象(class_linker_ 等字段可越过 2KB),首层扫 16KB
@@ -87,12 +87,19 @@ pub fn run(pkg: &str) {
     let maps2 = read_maps(pid);
     let payloads = scan_dex_payloads(&r, &maps2);
 
-    // 6. 反查归属:为每个直扫发现的 dex 找 DexFile 对象(谁保存了 begin_ 指针),
-    //    命中即实测出 begin_off/size_off/location_off——供偏移快表与走读模型对照。
+    // 6. 载荷身份识别 + 反查归属 + 链猎
     let walk_begins: HashSet<u64> = confirmed_all.iter().map(|&(_, b, _)| b).collect();
+    let mut hunt_targets: Vec<u64> = Vec::new();
     for (begin, fsize, path, perm) in &payloads {
+        identify_dex(&r, *begin, path, perm);
         if walk_begins.contains(begin) { continue; }
-        hunt_dexfile_objects(&r, &maps2, *begin, *fsize, path, perm, pkg);
+        let objs = hunt_dexfile_objects(&r, &maps2, *begin, *fsize, path, perm, pkg);
+        hunt_targets.extend(objs);
+    }
+    hunt_targets.sort_unstable();
+    hunt_targets.dedup();
+    if !hunt_targets.is_empty() {
+        chain_hunt(&r, &maps2, runtime_ptr, &hunt_targets);
     }
 
     // 7. 双通道互证 + 零痕迹回证
@@ -127,6 +134,7 @@ fn walk_round(r: &Reader, maps: &[super::memio::MapEnt], runtime: u64, round: u3
     let mut out: Vec<(u64, u64)> = Vec::new();
     let mut nodes = 0usize;
     let mut reads = 0usize;
+    let mut direct_refs = 0usize;
     let t0 = std::time::Instant::now();
     let mut overtime = false;
 
@@ -146,6 +154,19 @@ fn walk_round(r: &Reader, maps: &[super::memio::MapEnt], runtime: u64, round: u3
             let v = u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
             if v < 0x10000 || !readable(v) { continue; }
             let ch = format!("{chain}+0x{off:x}");
+            // 直判: v 本身就是 dex 载荷起点(容器槽位/结构字段直接存 begin_ 指针)。
+            // 真机实测:DexFile 对象本身走读未必到得了,但存 begin_ 的槽位可能到得了。
+            if direct_refs < 32 {
+                if let Some(mg) = r.read(v, 4) {
+                    reads += 1;
+                    if &mg == b"dex\n" {
+                        emit(&[("k", js("dex_ref_direct")), ("chain", js(&ch)),
+                               ("begin", jh(v)), ("round", jn(round))]);
+                        direct_refs += 1;
+                        continue;
+                    }
+                }
+            }
             // v 指向的对象可能是 DexFile——但不能假设 begin_ 在 obj+0:
             // 新版 DexFile 有虚析构,obj+0 是 vtable(指向 libart),begin_ 在 obj+8
             // (2026-11-06 真机教训:只看 obj+0,三轮 1398 节点零命中)。
@@ -305,9 +326,15 @@ fn scan_dex_payloads(r: &Reader, maps: &[super::memio::MapEnt]) -> Vec<(u64, u64
 
 // 反查归属:全 rw 映射里找指向 begin_ 的八字节字段;命中地址 X 即某对象的一个字段,
 // DexFile 对象 = X - begin_off(begin_off ∈ {0, 8} 两候选都验),size_/location 复核。
+// begin_off=8 候选再做 vtable 判别:obj[0] 落在 libart 映射内则强烈倾向虚表布局。
+// 返回所有"size_ 或 location 至少一项吻合"的候选对象地址(供链猎使用)。
 fn hunt_dexfile_objects(r: &Reader, maps: &[super::memio::MapEnt], begin: u64, file_size: u64,
-                        map_path: &str, map_perm: &str, pkg: &str) {
+                        map_path: &str, map_perm: &str, pkg: &str) -> Vec<u64> {
+    let art_ranges: Vec<(u64, u64)> = maps.iter()
+        .filter(|m| m.path.ends_with("/libart.so"))
+        .map(|m| (m.start, m.end)).collect();
     let mut found: HashSet<u64> = HashSet::new();
+    let mut objs: Vec<u64> = Vec::new();
     let mut scanned = 0u64;
     let needle = begin.to_le_bytes();
     'outer: for m in maps.iter().filter(|m| m.perm.starts_with("rw")) {
@@ -338,13 +365,20 @@ fn hunt_dexfile_objects(r: &Reader, maps: &[super::memio::MapEnt], begin: u64, f
                         }
                         let size_ok = size_at == file_size;
                         if size_ok || !location.is_empty() {
+                            // vtable 判别:begin_off=8 时 obj[0] 应指向 libart
+                            let vtable_hint = if begin_off == 8 {
+                                let p = r.u64_at(obj).unwrap_or(0);
+                                art_ranges.iter().any(|&(a, b)| a <= p && p < b) as u8
+                            } else { 0 };
                             emit(&[("k", js("dex_object")), ("via", js("reverse_ref")),
                                    ("obj", jh(obj)), ("begin", jh(begin)),
                                    ("begin_off", jh(begin_off)),
+                                   ("vtable_hint", jn(vtable_hint)),
                                    ("field_addr", jh(x)), ("field_in_map", js(&m.path)),
                                    ("size_off", jh(begin_off + 8)), ("size_field_ok", jn(size_ok as u8)),
                                    ("location", js(&location)), ("location_off", jh(loc_off)),
                                    ("payload_map", js(map_path)), ("payload_perm", js(map_perm))]);
+                            objs.push(obj);
                         }
                     }
                     if found.len() >= 64 { break 'outer; } // 防炸
@@ -355,6 +389,94 @@ fn hunt_dexfile_objects(r: &Reader, maps: &[super::memio::MapEnt], begin: u64, f
             off += CHUNK as u64;
         }
     }
+    objs
+}
+
+// 载荷身份识别:解析 dex 头,取前 8 个 type 的类描述符——一眼区分壳桩与原始应用。
+fn identify_dex(r: &Reader, begin: u64, map_path: &str, map_perm: &str) {
+    let Some(hdr) = r.read(begin, 0x70) else { return };
+    let string_ids_size = u32::from_le_bytes(hdr[0x38..0x3c].try_into().unwrap());
+    let string_ids_off = u32::from_le_bytes(hdr[0x3c..0x40].try_into().unwrap()) as u64;
+    let type_ids_size = u32::from_le_bytes(hdr[0x40..0x44].try_into().unwrap());
+    let type_ids_off = u32::from_le_bytes(hdr[0x44..0x48].try_into().unwrap()) as u64;
+    let mut classes: Vec<String> = Vec::new();
+    let n = type_ids_size.min(8);
+    for i in 0..n {
+        let Some(di) = r.u32_at(begin + type_ids_off + i as u64 * 4) else { break };
+        if di >= string_ids_size { continue; }
+        let Some(soff) = r.u32_at(begin + string_ids_off + di as u64 * 4) else { continue };
+        let Some(raw) = r.read(begin + soff as u64, 128) else { continue };
+        // string_data: 前导 uleb128 的 utf16 长度,随后 NUL 结尾的 MUTF-8
+        let mut p = 0usize;
+        while p < raw.len() && raw[p] & 0x80 != 0 { p += 1; }
+        p += 1;
+        let end = raw[p..].iter().position(|&b| b == 0).map(|e| p + e).unwrap_or(raw.len());
+        classes.push(String::from_utf8_lossy(&raw[p..end]).to_string());
+    }
+    emit(&[("k", js("dex_identify")), ("begin", jh(begin)),
+           ("map_path", js(map_path)), ("map_perm", js(map_perm)),
+           ("type_ids", jn(type_ids_size)), ("string_ids", jn(string_ids_size)),
+           ("classes", js(&classes.join("|")))]);
+}
+
+// 链猎:带着目标对象清单从 Runtime 再走一遍 BFS,父指针全记录;
+// 任何一个目标被某个节点的字段指到,就把完整偏移链回溯出来。
+// 回答:结构路(Runtime→…→DexFile)在这台设备上到底通不通。
+fn chain_hunt(r: &Reader, maps: &[super::memio::MapEnt], runtime: u64, targets: &[u64]) {
+    let target_set: HashSet<u64> = targets.iter().cloned().collect();
+    let mut hit: HashMap<u64, String> = HashMap::new();
+    let mut parent: HashMap<u64, (u64, u64)> = HashMap::new(); // 子 → (父节点, 槽位偏移)
+    let mut visited: HashSet<u64> = HashSet::new();
+    let mut queue: VecDeque<(u64, u8)> = VecDeque::new();
+    visited.insert(runtime);
+    queue.push_back((runtime, 0));
+    let t0 = std::time::Instant::now();
+    let mut nodes = 0usize;
+
+    'outer: while let Some((addr, depth)) = queue.pop_front() {
+        if nodes >= MAX_NODES || t0.elapsed().as_secs() > ROUND_BUDGET_SECS { break; }
+        nodes += 1;
+        let mut span = if depth == 0 { ROOT_SPAN } else { SCAN_SPAN };
+        if let Some(m) = maps.iter().find(|m| m.start <= addr && addr < m.end) {
+            span = span.min(m.end - addr) & !7;
+        }
+        if span < 8 { continue; }
+        let Some(buf) = r.read(addr, span as usize) else { continue };
+        for off in (0..span as usize).step_by(8) {
+            let v = u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
+            if v < 0x10000 { continue; }
+            if target_set.contains(&v) && !hit.contains_key(&v) {
+                // 回溯:addr → … → runtime
+                let mut chain = format!("+0x{off:x}");
+                let mut cur = addr;
+                while let Some(&(p, o)) = parent.get(&cur) {
+                    chain = format!("+0x{o:x}") + &chain;
+                    cur = p;
+                    if cur == runtime || chain.len() > 512 { break; }
+                }
+                let chain = format!("R{chain}");
+                hit.insert(v, chain.clone());
+                emit(&[("k", js("chain_hunt")), ("target", jh(v)),
+                       ("found", jn(1u8)), ("chain", js(&chain))]);
+                if hit.len() == target_set.len() { break 'outer; }
+                continue;
+            }
+            let w = maps.iter().any(|m| m.start <= v && v < m.end && m.perm.starts_with("rw"));
+            if depth < 10 && w && !visited.contains(&v) {
+                visited.insert(v);
+                parent.insert(v, (addr, off as u64));
+                queue.push_back((v, depth + 1));
+            }
+        }
+    }
+    for t in targets {
+        if !hit.contains_key(t) {
+            emit(&[("k", js("chain_hunt")), ("target", jh(*t)), ("found", jn(0u8))]);
+        }
+    }
+    emit(&[("k", js("chain_hunt_stats")), ("nodes", jn(nodes)),
+           ("targets", jn(targets.len())), ("hit", jn(hit.len())),
+           ("elapsed_ms", jn(t0.elapsed().as_millis() as u64))]);
 }
 
 // 抓手符号缺席时的退路:在 libart 数据段里找"像 Runtime 的结构"
