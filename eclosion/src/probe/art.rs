@@ -5,9 +5,11 @@ use super::memio::{cross_check, find_pid_by_pkg, read_maps, tracer_pid, Reader};
 use crate::{emit, jh, jn, js};
 use std::collections::{HashSet, VecDeque};
 
-const SCAN_SPAN: u64 = 0x800;      // 每个结构体扫 2KB
-const MAX_NODES: usize = 3000;     // 走读节点上限(防爆)
-const MAX_DEPTH: u8 = 3;
+const SCAN_SPAN: u64 = 0x1000;       // 常规节点扫 4KB
+const ROOT_SPAN: u64 = 0x4000;       // Runtime 是大对象(class_linker_ 等字段可越过 2KB),首层扫 16KB
+const MAX_NODES: usize = 20000;      // 走读节点上限(防爆)
+const MAX_DEPTH: u8 = 6;             // Runtime→ClassLinker→容器→节点→DexFile 链至少 4 层
+const ROUND_BUDGET_SECS: u64 = 180;  // 单轮时间预算,超时响亮相告
 
 pub fn run(pkg: &str) {
     // 1. 按包名定位(裁定#22:进程名==包名)
@@ -91,50 +93,67 @@ pub fn run(pkg: &str) {
 
 // 一轮走读:从 Runtime 广度优先,找 DexFile 对象(begin_ 指向 dex 魔数者)
 // 返回 (begin_, dexfile_obj_addr) 列表
+//
+// 剪枝纪律(2026-11-06 真机教训:旧规则"目标首 u64 必须还是可读指针"把
+// std::list 节点、Mutex 首字段等合法中间结构全部冤杀,三轮只扫到 16 节点):
+// - dex 魔数检查对任何可读指针都做(无论目标映射权限)
+// - 入队只要求目标落在可写映射(堆/arena/bss)——结构体字段语义剪枝
+// - 去重在入队时完成;每轮有墙钟预算,超时响亮报告
 fn walk_round(r: &Reader, maps: &[super::memio::MapEnt], runtime: u64, round: u32, pkg: &str)
     -> Vec<(u64, u64)>
 {
     let readable = |a: u64| maps.iter().any(|m| m.start <= a && a < m.end && m.perm.contains('r'));
+    let writable = |a: u64| maps.iter().any(|m| m.start <= a && a < m.end && m.perm.starts_with("rw"));
     let mut visited: HashSet<u64> = HashSet::new();
     let mut queue: VecDeque<(u64, String, u8)> = VecDeque::new();
+    visited.insert(runtime);
     queue.push_back((runtime, "R".to_string(), 0));
     let mut out: Vec<(u64, u64)> = Vec::new();
     let mut nodes = 0usize;
+    let mut reads = 0usize;
+    let t0 = std::time::Instant::now();
+    let mut overtime = false;
 
     while let Some((addr, chain, depth)) = queue.pop_front() {
         if nodes >= MAX_NODES { break; }
-        if !visited.insert(addr) { continue; }
+        if t0.elapsed().as_secs() > ROUND_BUDGET_SECS { overtime = true; break; }
         nodes += 1;
-        let Some(buf) = r.read(addr, SCAN_SPAN as usize) else { continue };
-        for off in (0..SCAN_SPAN as usize).step_by(8) {
+        let span = if depth == 0 { ROOT_SPAN } else { SCAN_SPAN };
+        let Some(buf) = r.read(addr, span as usize) else { continue };
+        reads += 1;
+        for off in (0..span as usize).step_by(8) {
             let v = u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
             if v < 0x10000 || !readable(v) { continue; }
             let ch = format!("{chain}+0x{off:x}");
             // 两级: v 指向的对象,其首个 u64(begin_)是否指向 "dex\n"
             if let Some(b8) = r.read(v, 8) {
+                reads += 1;
                 let begin_ = u64::from_le_bytes(b8.try_into().unwrap());
                 if begin_ >= 0x10000 && readable(begin_) {
                     if let Some(magic) = r.read(begin_, 4) {
+                        reads += 1;
                         if &magic == b"dex\n" {
                             if validate_dexfile(r, v, begin_, &ch, pkg) {
                                 out.push((begin_, v));
                             }
                             continue; // DexFile 对象不再向里走
+                            // (对象内部不再扫,但 begin_ 指向的 dex 本体也不入队:
+                            //  它在文件映射里,writable 检查本来就进不去)
                         }
                     }
                 }
             }
-            // 继续向里走(看起来像结构指针的才入队)
-            if depth < MAX_DEPTH {
-                if let Some(first) = r.u64_at(v) {
-                    if first >= 0x10000 && readable(first) {
-                        queue.push_back((v, ch, depth + 1));
-                    }
-                }
+            // 继续向里走:目标须是可写映射里的结构体(堆/arena/bss)
+            if depth < MAX_DEPTH && writable(v) && !visited.contains(&v) {
+                visited.insert(v);
+                queue.push_back((v, ch, depth + 1));
             }
         }
     }
-    emit(&[("k", js("walk_stats")), ("round", jn(round)), ("nodes", jn(nodes))]);
+    emit(&[("k", js("walk_stats")), ("round", jn(round)), ("nodes", jn(nodes)),
+           ("queue_left", jn(queue.len())), ("reads", jn(reads)),
+           ("elapsed_ms", jn(t0.elapsed().as_millis() as u64)),
+           ("overtime", jn(overtime as u8))]);
     out
 }
 

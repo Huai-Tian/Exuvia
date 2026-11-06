@@ -1,8 +1,8 @@
 // 羽化(eclosion)——Exuvia 脱壳功能的动态手段执行端。
 // 零内置策略的纯执行引擎:策略全部来自工单(SKILL §10 契约三件套耦合)。
 //
-// 0.1.0 骨架内容:
-// - probe 动词:第 1 段设备探针(#11–#15,ART 符号/走读自证 + KPM 通道核验)
+// 0.1.1 骨架内容:
+// - probe 动词:第 1 段设备探针(#11–#15,ART 符号/走读自证 + 内核驱动通道核验)
 // - run/stop/status 守护三动词:占位,响亮未实现(随第 3 段骨架落地)
 use std::process::exit;
 
@@ -47,12 +47,12 @@ fn jn<T: std::fmt::Display>(v: T) -> String { v.to_string() }
 fn jh(v: u64) -> String { format!("\"0x{v:x}\"") }
 
 fn usage() -> ! {
-    eprintln!("羽化 exuvia-eclosion v0.1.0 —— 零策略纯执行引擎(只读、零注入)");
+    eprintln!("羽化 exuvia-eclosion v0.1.1 —— 零策略纯执行引擎(只读、零注入)");
     eprintln!("用法:");
     eprintln!("  exuvia-eclosion run      守护启动(占位——响亮未实现)");
     eprintln!("  exuvia-eclosion stop     守护停止(占位)");
     eprintln!("  exuvia-eclosion status   守护状态(占位)");
-    eprintln!("  exuvia-eclosion probe <env|art|kpm|all> [--pkg <包名>]   第 1 段设备探针");
+    eprintln!("  exuvia-eclosion probe <env|art|drv|all> [--pkg <包名>]   第 1 段设备探针");
     exit(2);
 }
 

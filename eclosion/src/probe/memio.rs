@@ -2,7 +2,7 @@
 // 双通道互证:process_vm_readv(主)与 /proc/pid/mem pread(备)。
 // root + CAP_SYS_PTRACE 下 process_vm_readv 通过 PTRACE_MODE_ATTACH_REALCREDS
 // 检查而无需真正附着——目标 TracerPid 保持 0,零痕迹(探针会前后回读验证)。
-use crate::{emit, jh, jn, js};
+use crate::{emit, jn, js};
 use std::io::{Read, Seek, SeekFrom};
 
 #[derive(Clone)]

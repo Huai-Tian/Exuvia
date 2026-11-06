@@ -1,11 +1,11 @@
-// 第 1 段设备探针(#11–#15):ART 符号发现/走读自证 + KPM 通道核验。
+// 第 1 段设备探针(#11–#15):ART 符号发现/走读自证 + 内核驱动通道核验(形态无关,裁定#31)。
 // 设计原则:不假设任何 ART 结构偏移;上机自发现、自证
 // (dex 魔数 + header file_size/checksum + location 串三重交叉验证)。
 // 只读:对目标进程零写入、零注入、零附着。
 
 pub mod art;
+pub mod drv;
 pub mod elf;
-pub mod kpm;
 pub mod memio;
 
 use crate::{emit, jn, js};
@@ -33,14 +33,14 @@ pub fn dispatch(args: &[String]) {
     match args[0].as_str() {
         "env" => env_probe(),
         "art" => { let p = pkg.unwrap_or_else(|| usage()); art::run(&p); }
-        "kpm" => kpm::run(),
-        "all" => { let p = pkg.unwrap_or_else(|| usage()); env_probe(); art::run(&p); kpm::run(); }
+        "drv" => drv::run(pkg.as_deref()),
+        "all" => { let p = pkg.unwrap_or_else(|| usage()); env_probe(); art::run(&p); drv::run(Some(&p)); }
         _ => usage(),
     }
 }
 
 fn usage() -> ! {
-    eprintln!("probe 子命令: env | art --pkg <包名> | kpm | all --pkg <包名>(均可加 --out <文件>)");
+    eprintln!("probe 子命令: env | art --pkg <包名> | drv [--pkg <包名>] | all --pkg <包名>(均可加 --out <文件>)");
     exit(2);
 }
 
