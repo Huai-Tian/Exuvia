@@ -347,20 +347,22 @@ guidance = [
 
 1. root 是硬前提——无 root 即不可用，样本应交有 root 的操作者采集；
 2. 不重签名——目标默认带强签名校验，重打包路线否决；
-3. 采集器（命名**羽化**，`eclosion/`，2026-11-03 维护者裁定命名）与 exuvia **同仓**（workspace 成员，2026-11-03 裁定推翻此前的"独立仓"表述——强绑定于本项目、CI 集中）；产物仍是**独立二进制、独立版本号**，exuvia 仅产出它的参数（采集工单 JSON）——两物的唯一耦合是版本化契约（采集工单 / manifest / 工件卫生三件套）；
+3. 采集器（命名**羽化**，`eclosion/`，2026-11-03 维护者裁定命名）与 exuvia **同仓**（workspace 成员，2026-11-03 裁定推翻此前的"独立仓"表述——强绑定于本项目、CI 集中）；产物仍是**独立二进制、独立版本号**，exuvia 仅产出它的参数（采集工单 JSON）——两物的唯一耦合是版本化契约（采集工单 / manifest / 工件卫生 + 会话消息词汇表，§10）；
 4. 自包含运行环境；不得不落盘的目录与文件名一律随机（随机长度 + 随机字符），或放应用层无权访问处。打包双形态（2026-11-03 裁定）：核心逻辑同一份代码，**精简包**（bionic 动态链接）为默认、**自足包**（musl 全静态）为备选——精简包缺失运行环境时启用自足包，每次发布两种产物；
 5. 无 adb——传输与执行走 E2EE 加密 TCP 会话：守护进程反向拨号主机、设备零监听口，配对共享秘密 + 门闩机钥认证，逐会话新密钥、流量形状混淆；守护进程由用户手动启动、支持关闭；无降级、无备选。载体锚定 **E2EE-Experiment 4.1.0**（2026-11-03 研读落档）：配对秘密**当场**出示（`dial_secret` / 主机侧 `expect_secret_stable` 常备门禁——永不消耗、瞎拨锁不住台，DoS 免疫；暗号链已在 4.0.0 整体废除，延时验证非法、当场验证合法）；工件回传走流式文件族（`file_begin`/`file_chunk`/`file_end`，同意门槛——主机侧 `set_receive(Always)`，认钥不认人与门禁同族；`FileDelivered` 收讫回执；4.1.0 起无大小上限，任意大归档单份直传）；两端同嵌 4.1.0（文件互传与 ≤4.0.0 断代，聊天互通）。**无心跳**（载体哲学性永不提供对端探活）——断线感知 = 载体的线死事件 + 发送方写失败 + 工单 `window_s` 作业死线兜底，不发明周期流量（周期心跳本身即时序指纹）；
 6. 非 APK——包名注册表项即 IOC；形态 = 裸 ELF（Termux + su 执行；静态/动态双形态见铁律 4）。
 
 **隐身分级（tell-surface 思维）**：L0 纯用户态（随机工件 + 环回 + 错过 init 窗口 attach）→ L1 用户态强化 → L2 内核辅助。定律：进程内扫描者对进程内 agent 有主场优势（每条用户态隐藏手段本身就是新痕迹），耐久隐身必须比观察者高一个权限层级——观察者在用户态，故 L2 = 内核。反不对称约束升级节奏：采集是**一次性**（拿到字节即赢，所需隐身时长秒级），外挂是持续对抗（月级）——故 L0 先行，L2 是保险不是地基（2026-10-24 精确化：**作为隐身手段** L2 是保险；**作为读传输**，内核物理读写零 ptrace 零注入、in-target 痕迹为零，是被动模式的地基——SELinux ptrace 豁免需求随之消失。同日裁定：**frida 整体移除出采集器架构**——不做 MVP 降级、不留 M4 触发器备胎，任何降级/保底策略均为多余；内核读写作业路径唯一，失败 = 大声拒绝，不静默降档。2026-11-03 维护者裁定：**注入整体否决**——任何向目标进程注入代码或添加映射的手段永久出局（含"注入即分离"等用户态变体，原 L1 枚举随之移除）；根据即主场优势定律，且"读"本不需要注入——纯外部只读之下目标地址空间零我方痕迹，无可过滤之物。主动触发问题归自研主动触发器线另行设计：**触发 ≠ 注入读数**）。内核侧纪律：zero-sample 延伸到内核——内核驱动只做壳无关原语（/proc 过滤、跨进程内存读写、进程隐藏），一切壳特征逻辑留在用户态。
 
-**L2 参考实现已入库**：ditPro KPM 1.4.2（mumulin；读写覆盖内核 4.4–6.12，内置 BTF 解析器自适配结构偏移，故长期免更新）。接口已逆向存档：钩 `lookup_dcookie`(18) / `quotactl`(60) 两个死 syscall，`"nomi"` 握手 + 指纹令牌；命令集 = 按 pid 物理内存读（单点/批量）/写、进程隐藏/解除、按名查 pid、模块基址查询（输入事件隐藏与采集无关）。红利：被动采集（加载期整 dex 解密族）全内核侧完成——目标进程零痕迹。原档"maps 自视图过滤缺口"随 2026-11-03 注入否决**消失**——纯外部只读，目标地址空间内无任何我方映射，maps 无可过滤之物。集成面 = profile 驱动的 driver-client（2026-10-24 泛化裁定）：**任何支持读写的内核驱动皆可对接**——不限 KPM，独立 .ko 等形态皆可，通道不限死 syscall（ioctl / proc 节点等由 profile transport 段描述）；对接参数由用户按自设备驱动自调，ditPro KPM profile **内置为默认方案**。op 集由 profile.ops 实例化：`probe`（握手 + 版本）/ `read` / `read_list` / `write` / `hide` / `status`（回读实际生效通道，写入 manifest）；工单要求内核传输而握手失败 = 大声拒绝运行——静默降级 = 裸奔，比不采更糟。
+**L2 参考实现已入库**：ditPro KPM 1.4.2（mumulin；读写覆盖内核 4.4–6.12，内置 BTF 解析器自适配结构偏移，故长期免更新）。接口已逆向存档、2026-11-06 设备探针三轮实证钉死：钩 `lookup_dcookie`(18) / `quotactl`(60) 两个死 syscall，调用约定 = `syscall(18, 0x268, req_ptr, cmd)`——0x268 占位 fd，cmd 为独立第三参（0x400 读 / 0x401 批量读 / 0x200 写 / 0x40–0x41 隐藏 / 0x50 查 pid / 0x100 模块基址），读路径无密钥验证、成功以字节比对为准（返回值不作数）；`"nomi"` 为 ctl0 信息串（需 SuperKey，读路径不经过）。（输入事件隐藏与采集无关。）红利：被动采集（加载期整 dex 解密族）全内核侧完成——目标进程零痕迹。原档"maps 自视图过滤缺口"随 2026-11-03 注入否决**消失**——纯外部只读，目标地址空间内无任何我方映射，maps 无可过滤之物。集成面 = profile 驱动的 driver-client（2026-10-24 泛化裁定）：**任何支持读写的内核驱动皆可对接**——不限 KPM，独立 .ko 等形态皆可，通道不限死 syscall（ioctl / proc 节点等由 profile transport 段描述）；对接参数由用户按自设备驱动自调，ditPro KPM profile **内置为默认方案**。op 集由 profile.ops 实例化：`probe`（握手 + 版本）/ `read` / `read_list` / `write` / `hide` / `status`（回读实际生效通道，写入 manifest）；工单要求内核传输而握手失败 = 大声拒绝运行——静默降级 = 裸奔，比不采更糟。
 
-**被动定位 = ART Runtime 走读唯一线**（2026-11-03 维护者裁定）：教义"挂住 ART 标准入口即挂住所有壳"的纯读版——锚点相同，把"挂钩"换成"沿结构走"。前提推到底：正在运行的 dex 必然注册于该进程的 ART Runtime，沿 Runtime → 已注册 DexFile 枚举即得全部在役 dex（begin/size 直取字节范围，location/checksum 元数据白拿），magic 扫描（regions/magic 启发式）随之**删除**——未注册 = 未运行 = 非采集目标，覆盖增量由主动触发负责，不靠捡游离缓冲的漏；单线教义：无降级、无备选，走读不可行 = 大声拒绝。目标定位：按包名找进程（Android 进程名通常为包名），DexFile location 一般含包名路径——双保险。诚实成本三则：① ART 内部结构非稳定 ABI，字段偏移随 API Level 与构建漂移——**双层通用化**（2026-11-04 维护者裁定：不得仅适配单台测试机）：**通用层** = 走读引擎自带三重自证（begin_ 指向 dex 魔数 / size_ == header.file_size / location 含目标包名），不依赖任何预设偏移，任意设备现场可量，为默认通路——此乃自登记处出发沿注册结构的验证，与已删除的 magic 扫描（游离字节启发式）无涉，收集语义不变；**快表层** = 实测偏移**数据文件**按 libart.so 构建指纹（ELF build ID，构建级唯一）索引随羽化发行（性质同 driver profile），有表走捷径但三重自证**永不跳过**——表不符 = 响亮拒绝，绝不硬套；新设备经通用层产出实测表回传入库，表随发行滚动积累；② Runtime 单例经 libart.so 导出符号定位（root 读 `/system/lib64/libart.so` 解析，零痕迹）；③ 外部走读活体结构有并发突变风险——复用"连续 N 轮一致判稳"。协议面（§10.1 scan 段重写为 ART 走读参数、magic 删除）随设备探针结论落地——路线图分段：探针先行、协议后落。
+**被动定位通路（2026-11-06 设备实证修正 11-03"走读唯一线"裁定）= 载荷直扫主通路 + 结构走读旁证**：教义"挂住 ART 标准入口即挂住所有壳"的纯读版，三轮上机（Android 15 / arm64 / 族 3 样本）后的落地形态——① **载荷直扫** = 对目标进程可读图做 dex 魔数字节扫 + 版本白名单（035–041）+ header.file_size 自洽，三轮三中（2MB 载荷落 r--p 匿名图），零偏移、与机型无关——裁定#29 通用自证层的直扫形态（自证 = 载荷头自洽校验，不依赖任何预设偏移），为定位主通路；② **反查归属** = 以载荷地址为针反扫可写图定位持有者结构，作元数据旁证；③ **结构走读降级为非关键旁证**——Runtime → DexFile 结构枚举在 Java 堆边界证死：ART arm64 堆内引用为 32 位压缩指针，u64 原生指针走读不可穿越（深度 10 / 20000 节点 / 父链追踪全灭），DexFile 持有者经 Java 侧引用挂接，故走读不进工单、证据入 runtime-log。11-03"magic 扫描删除"针对的是捡游离缓冲的漏式启发式，与带自证的载荷直扫语义不同，非回退；"未注册 = 未运行 = 非采集目标"的收集语义不变——覆盖增量由主动触发负责（族 3 按需解密实证：仅已运行界面涉及的 dex 可扫到）。目标定位：按包名找进程（Android 进程名通常为包名）。诚实成本三则：① ART 内部结构非稳定 ABI——载荷直扫天然免疫（不读结构）；走读快表（按 libart.so build ID 索引的实测偏移数据文件）随走读一同降级为旁证辅助，自证永不跳过、表不符响亮拒绝的纪律不变；② Runtime 单例经 libart.so 导出符号定位（root 读 `/system/lib64/libart.so` 解析，零痕迹）；③ 外部读取活体内存有并发突变风险——复用"连续 N 轮一致判稳"（poll.stable_rounds，§10.1）。协议面（§10.1 scan 段语义重写为载荷直扫）随本裁定落地——路线图分段：探针先行、协议后落。
 
-## 10. Collector contracts — DRAFT v0（采集契约三件套）
+**真机验证最小化**（2026-11-06 维护者裁定）：真机测试只在必要时发起、尽可能留到最后、同一问题不重复上机——桌面静态分析、沙箱模拟、qemu 冒烟先行耗尽，每一次真机轮次都必须有新信息增量。
 
-三个版本化协议物是 exuvia 与羽化（采集器）之间的**唯一耦合面**（§9 铁律 3：同仓、独立二进制、独立版本号）。流向：exuvia 静态侦察产出**采集工单**（10.1）→ E2EE 加密会话下发（§9 铁律 5：无 adb）→ 采集器执行 → 同一会话回传 **manifest**（10.2）+ 工件（tar.gz 唯一归档形态）；**工件卫生目录**（10.3）是双方共享的 tell-surface 基准——工单按它声明策略与版本对齐，manifest 按它登记残余。机器字段只用技术族名（§8 围栏规则延伸到采集线：厂商名永不出现在本节任何字段）。驱动对接配置（driver profile）属**用户设备侧**：由采集器自定义版本化格式承载（通道形态不限——死 syscall / ioctl / proc 节点等；**任何读写内核驱动皆可对接**，ditPro KPM profile 内置为默认方案），不进工单——工单只声明能力要求（`stealth.driver.channels`），永不出现驱动标识。转正条件：首个采集器版本完成 passive + active 双回路真机验证。生成/解析接线随采集器 epic 落地；本节先立格式，fixture 即锚定。
+## 10. Collector contracts — DRAFT v0（采集契约三件套 + 会话词汇表）
+
+三件套 + 会话消息词汇表（10.4）共四个版本化协议物，是 exuvia 与羽化（采集器）之间的**唯一耦合面**（§9 铁律 3：同仓、独立二进制、独立版本号）。流向：exuvia 静态侦察产出**采集工单**（10.1）→ E2EE 加密会话下发（§9 铁律 5：无 adb；消息形态 = 10.4 词表）→ 采集器执行 → 同一会话回传 **manifest**（10.2）+ 工件（tar.gz 唯一归档形态）；**工件卫生目录**（10.3）是双方共享的 tell-surface 基准——工单按它声明策略与版本对齐，manifest 按它登记残余。机器字段只用技术族名（§8 围栏规则延伸到采集线：厂商名永不出现在本节任何字段）。驱动对接配置（driver profile）属**用户设备侧**：由采集器自定义版本化格式承载（通道形态不限——死 syscall / ioctl / proc 节点等；**任何读写内核驱动皆可对接**，ditPro KPM profile 内置为默认方案），不进工单——工单只声明能力要求（`stealth.driver.channels`），永不出现驱动标识。转正条件：首个采集器版本完成 passive + active 双回路真机验证。生成/解析接线随采集器 epic 落地；本节先立格式，fixture 即锚定。
 
 **外包循环五角色——静态/修复线（§3/§4）与采集线同构**：目标 = goal.json（两线同物，targets 指向欠账方法）；派单 = workpackage.json ↔ 采集工单 + 种子计划文件；回包 = proposal.json ↔ manifest + tar.gz；闸门 = 修复门四层（§5）↔ 采集验收门——同四层骨架：①语法 = 魔数 + 结构可解析；②范围+哈希 = 产物 sha256 对账 + deliverables 齐套；③语义 = 驱动通道回读对账（实际生效 vs 工单要求）+ env-gates 核验；④判决 = 覆盖增量进 agent 判定；台账 = debt.json ↔ covdebt 欠账报告（格式各自治）。两门拒绝一律 = 错误码 + detail + hint，大声拒绝。
 
@@ -369,7 +371,7 @@ guidance = [
 | Field | Semantics |
 |---|---|
 | `$schema` | literal `"exuvia.workorder"` |
-| `workorder_version` | `3` |
+| `workorder_version` | `4` |
 | `order_id` | opaque string；manifest 原样回显（建议取工单正文 sha256 派生） |
 | `target.package` | 已安装加壳包名 |
 | `target.apk_sha256` | exuvia 分析对象锚——采集器动作前必须核对已安装应用，不符 = 大声拒绝 |
@@ -379,9 +381,9 @@ guidance = [
 | `extraction.mode` | `"passive"`（加载期整 dex 解密族，零进程内触发）/ `"active"`（FART 式方法触发） |
 | `extraction.art_anchors` | ART 标准入口符号（§9 教义集）——挂钩引擎存在时 = 挂钩规范；被动模式 = 计时/侦察提示。只挂 ART，永不挂壳符号 |
 | `extraction.seed_plan` | nullable，active 模式专用：`file`+`sha256` 引用 fart_plan 产物文件（与工单同包交付），`hot_first` = 热层先行（§7 fart_plan hot 层） |
-| `extraction.scan` | **AGENT 按族给出的动态扫描配置**——采集器零内置扫描策略（zero-sample 从"无壳特征"延伸到"无扫描策略"，2026-10-24 维护者裁定） |
-| `extraction.scan.regions` | maps 过滤：`perms`（如 `"rw-p"`）/ `anonymous_only` / `min_size` / `max_size` / `exclude` 路径名排除表 |
-| `extraction.scan.magic[]` | `{ name, hex }` 魔数表——族参数入口；hex 为无前缀字节串，name 供 manifest/runtime-log 回报 |
+| `extraction.scan` | **AGENT 按族给出的载荷直扫配置**——载荷直扫 = 通用定位主通路（2026-11-06 设备实证，§9）；采集器零内置扫描策略（zero-sample 从"无壳特征"延伸到"无扫描策略"，2026-10-24 维护者裁定） |
+| `extraction.scan.regions` | maps 过滤：`perms`（权限过滤串——按族覆盖载荷实际落地权限，设备实证 dex 载荷可落 `"r--p"` 匿名图）/ `anonymous_only` / `min_size` / `max_size` / `exclude` 路径名排除表 |
+| `extraction.scan.magic[]` | `{ name, hex }` 魔数表——族参数入口；hex 为无前缀字节串（dex 魔数含版本字节，白名单区间 035–041），name 供 manifest/runtime-log 回报 |
 | `extraction.scan.poll` | `interval_ms` 轮询节奏 / `stable_rounds` 同一命中连续 N 轮 sha256 一致判稳（防解密进行中的半成品快照）/ `window_s` 总窗口封顶 |
 | `extraction.scan.carve` | `verify_header`（魔数 + file_size 自洽 + map_off 非零）/ `max_size` 单体上限 |
 | `env_gates[]` | 环境检查投喂表：`gate` 检查点标识 / `expected` 真机期望值 / `evidence` 侦察依据引用；采集器 preflight 记录用，不做强制 |
@@ -396,7 +398,7 @@ Example (CI fixture):
 ```json
 {
   "$schema": "exuvia.workorder",
-  "workorder_version": 3,
+  "workorder_version": 4,
   "order_id": "wo-20261024-001",
   "target": {
     "package": "com.example.app",
@@ -416,11 +418,12 @@ Example (CI fixture):
     "art_anchors": ["openInMemoryDexFilesNative", "openDexFileNative", "dvmRawDexFileOpenArray"],
     "seed_plan": null,
     "scan": {
-      "regions": { "perms": "rw-p", "anonymous_only": true, "min_size": 65536, "max_size": 67108864, "exclude": ["[stack]"] },
+      "regions": { "perms": "r--p", "anonymous_only": true, "min_size": 65536, "max_size": 67108864, "exclude": ["[stack]"] },
       "magic": [
         { "name": "dex035", "hex": "6465780a30333500" },
         { "name": "dex037", "hex": "6465780a30333700" },
-        { "name": "dex039", "hex": "6465780a30333900" }
+        { "name": "dex039", "hex": "6465780a30333900" },
+        { "name": "dex041", "hex": "6465780a30343100" }
       ],
       "poll": { "interval_ms": 200, "stable_rounds": 2, "window_s": 120 },
       "carve": { "verify_header": true, "max_size": 33554432 }
@@ -433,10 +436,12 @@ Example (CI fixture):
     "tier": "L2",
     "driver": { "required": true, "min_version": "1.4.2", "channels": ["phys_read", "hide_proc"] }
   },
-  "hygiene": { "hygiene_version": 2, "random_artifacts": true, "one_shot": true },
+  "hygiene": { "hygiene_version": 3, "random_artifacts": true, "one_shot": true },
   "deliverables": ["dex", "runtime-log"]
 }
 ```
+
+注：结构走读不进工单——2026-11-06 设备实证降级为采集器内部旁证（§9），证据入 runtime-log，无需族参数。
 
 **10.2 manifest.json（采集器 → exuvia）**
 
@@ -485,7 +490,7 @@ tell-surface 思维（§9）：一行 = 一个可观察面 = surface（能被看
 | Field | Semantics |
 |---|---|
 | `$schema` | literal `"exuvia.hygiene"` |
-| `hygiene_version` | `2` |
+| `hygiene_version` | `3` |
 | `channels[].id` | 通道标识（kebab-case，manifest.residuals_accepted 的引用键） |
 | `channels[].surface` / `.observer` | 可观察内容 / 观察者位置 |
 | `channels[].l0` / `.l1` / `.l2` | 各隐身档缓解手段（不适用 = `"n/a"`） |
@@ -497,7 +502,7 @@ Example (CI fixture)——即当前目录全量内容：
 ```json
 {
   "$schema": "exuvia.hygiene",
-  "hygiene_version": 2,
+  "hygiene_version": 3,
   "channels": [
     {
       "id": "fs-artifacts",
@@ -523,14 +528,14 @@ Example (CI fixture)——即当前目录全量内容：
     },
     {
       "id": "in-process-agent",
-      "surface": "目标进程内触发器/agent：maps 条目、额外线程、hook 痕迹",
+      "surface": "目标进程内 agent 的可观察面：maps 条目、额外线程、hook 痕迹",
       "observer": "in-process scanner（主场优势方）",
-      "l0": "错过 init 窗口再 attach；maps 名随机化",
-      "l1": "GOT/PLT-only 挂钩；dump 完成即分离，驻留秒级",
-      "l2": "passive 模式零 agent（全内核侧读写）；active 模式 agent 仅触发，批量读走内核通道",
-      "residual": "active 模式仍有秒级驻留窗口——一次性采集可承受（反不对称）",
+      "l0": "n/a——注入整体否决后目标进程内无任何我方 agent",
+      "l1": "n/a",
+      "l2": "passive 全内核侧读写，目标地址空间零我方映射；active 的触发器形态另行立项（触发 ≠ 注入读数），落定后本行复审",
+      "residual": "无进程内驻留窗口——观察面随注入否决整体消失",
       "residual_accepted": true,
-      "decision": null
+      "decision": "maintainer 裁定 2026-11-03：注入整体否决——任何向目标进程注入代码或添加映射的手段永久出局"
     },
     {
       "id": "proc-visibility",
@@ -539,7 +544,7 @@ Example (CI fixture)——即当前目录全量内容：
       "l0": "argv 随机化、短生命周期",
       "l1": "工作目录与父进程链清理",
       "l2": "内核驱动 hide_proc 通道隐藏采集链全部进程",
-      "residual": "ditPro 不过滤目标自身 /proc/self/maps 视图——agent 随机化承载，远期自研零逻辑内核驱动补齐",
+      "residual": "目标 /proc/self/maps 视图内无我方可滤之物（纯外部只读）；采集链进程存在本身由 hide_proc 承载，生效前瞬时窗口不可归零",
       "residual_accepted": true,
       "decision": null
     },
@@ -569,12 +574,55 @@ Example (CI fixture)——即当前目录全量内容：
 }
 ```
 
+**10.4 session.json（会话消息词汇表，双向共用）**
+
+E2EE 会话控制面的共用语言（2026-11-03 裁定：词汇表进主协议，语言双向共用）。控制面走 `speak()` 加密聊天帧（单帧 ≤64KB，工单 JSON 远在其内）；数据面（tar.gz 工件）走载体流式文件族（`file_begin`/`file_chunk`/`file_end` + `FileDelivered` 回执），不占词表。消息 = JSON 信封：
+
+| Field | Semantics |
+|---|---|
+| `$schema` | literal `"exuvia.session"` |
+| `session_version` | `1` |
+| `kind` | 会话词（下表九词，封闭集） |
+| `seq` | 发送方单调序号 |
+| `order_id` | 工单幂等键；与工单无关的消息 = null |
+| `body` | 词义载体——字段约定见词表，逐词随守护进程实现钉死 |
+
+词表（方向硬性，反向收到 = 协议错误）：
+
+| 方向 | kind | body 约定 |
+|---|---|---|
+| 主机→羽化 | `workorder.assign` | workorder.json 全文（§10.1）；下发即排队执行 |
+| 主机→羽化 | `workorder.cancel` | 撤销在跑工单（order_id 指定） |
+| 主机→羽化 | `status.query` | 查询守护进程/工单状态 |
+| 羽化→主机 | `workorder.ack` | 收讫回执 + 能力核对结论；不符 = 响亮拒绝（`accepted` false + 原因） |
+| 羽化→主机 | `progress` | 进度回报（枚举数 / 已挖取 / 已用时） |
+| 羽化→主机 | `event` | 结构化证据事件（探针事件流：env / dex_region / dex_object / dex_identify / drv_* / zero_trace 等——事件名表随采集器实现滚动，信封不锁） |
+| 羽化→主机 | `status.report` | status.query 应答 |
+| 羽化→主机 | `error` | 大声拒绝三件套：code + detail + hint |
+| 羽化→主机 | `done` | 完工声明（body = manifest.json §10.2；tar.gz 随后经文件族到达，以 FileDelivered 收讫） |
+
+断线与幂等：无保活帧（裁定 27——周期流量 = 时序指纹）；线死事件即知，守护进程按本机配对配置重拨，主机按 `order_id` 幂等重发；作业死线 = 工单 `window_s` + 富余。
+
+Example (CI fixture):
+
+```json
+{
+  "$schema": "exuvia.session",
+  "session_version": 1,
+  "kind": "workorder.ack",
+  "seq": 2,
+  "order_id": "wo-20261024-001",
+  "body": { "accepted": true, "capability_check": "ok" }
+}
+```
+
 ## 11. Version anchors
 
 ```text
-SKILL_VERSION: 1.13.4
+SKILL_VERSION: 1.13.5
 handoff_version: 1    goal_version: 1    proposal_version: 1
-workorder_version: 3    manifest_version: 2    hygiene_version: 2
+workorder_version: 4    manifest_version: 2    hygiene_version: 3
+session_version: 1
 ```
 
 - File version = methodology + §8 fence snapshot. Format changes start in fixtures, serde types follow, CI binds both directions.
@@ -604,5 +652,6 @@ workorder_version: 3    manifest_version: 2    hygiene_version: 2
 - 1.13.1: 理念勘定（无协议变更）——2026-10-24 维护者两项裁定落档：① **frida 整体移除出采集器架构**（不做 MVP 降级、不留 M4 触发器备胎；任何降级/保底策略均为多余——内核读写作业路径唯一，失败 = 大声拒绝，不静默降档），修正 1.13.0 "降格为 M4 触发器"的过渡表述；② **驱动形态泛化**——不限 KPM，任何支持读写的内核驱动（独立 .ko 等）皆可对接，通道形态不限死 syscall，用户经 driver profile 自调对接参数，ditPro KPM profile 内置为默认方案；§9 kpm_client 四动词冻结面相应改写为 profile 驱动 op 集（probe/read/read_list/write/hide/status）。
 - 1.13.3: 理念勘定（无协议变更）——2026-11-03 维护者裁定链落档：① **注入整体否决**（任何向目标进程注入代码/添加映射的手段永久出局，含"注入即分离"用户态变体，§9 隐身分级 L1 枚举相应移除；根据 = 主场优势定律 + "读不需要注入"；主动触发归自研触发器线，触发 ≠ 注入读数）；② **被动定位 = ART Runtime 走读唯一线**（沿 Runtime → 已注册 DexFile 枚举，begin/size 直取、location/checksum 白拿；magic 扫描删除——§10.1 scan 段协议重写随设备探针结论落地，单线无降级；ART 结构非稳定 ABI，per-API-Level 偏移表为数据文件随采集器发行，表未入库 = 大声拒绝；目标按包名定位进程 + DexFile location 含包名双保险）；③ 采集器命名**羽化**（`eclosion/`）并与 exuvia **同仓**（2026-11-03 推翻"独立仓"表述；独立二进制 + 独立版本号 + 仅三件套契约耦合保留）；④ 打包双形态（精简包 bionic 动态 = 默认，自足包 musl 静态 = 备选——精简包缺环境时启用；同一核心代码两种产物，每次发布双件）；⑤ E2EE 载体锚定 **4.1.0**（配对秘密当场出示 + 常备门禁永不消耗、DoS 免疫——暗号链 4.0.0 已整体废除；回传走流式文件族：同意门槛主机侧 set_receive(Always)、FileDelivered 收讫回执、4.1.0 起无大小上限；两端同嵌 4.1.0——文件互传与 ≤4.0.0 断代；无心跳——线死事件 + 写失败 + 工单 window_s 作业死线兜底，不发明周期流量）；⑥ 原档"maps 自视图过滤缺口"随注入否决消失（纯外部只读，目标地址空间零我方痕迹；§10.3 卫生目录行内容修订属协议变更，随下一协议批一并升版，本版不动目录）。协议版本不动（workorder 3 / manifest 2 / hygiene 2），SKILL_VERSION 1.13.3 同 commit。
 - 1.13.4: 理念增订（无协议变更）——① **偏移双层通用化**（2026-11-04 维护者裁定：不得仅适配单台测试机）：§9 ART 走读的偏移策略由"per-Level 表唯一通路"修正为"通用自证层（三重交叉验证，与机型无关）为默认通路 + 按 libart.so build ID 索引的实测快表为纯加速、自证永不跳过、表不符响亮拒绝"；② **羽化以子模块落仓**（eclosion/ 成为 workspace 成员，独立二进制 exuvia-eclosion、独立版本号 0.1.0 起；首批入库代码 = 第 1 段设备探针，probe 动词承载 #11–#15；run/stop/status 守护三动词占位响亮未实现）。协议版本不动（workorder 3 / manifest 2 / hygiene 2），SKILL_VERSION 1.13.4 同 commit。
+- 1.13.5: 协议变更——第 2 段协议批落档（设备探针三段实证后）：① **workorder v4**（3→4）：`extraction.scan` 语义重写为载荷直扫配置（通用定位主通路——Android 15/arm64 三轮上机：结构走读死于 Java 堆压缩指针边界，载荷直扫三轮三中）；`regions.perms` 按族覆盖载荷实际落地权限（实证 dex 载荷落 r--p 匿名图），magic 白名单区间 035–041；结构走读不进工单（降级为采集器内部旁证）。② **会话消息词汇表入 §10.4**（2026-11-03 裁定"进主协议"落地）：JSON 信封（$schema/session_version/kind/seq/order_id/body，≤64KB speak 帧），kind 九词封闭集（workorder.assign/.cancel/.ack、status.query/.report、progress、event、error、done），order_id 幂等、无保活帧、数据面走文件族不占词；新增 SESSION_VERSION=1 与 serde 类型三向锚定（fixture 第十件，kinds 1023）。③ **hygiene v3**（2→3）：in-process-agent 行随注入否决重写（目标进程内零 agent，passive 纯外部只读；active 待自研触发器形态裁定后复审），proc-visibility 行残余重写（目标 maps 视图无可滤之物）。④ 理念勘定：ditPro ABI 描述订正为设备实证版（`syscall(18, 0x268, req_ptr, cmd)` 三参约定、读路径无密钥验证、成功以字节比对为准——原"nomi 握手 + 指纹令牌 / cmd@+0x280"存档描述作废）；§9 被动定位通路修正为载荷直扫主通路 + 走读旁证；真机验证最小化裁定落档（非必要不上机、尽可能后置、同一问题不重复上机）。WORKORDER_VERSION 4 / MANIFEST_VERSION 2 / HYGIENE_VERSION 3 / SESSION_VERSION 1，SKILL_VERSION 1.13.5 同 commit。
 - 1.13.2: 协议变更——传输线与命名单元重裁（2026-10-24 维护者裁定链）：① `$schema` 去 collector 中缀（`exuvia.workorder` / `exuvia.manifest` / `exuvia.hygiene`，与静态六物平齐——执行者身份退出协议字段）；② 工单删 `result_channel`（`ResultMethod`/`ArchiveKind`/`WoResultChannel` 随废）——传输唯一线 = E2EE 加密 TCP 会话、归档唯一形态 = tar.gz，文字约定不占字段；③ `target.launch_activity` 改必填（启动目标恒为采集器职责，采集器 am start）；④ `stealth.kpm`→`stealth.driver`、manifest `kpm`→`driver`（KpmReq/KpmChannel/KpmStatus → DriverReq/DriverChannel/DriverStatus——任何读写内核驱动同走一字段，KPM / 独立 .ko 等形态皆可，通道值 phys_read/phys_write/hide_proc 不变）；⑤ 卫生布尔 `no_tcp` 删除（会话线是唯一网络通道为构造事实）；⑥ §9 铁律 5 重写：无 adb——传输与执行走 E2EE 加密 TCP 会话（守护进程反向拨号、设备零监听口、配对共享秘密 + 门闩机钥认证、逐会话新密钥、流量形状混淆），守护进程由用户手动启停，无降级无备选；铁律 4 括注与 §9/§10 残留 frida 字样扫净，卫生目录 transport 通道重写为 E2EE 会话面（残余 = /proc/net/tcp 已建立连接，内核 /proc 过滤原语承载）；⑦ §10 引言增外包循环五角色两线对照表 + 采集验收门四层骨架对齐（①语法 = 魔数+结构可解析 ②范围+哈希 = 产物对账+齐套 ③语义 = 驱动通道回读+env-gates 核验 ④判决 = 覆盖增量）。WORKORDER_VERSION 3 / MANIFEST_VERSION 2 / HYGIENE_VERSION 2，SKILL_VERSION 1.13.2 同 commit。
 - Before adapting to a new environment, compare `exuvia --version` against these.

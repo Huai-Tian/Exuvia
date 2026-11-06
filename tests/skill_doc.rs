@@ -1,7 +1,7 @@
 //! 文档即测试：SKILL.md 的 fixture 与版本锚点是活契约。
 //! 三向锚定：SKILL 示例 ↔ serde 类型 ↔ 版本常量。任一侧漂移，此测试即红。
 
-use exuvia::protocol::{CollectorManifest, Goal, HygieneCatalog, Proposal, WorkOrder};
+use exuvia::protocol::{CollectorManifest, Goal, HygieneCatalog, Proposal, SessionEnvelope, WorkOrder};
 use exuvia::report::{DebtFile, EvidenceManifest, Report, WorkPackage};
 
 fn skill_md() -> String {
@@ -49,7 +49,7 @@ fn fence_extracts_parses_and_has_first_family() {
 #[test]
 fn skill_json_fixtures_parse_through_serde_types() {
     let blocks = json_blocks(&skill_md());
-    assert!(blocks.len() >= 9, "expected goal + proposal + report + debt + workpackage + evidence + workorder + manifest + hygiene fixtures");
+    assert!(blocks.len() >= 10, "expected goal + proposal + report + debt + workpackage + evidence + workorder + manifest + hygiene + session fixtures");
     let mut kinds = 0;
     for b in &blocks {
         let v: serde_json::Value = serde_json::from_str(b).expect("fixture is valid JSON");
@@ -103,10 +103,16 @@ fn skill_json_fixtures_parse_through_serde_types() {
                 assert_eq!(h.hygiene_version, exuvia::version::HYGIENE_VERSION);
                 kinds |= 256;
             }
+            Some("exuvia.session") => {
+                let se: SessionEnvelope = serde_json::from_str(b).expect("session fixture matches SessionEnvelope type (deny_unknown_fields)");
+                assert_eq!(se.session_version, exuvia::version::SESSION_VERSION);
+                assert_eq!(se.schema, "exuvia.session");
+                kinds |= 512;
+            }
             other => panic!("fixture with unknown $schema {other:?} — every json block in SKILL.md must be an anchored fixture"),
         }
     }
-    assert_eq!(kinds, 511, "all nine protocol fixtures must be present");
+    assert_eq!(kinds, 1023, "all ten protocol fixtures must be present");
 }
 
 #[test]
@@ -133,6 +139,7 @@ fn version_anchors_match_source_constants() {
         ("workorder_version", exuvia::version::WORKORDER_VERSION),
         ("manifest_version", exuvia::version::MANIFEST_VERSION),
         ("hygiene_version", exuvia::version::HYGIENE_VERSION),
+        ("session_version", exuvia::version::SESSION_VERSION),
     ] {
         let line = anchors.lines().find(|l| l.contains(name)).unwrap_or_else(|| panic!("{name} anchor exists"));
         let doc: i64 = line

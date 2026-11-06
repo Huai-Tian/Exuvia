@@ -94,8 +94,8 @@ pub struct WoExtraction {
     pub art_anchors: Vec<String>,
     /// active 模式专用：fart_plan 产物文件引用（与工单同包交付）
     pub seed_plan: Option<SeedPlanRef>,
-    /// AGENT 按族给出的动态扫描配置——采集器零内置扫描策略
-    /// （zero-sample 从"无壳特征"延伸到"无扫描策略"，2026-10-24 维护者裁定）
+    /// AGENT 按族给出的载荷直扫配置——载荷直扫 = 通用定位主通路（2026-11-06 设备实证，§9）；
+    /// 采集器零内置扫描策略（zero-sample 从"无壳特征"延伸到"无扫描策略"，2026-10-24 维护者裁定）
     pub scan: WoScan,
 }
 

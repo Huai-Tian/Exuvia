@@ -5,10 +5,12 @@
 pub mod collector;
 pub mod goal;
 pub mod proposal;
+pub mod session;
 
 pub use collector::{CollectorManifest, HygieneCatalog, WorkOrder};
 pub use goal::{Goal, Target, Track};
 pub use proposal::{Claim, ClaimKind, Proposal};
+pub use session::{SessionEnvelope, SessionKind};
 
 use clap::ValueEnum;
 

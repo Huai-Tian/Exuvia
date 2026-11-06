@@ -185,7 +185,7 @@ fn main() -> ExitCode {
     if cli.version {
         if cli.json {
             println!(
-                "{{\"version\":\"{}\",\"skill_version\":\"{}\",\"handoff_version\":{},\"goal_version\":{},\"proposal_version\":{},\"workorder_version\":{},\"manifest_version\":{},\"hygiene_version\":{}}}",
+                "{{\"version\":\"{}\",\"skill_version\":\"{}\",\"handoff_version\":{},\"goal_version\":{},\"proposal_version\":{},\"workorder_version\":{},\"manifest_version\":{},\"hygiene_version\":{},\"session_version\":{}}}",
                 version::EXUVIA_VERSION,
                 version::SKILL_VERSION,
                 version::HANDOFF_VERSION,
@@ -193,7 +193,8 @@ fn main() -> ExitCode {
                 version::PROPOSAL_VERSION,
                 version::WORKORDER_VERSION,
                 version::MANIFEST_VERSION,
-                version::HYGIENE_VERSION
+                version::HYGIENE_VERSION,
+                version::SESSION_VERSION
             );
         } else {
             println!("exuvia {}", version::EXUVIA_VERSION);
