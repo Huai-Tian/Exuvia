@@ -105,7 +105,6 @@ async fn session(
     out_dir: PathBuf,
     secret: &str,
 ) -> Result<CollectSummary, String> {
-    let t0 = Instant::now();
     let inner = session_inner(cfg, wo_value, wo_anchor, order_id, out_dir, secret);
     if cfg.timeout_s > 0 {
         match tokio::time::timeout(Duration::from_secs(cfg.timeout_s), inner).await {
@@ -258,8 +257,7 @@ async fn session_inner(
     let gz = flate2::read::GzDecoder::new(&archive[..]);
     let mut tar = tar::Archive::new(gz);
     let mut extracted: Vec<(String, String, u64)> = Vec::new();
-    let mut entries = Vec::new();
-    {
+    let entries: Vec<(String, Vec<u8>)> = {
         let mut tmp = Vec::new();
         for e in tar.entries().map_err(|e| format!("bad-archive: tar 解开失败: {e}"))? {
             let mut e = e.map_err(|e| format!("bad-archive: {e}"))?;
@@ -272,8 +270,8 @@ async fn session_inner(
             std::io::Read::read_to_end(&mut e, &mut data).map_err(|e| e.to_string())?;
             tmp.push((name, data));
         }
-        entries = tmp;
-    }
+        tmp
+    };
     for (name, data) in entries {
         let digest = sha256_hex(&data);
         let expect = m.artifacts.iter().find(|a| a.name == name);

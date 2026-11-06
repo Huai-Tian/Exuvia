@@ -1,3 +1,4 @@
+#![cfg(unix)] // 羽化是设备侧执行器——测试随库同门(Windows 桌面不编译)
 // 契约镜像锚定:eclosion 侧手写类型 ↔ 仓根 SKILL.md §10 fixture 双向校验。
 // 镜像漂移即红——本测试就是"唯一耦合面"在羽化侧的那一半 CI。
 use eclosion::proto::*;

@@ -1,6 +1,10 @@
 // 羽化(eclosion)库件——守护三动词 / 会话层 / 采集引擎 / 驱动对接层。
 // 零内置策略的纯执行引擎:策略全部来自工单(SKILL §10 契约),驱动协议全部来自 profile(§4 立项书)。
 // 契约类型 = 本仓 SKILL.md fixture 的手写镜像(tests/fixture_anchor.rs 双向锚定)。
+//
+// 平台门:羽化是设备侧执行器,目标平台只有 Android/Linux(宿主侧 collect 在 exuvia 包)。
+// Windows 桌面 `cargo test --workspace` 不应编译它——全库 unix 关门,Windows 只剩 main.rs 里的响亮桩。
+#![cfg(unix)]
 
 pub mod channel;
 pub mod daemon;

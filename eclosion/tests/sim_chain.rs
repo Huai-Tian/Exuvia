@@ -1,3 +1,4 @@
+#![cfg(unix)] // 羽化是设备侧执行器——测试随库同门(Windows 桌面不编译)
 // 模拟全链自走通(立项书 §8 出口:假驱动 profile + 假内存图,桌面零真机):
 //   真子进程跑 run 动词(会话层 + 守护全在环内)↔ 测试扮主机
 //   → workorder.assign → ack → event 流水 → done(manifest)→ tar.gz 文件族收讫

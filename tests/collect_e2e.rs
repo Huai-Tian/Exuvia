@@ -3,7 +3,7 @@
 //   ② 坏版本工单在监听前响亮拒绝
 //   ③ Ctrl+C → workorder.cancel 帧实发
 //   ④ 皇冠：真羽化守护子进程 ↔ 真 collect 子进程（§10.4 双向互操作实证）
-use e2ee::{Event, Person, Receive};
+use e2ee::{Event, Person};
 use serde_json::json;
 
 const SECRET: &[u8] = b"collect-e2e-pairing-secret";
@@ -238,6 +238,7 @@ fn collect_rejects_bad_version_before_listen() {
     std::fs::remove_dir_all(&tmp).ok();
 }
 
+#[cfg(unix)] // 撤销信号走 SIGINT(libc);Windows 控制台风慕另行裁定
 #[test]
 fn collect_cancel_sends_cancel_frame() {
     let tmp = std::env::temp_dir().join(format!("collect-cancel-{}", std::process::id()));
@@ -271,7 +272,7 @@ fn collect_cancel_sends_cancel_frame() {
         });
     });
 
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_exuvia"))
+    let child = std::process::Command::new(env!("CARGO_BIN_EXE_exuvia"))
         .args(["collect", "--run", "--listen", &format!("127.0.0.1:{port}"),
                "--workorder", &wo_p.display().to_string(), "--out", &tmp.join("out").display().to_string()])
         .env("EXUVIA_SECRET", std::str::from_utf8(SECRET).unwrap())
@@ -288,6 +289,7 @@ fn collect_cancel_sends_cancel_frame() {
 }
 
 /// 皇冠:真羽化守护 ↔ 真 collect —— §10.4 双向互操作实证
+#[cfg(unix)] // 守护只跑 Android/Linux;Windows 桌面此案缺席(宿主两案照跑)
 #[test]
 fn collect_real_daemon_interop() {
     let exuvia_bin = env!("CARGO_BIN_EXE_exuvia");
