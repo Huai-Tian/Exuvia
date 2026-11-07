@@ -184,6 +184,13 @@ fn sha256_file(path: &std::path::Path) -> Result<String, String> {
     ))
 }
 
+/// 结构化错误行（CLI 就是 API，输出恒 JSON）——必须走 serde 序列化。
+/// 手拼 format! JSON 遇反斜杠/引号即碎（Windows 路径 `\U` 非法转义曾使
+/// collect 摘要 stdout 不可解析）；旧的 .replace('"', "'") 只挡引号不挡反斜杠。
+fn err_line(e: &str) -> String {
+    serde_json::json!({"error": e}).to_string()
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
@@ -228,7 +235,7 @@ fn main() -> ExitCode {
                 ExitCode::SUCCESS
             }
             Err(e) => {
-                eprintln!("{{\"error\":\"{e}\"}}");
+                eprintln!("{}", err_line(&e));
                 ExitCode::FAILURE
             }
         },
@@ -240,13 +247,13 @@ fn main() -> ExitCode {
                 ExitCode::SUCCESS
             }
             Err(e) => {
-                eprintln!("{{\"error\":\"{}\"}}", e.replace('"', "'"));
+                eprintln!("{}", err_line(&e));
                 ExitCode::FAILURE
             }
         },
         Some(Cmd::Collect { run, listen, workorder, out, timeout }) => {
             if !run || workorder.is_none() {
-                eprintln!("{{\"error\":\"collect 需要 --run --workorder <FILE>\"}}");
+                eprintln!("{}", err_line("collect 需要 --run --workorder <FILE>"));
                 return ExitCode::FAILURE;
             }
             let cfg = exuvia::collect::RunConfig {
@@ -257,23 +264,25 @@ fn main() -> ExitCode {
             };
             match exuvia::collect::run(&cfg) {
                 Ok(s) => {
-                    let arts: Vec<String> = s
+                    let arts: Vec<serde_json::Value> = s
                         .artifacts
                         .iter()
-                        .map(|(n, h, b)| format!("{{\"name\":\"{n}\",\"sha256\":\"{h}\",\"size_bytes\":{b}}}"))
+                        .map(|(n, h, b)| serde_json::json!({"name": n, "sha256": h, "size_bytes": b}))
                         .collect();
-                    println!(
-                        "{{\"status\":\"ok\",\"order_id\":\"{}\",\"out\":\"{}\",\"artifacts\":[{}],\"events\":{},\"elapsed_ms\":{}}}",
-                        s.order_id,
-                        s.out_dir.display(),
-                        arts.join(","),
-                        s.events,
-                        s.elapsed_ms
-                    );
+                    // serde 序列化——out 路径在 Windows 上带反斜杠，手拼必碎
+                    let summary = serde_json::json!({
+                        "status": "ok",
+                        "order_id": s.order_id,
+                        "out": s.out_dir.display().to_string(),
+                        "artifacts": arts,
+                        "events": s.events,
+                        "elapsed_ms": s.elapsed_ms,
+                    });
+                    println!("{summary}");
                     ExitCode::SUCCESS
                 }
                 Err(e) => {
-                    eprintln!("{{\"error\":\"{}\"}}", e.replace('"', "'"));
+                    eprintln!("{}", err_line(&e));
                     ExitCode::FAILURE
                 }
             }
@@ -286,7 +295,7 @@ fn main() -> ExitCode {
                     ExitCode::SUCCESS
                 }
                 Err(e) => {
-                    eprintln!("{{\"error\":\"{}\"}}", e.replace('"', "'"));
+                    eprintln!("{}", err_line(&e));
                     ExitCode::FAILURE
                 }
             }
@@ -316,7 +325,7 @@ fn main() -> ExitCode {
             let params = match parse_params() {
                 Ok(p) => p,
                 Err(e) => {
-                    eprintln!("{{\"error\":\"{e}\"}}");
+                    eprintln!("{}", err_line(&e));
                     return ExitCode::FAILURE;
                 }
             };
@@ -327,11 +336,11 @@ fn main() -> ExitCode {
                         predicates.push(if is_rc4 { Predicate::Rc4 { key, params } } else { Predicate::Xor { key } })
                     }
                     Ok(_) => {
-                        eprintln!("{{\"error\":\"key {k} is empty\"}}");
+                        eprintln!("{}", err_line(&format!("key {k} is empty")));
                         return ExitCode::FAILURE;
                     }
                     Err(e) => {
-                        eprintln!("{{\"error\":\"{}\"}}", e.replace('"', "'"));
+                        eprintln!("{}", err_line(&e));
                         return ExitCode::FAILURE;
                     }
                 }
@@ -341,18 +350,18 @@ fn main() -> ExitCode {
                 let iv = match key_spec_bytes(aes_iv.as_deref().unwrap_or("")) {
                     Ok(v) => v,
                     Err(e) => {
-                        eprintln!("{{\"error\":\"{}\"}}", e.replace('"', "'"));
+                        eprintln!("{}", err_line(&e));
                         return ExitCode::FAILURE;
                     }
                 };
                 let (xor_prefix, xor_key) = match (int_auto(&aes_xor_prefix), int_auto(&aes_xor_key)) {
                     (Ok(p), Ok(k)) if k <= 0xff => (p, k as u8),
                     (Ok(_), Ok(_)) => {
-                        eprintln!("{{\"error\":\"--aes-xor-key {aes_xor_key} > 0xff\"}}");
+                        eprintln!("{}", err_line(&format!("--aes-xor-key {aes_xor_key} > 0xff")));
                         return ExitCode::FAILURE;
                     }
                     (Err(e), _) | (_, Err(e)) => {
-                        eprintln!("{{\"error\":\"{e}\"}}");
+                        eprintln!("{}", err_line(&e));
                         return ExitCode::FAILURE;
                     }
                 };
@@ -364,7 +373,7 @@ fn main() -> ExitCode {
                             params: AesCbcTailParams { xor_prefix, xor_key },
                         }),
                         Err(e) => {
-                            eprintln!("{{\"error\":\"{}\"}}", e.replace('"', "'"));
+                            eprintln!("{}", err_line(&e));
                             return ExitCode::FAILURE;
                         }
                     }
@@ -377,7 +386,7 @@ fn main() -> ExitCode {
                     ExitCode::SUCCESS
                 }
                 Err(e) => {
-                    eprintln!("{{\"error\":\"{}\"}}", e.replace('"', "'"));
+                    eprintln!("{}", err_line(&e));
                     ExitCode::FAILURE
                 }
             }
@@ -443,7 +452,7 @@ fn main() -> ExitCode {
                     ExitCode::SUCCESS
                 }
                 Err(e) => {
-                    eprintln!("{{\"error\":\"{}\",\"detail\":\"{}\"}}", e.code, e.detail.replace('"', "'"));
+                    eprintln!("{}", serde_json::json!({"error": e.code, "detail": e.detail}));
                     ExitCode::FAILURE
                 }
             },
@@ -515,7 +524,7 @@ fn main() -> ExitCode {
                         ExitCode::SUCCESS
                     }
                     Err(e) => {
-                        eprintln!("{{\"error\":\"{}\"}}", e.replace('"', "'"));
+                        eprintln!("{}", err_line(&e));
                         ExitCode::FAILURE
                     }
                 }
