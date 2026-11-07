@@ -100,7 +100,11 @@ impl Channel for SyscallChannel {
                 let mut buf = vec![0u8; len];
                 let req = Req { pid, _p0: 0, addr, buf: buf.as_mut_ptr() as u64, size: len as u64, flags: 0, _p1: 0 };
                 let r = self.raw(&req as *const Req as u64, cmd);
-                if r == 0 { Ok(buf) } else { Err(format!("驱动读失败 ret={r}")) }
+                // 返回值语义 = 设备实证 ABI(probe/drv.rs 2026-11-06 静态逆向 + 三轮上机):
+                // ret 1=成功 / 0=失败(0008 初版按 ret==0 判成功,方向写反——真机上每次
+                // 成功读都会被误判失败,守护死在握手)。返回值只作失败信号;成功与否的
+                // 最终判据是字节比对(handshake 金丝雀 / 引擎 carve 头校验),与教义一致。
+                if r == 1 { Ok(buf) } else { Err(format!("驱动读失败 ret={r}")) }
             }
             _ => Err(format!("read 布局 {layout:?} 未实现")),
         }

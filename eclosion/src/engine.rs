@@ -59,7 +59,9 @@ pub fn execute(
             let mut pids = find_pid_by_pkg(&wo.target.package);
             if pids.is_empty() {
                 log_ev("target_launch", json!({"activity": wo.target.launch_activity}));
-                let ok = std::process::Command::new("am")
+                // am 用绝对路径(su -c 环境的 PATH 不保证含 /system/bin;桌面上无 am,此路径不可达)
+                let am = if std::path::Path::new("/system/bin/am").exists() { "/system/bin/am" } else { "am" };
+                let ok = std::process::Command::new(am)
                     .args(["start", "-n", &wo.target.launch_activity])
                     .status().map(|s| s.success()).unwrap_or(false);
                 if !ok { return Err(("launch-failed".into(), wo.target.launch_activity.clone())); }
@@ -197,14 +199,28 @@ pub fn execute(
     Ok((manifest, archive))
 }
 
-/// 已安装应用定位:/data/app/<pkg>-*/base.apk 布局(apk_root 参数化,模拟可换)
+/// 已安装应用定位(apk_root 参数化,模拟可换;真机两种 /data/app 布局):
+///   ≤Android 10:/data/app/<pkg>-<rand>/base.apk(包目录在一层)
+///   Android 11+:/data/app/~~<rand>==/<pkg>-<rand>==/base.apk(一层是随机壳目录,包目录在二层)
 fn find_installed_apk(root: &std::path::Path, pkg: &str) -> Option<std::path::PathBuf> {
+    let hit = |name: &str| name == pkg || (name.starts_with(pkg) && name[pkg.len()..].starts_with('-'));
     let rd = std::fs::read_dir(root).ok()?;
     for e in rd.flatten() {
         let name = e.file_name().to_string_lossy().to_string();
-        if name == pkg || (name.starts_with(pkg) && name[pkg.len()..].starts_with('-')) {
+        if hit(&name) {
             let p = e.path().join("base.apk");
             if p.exists() { return Some(p); }
+        }
+        // Android 11+ 两层布局:下钻一层找包目录(壳目录名任意,如 ~~xxxx==)
+        if e.path().is_dir() {
+            if let Ok(rd2) = std::fs::read_dir(e.path()) {
+                for e2 in rd2.flatten() {
+                    if hit(&e2.file_name().to_string_lossy()) {
+                        let p = e2.path().join("base.apk");
+                        if p.exists() { return Some(p); }
+                    }
+                }
+            }
         }
     }
     None
@@ -367,4 +383,45 @@ fn device_info() -> DeviceInfo {
 /// env-gate 预检:prop 类门现场读值比对;其他门类如实记未通过(记录用,不强制)
 fn eval_gate(g: &WoEnvGate) -> bool {
     if g.gate.starts_with("ro.") { prop(&g.gate) == g.expected } else { false }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_installed_apk;
+
+    /// 0015 锚点:已装应用定位必须同时认 ≤Android 10 一层布局与 Android 11+ 两层布局
+    /// (0008 初版只认一层——真机 Android 15 是 ~~rand==/<pkg>-rand== 两层,引擎会 apk-absent 响亮失败)
+    #[test]
+    fn apk_lookup_legacy_one_level() {
+        let tmp = std::env::temp_dir().join(format!("eclosion-apk1-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("com.sim.app-1")).unwrap();
+        std::fs::write(tmp.join("com.sim.app-1/base.apk"), b"apk").unwrap();
+        assert!(find_installed_apk(&tmp, "com.sim.app").is_some(), "一层布局命中");
+        assert!(find_installed_apk(&tmp, "com.other").is_none(), "无关包不命中");
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn apk_lookup_modern_two_level() {
+        let tmp = std::env::temp_dir().join(format!("eclosion-apk2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let pkg_dir = tmp.join("~~aGb7xQ==").join("com.sim.app-Xy9mQ==");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(pkg_dir.join("base.apk"), b"apk").unwrap();
+        let got = find_installed_apk(&tmp, "com.sim.app").expect("两层布局命中");
+        assert!(got.ends_with("base.apk"), "命中 base.apk: {}", got.display());
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn apk_lookup_prefix_not_partial() {
+        // 前缀同名包不误命中:com.sim.app2 不得命中 com.sim.app 的目录(旧判据同款)
+        let tmp = std::env::temp_dir().join(format!("eclosion-apk3-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("com.sim.app2-1")).unwrap();
+        std::fs::write(tmp.join("com.sim.app2-1/base.apk"), b"apk").unwrap();
+        assert!(find_installed_apk(&tmp, "com.sim.app").is_none(), "com.sim.app ≠ com.sim.app2");
+        std::fs::remove_dir_all(&tmp).ok();
+    }
 }

@@ -111,9 +111,10 @@ async fn sim_full_chain() {
         "{DEX_VA:012x}-{:012x} r--p 00000000 00:00 0          [anon:dalvik-DEX]\n{:012x}-{:012x} rw-p 00000000 00:00 0          [anon:dalvik-alloc]\n",
         DEX_VA + 0x4000, DEX_VA + 0x4000, DEX_VA + 0x6000)).unwrap();
     let apk_root = tmp.join("apps");
-    std::fs::create_dir_all(apk_root.join("com.sim.app-1")).unwrap();
+    // Android 11+ 两层布局(0015):/data/app/~~<rand>==/<pkg>-<rand>==/base.apk
+    std::fs::create_dir_all(apk_root.join("~~simRand==").join("com.sim.app-1")).unwrap();
     let apk_bytes = b"sim-apk-bytes";
-    std::fs::write(apk_root.join("com.sim.app-1/base.apk"), apk_bytes).unwrap();
+    std::fs::write(apk_root.join("~~simRand==/com.sim.app-1/base.apk"), apk_bytes).unwrap();
     let profile_p = tmp.join("profile.json");
     std::fs::write(&profile_p, json!({
         "driver_profile_version": 1,
