@@ -6,7 +6,7 @@
 //! Windows 路径：本骨架先无 rlimit（Job Object 留 release 工程期），软超时兜底——注释明示，勿删 TODO。
 
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 pub const SOFT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -69,11 +69,17 @@ pub fn check_imports(artifact_src: &str) -> Result<(), SandboxError> {
 
 /// 在沙箱中执行 entry(input) -> bytes。返回原始输出——对比与判定由调用方（Rust）完成。
 pub fn run_artifact(artifact_path: &str, entry: &str, input: &[u8]) -> Result<Vec<u8>, SandboxError> {
-    let mut cmd = Command::new("python3");
+    // 与启动预检同一解析序（install::resolve_python）——预检过、运行时换名找 = 自检撒谎
+    let launcher = crate::install::resolve_python()
+        .ok_or_else(|| SandboxError::Spawn("no working python launcher".into()))?;
+    let mut cmd = launcher.command();
     let meta = format!(r#"{{"artifact":{artifact_path:?},"entry":{entry:?}}}"#);
     cmd.arg("-I").arg("-c").arg(RUNNER).arg(&meta);
     cmd.env_clear();
+    #[cfg(unix)]
     cmd.env("PATH", "/usr/local/bin:/usr/bin:/bin");
+    #[cfg(windows)]
+    cmd.env("PATH", r"C:\Windows\System32;C:\Windows"); // env_clear 后给最小系统 PATH
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
 
     #[cfg(unix)]

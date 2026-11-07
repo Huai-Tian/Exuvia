@@ -113,19 +113,40 @@ fn stage_fake_device(tmp: &std::path::Path) -> (Vec<u8>, std::path::PathBuf, Str
     (dex, profile_p, sha256_hex(apk_bytes))
 }
 
+/// 拨号 30s 窗口，尽则响亮——静默放弃后干等 = 测试假挂死（Windows 排障教训：
+/// 主机若被启动预检拦下早退，旧 5s 窗口静默落空，全链挂死无任何线索）
+async fn dial_host(me: &Person, port: u16) {
+    let mut dialed = false;
+    for _ in 0..300 {
+        if me.dial_secret(&format!("127.0.0.1:{port}"), Some(SECRET)).await.is_ok() {
+            dialed = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(
+        dialed,
+        "假守护拨号 30s 尽：主机从未监听 127.0.0.1:{port}——主机大概率已早退\
+         （先单独跑 collect_rejects_bad_version_before_listen 看其 stderr）"
+    );
+}
+
 /// 假守护剧本：接线 → idle → 收单 → ack → 事件 → done(manifest)→ 文件族
 async fn fake_daemon(port: u16, dex: &[u8]) {
     let (me, mut ev) = Person::born("fake-daemon", "127.0.0.1:0").await.unwrap();
-    for _ in 0..50 {
-        if me.dial_secret(&format!("127.0.0.1:{port}"), Some(SECRET)).await.is_ok() { break; }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    // 收单
-    let text = loop {
-        if let Some(Event::Heard { text, .. }) = ev.recv().await {
-            if text.contains("workorder.assign") { break text; }
+    dial_host(&me, port).await;
+    // 收单（60s 死线：对端不来 = 响亮失败，不许挂死）
+    let text = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        loop {
+            if let Some(Event::Heard { text, .. }) = ev.recv().await {
+                if text.contains("workorder.assign") {
+                    break text;
+                }
+            }
         }
-    };
+    })
+    .await
+    .expect("60s 未收到 workorder.assign——主机侧流程卡死");
     let env: serde_json::Value = serde_json::from_str(&text).unwrap();
     let oid = env["order_id"].as_str().unwrap().to_string();
     let wo_anchor = sha256_hex(&serde_json::to_vec(&env["body"]).unwrap());
@@ -167,10 +188,16 @@ async fn fake_daemon(port: u16, dex: &[u8]) {
     });
     me.speak(&envelope("done", 3, Some(&oid), manifest)).await.unwrap();
     me.file_begin("artifacts.tar.gz", gz.len() as u64).await.unwrap();
-    // 等应允再喂块
-    loop {
-        if let Some(Event::FileAccepted { .. }) = ev.recv().await { break; }
-    }
+    // 等应允再喂块（60s 死线）
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        loop {
+            if let Some(Event::FileAccepted { .. }) = ev.recv().await {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("60s 未等到 FileAccepted——主机侧文件族卡死");
     me.file_chunk(&gz).await.unwrap();
     me.file_end().await.unwrap();
     // 等主机收讫回执,随后体面离场
@@ -197,11 +224,30 @@ fn collect_full_chain_scripted_daemon() {
         let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
         rt.block_on(fake_daemon(port, &dex2));
     });
-    let host = std::process::Command::new(env!("CARGO_BIN_EXE_exuvia"))
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_exuvia"))
         .args(["collect", "--run", "--listen", &format!("127.0.0.1:{port}"),
                "--workorder", &wo_p.display().to_string(), "--out", &out.display().to_string()])
         .env("EXUVIA_SECRET", std::str::from_utf8(SECRET).unwrap())
-        .output().expect("collect 子进程");
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn().expect("collect 子进程拉起");
+    // 看门狗：150s 不退场 = 主机卡死——杀掉、收尸、带双端输出响亮失败（不许挂死测试台）
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(150);
+    let host = loop {
+        if child.try_wait().expect("try_wait").is_some() {
+            break child.wait_with_output().expect("collect 输出收割");
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let out = child.wait_with_output().ok();
+            panic!(
+                "collect 全链 150s 超时（主机卡死，已杀）\nstdout: {}\nstderr: {}",
+                out.as_ref().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default(),
+                out.as_ref().map(|o| String::from_utf8_lossy(&o.stderr).into_owned()).unwrap_or_default()
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
     daemon.join().unwrap();
 
     assert!(host.status.success(), "collect 退场: {}", String::from_utf8_lossy(&host.stderr));
@@ -234,8 +280,15 @@ fn collect_rejects_bad_version_before_listen() {
                "--workorder", &wo_p.display().to_string()])
         .env("EXUVIA_SECRET", "x")
         .output().unwrap();
-    assert!(!host.status.success());
-    assert!(String::from_utf8_lossy(&host.stderr).contains("bad-version"), "响亮拒绝: {}", String::from_utf8_lossy(&host.stderr));
+    let stdout = String::from_utf8_lossy(&host.stdout);
+    let stderr = String::from_utf8_lossy(&host.stderr);
+    assert!(!host.status.success(), "坏版本工单应非零退场\nstdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("bad-version"),
+        "响亮拒绝 bad-version 在先\nstatus: {:?}\nstdout: {stdout}\nstderr: {stderr}\n\
+         提示：stderr 若为 installation-broken = 启动预检拦路（Windows 上多为无可用 python 启动器），非本用例目标",
+        host.status.code()
+    );
     std::fs::remove_dir_all(&tmp).ok();
 }
 
@@ -254,21 +307,23 @@ fn collect_cancel_sends_cancel_frame() {
         let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
         rt.block_on(async move {
             let (me, mut ev) = Person::born("fake-daemon", "127.0.0.1:0").await.unwrap();
-            for _ in 0..50 {
-                if me.dial_secret(&format!("127.0.0.1:{port}"), Some(SECRET)).await.is_ok() { break; }
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            }
-            let mut got_cancel = false;
-            while let Some(e) = ev.recv().await {
-                if let Event::Heard { text, .. } = e {
-                    if text.contains("workorder.assign") {
-                        let env: serde_json::Value = serde_json::from_str(&text).unwrap();
-                        let oid = env["order_id"].as_str().unwrap().to_string();
-                        me.speak(&envelope("workorder.ack", 1, Some(&oid), json!({"accepted": true}))).await.unwrap();
+            dial_host(&me, port).await;
+            let got_cancel = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+                let mut got = false;
+                while let Some(e) = ev.recv().await {
+                    if let Event::Heard { text, .. } = e {
+                        if text.contains("workorder.assign") {
+                            let env: serde_json::Value = serde_json::from_str(&text).unwrap();
+                            let oid = env["order_id"].as_str().unwrap().to_string();
+                            me.speak(&envelope("workorder.ack", 1, Some(&oid), json!({"accepted": true}))).await.unwrap();
+                        }
+                        if text.contains("workorder.cancel") { got = true; break; }
                     }
-                    if text.contains("workorder.cancel") { got_cancel = true; break; }
                 }
-            }
+                got
+            })
+            .await
+            .expect("60s 未等到撤销帧——主机侧卡死");
             assert!(got_cancel, "撤销帧应到达守护");
         });
     });

@@ -61,34 +61,24 @@ pub fn extract_tools() -> Result<PathBuf, io::Error> {
     Ok(dir)
 }
 
-/// 系统可用的 python3 解释器路径。
-pub fn find_python3() -> Result<PathBuf, String> {
-    let candidates = ["python3", "/usr/bin/python3", "/usr/local/bin/python3"];
-    for c in candidates {
-        if let Ok(out) = std::process::Command::new(c).arg("--version").output() {
-            if out.status.success() {
-                return Ok(PathBuf::from(c));
-            }
-        }
-    }
-    Err("python3 not found in PATH or common locations".into())
-}
-
 /// 执行一个 Python 脚本并返回 (stdout, stderr)。
+/// 解释器解析与启动预检同一候选表（install::resolve_python：python3 → python → py -3）。
 pub fn run_py(
     tools_dir: &Path,
     script: &str,
     args: &[&str],
 ) -> Result<(String, String), String> {
-    let python = find_python3()?;
+    let launcher = crate::install::resolve_python()
+        .ok_or_else(|| "no working python launcher (python3 → python → py -3 全灭)".to_string())?;
     let script_path = tools_dir.join(script);
 
-    let output = std::process::Command::new(python)
+    let output = launcher
+        .command()
         .arg(&script_path)
         .args(args)
         .current_dir(tools_dir)
         .output()
-        .map_err(|e| format!("spawn python3 {} {}: {}", script, e, e))?;
+        .map_err(|e| format!("spawn {} {}: {}", launcher.name(), script, e))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -102,7 +92,7 @@ pub fn run_py(
             String::new()
         };
         return Err(format!(
-            "python3 {} failed (exit={}):\n{}{}",
+            "python {} failed (exit={}):\n{}{}",
             script,
             output.status.code().unwrap_or(-1),
             stderr,
@@ -130,8 +120,8 @@ mod tests {
 
     #[test]
     fn test_python3_available() {
-        // CI 环境可能没有 python3；仅在有 python3 的环境验证
-        if find_python3().is_ok() {
+        // CI 环境可能没有解释器；仅在有 python 的环境验证
+        if crate::install::resolve_python().is_some() {
             let dir = extract_tools().expect("extract");
             // dexdoctor.py --help 有 argparse 支持，返回 0
             let (_, stderr) = run_py(&dir, "dexdoctor.py", &["--help"]).expect("run");

@@ -174,13 +174,28 @@ async fn run_loop(cfg: &DaemonConfig, ch: Arc<dyn Channel>, pid_hint: Option<u32
                     Step::Event(None) => {} // 事件通道已关,等收官
                     Step::Finished(res) => {
                         let oid = running.as_ref().map(|r| r.order_id.clone()).unwrap_or_default();
-                        running = None;
+                        let mut r = running.take().expect("Finished 时 running 必在");
+                        // 收官前先排干事件尾巴:引擎线程终结时 join 与 events 同就绪,
+                        // tokio::select! 随机择枝——join 胜出即收官会把队列残余事件
+                        // 随通道丢弃(主机 events.jsonl 缺尾 = 证据缺尾,非测试抖动)。
+                        // 发送端已随线程终结关闭,recv 排干即 None,不会悬住。
+                        while let Some((k, v)) = r.events.recv().await {
+                            speak(&me, &mut tx, SessionKind::Event, Some(oid.clone()), json!({"event": k, "fields": v})).await?;
+                        }
                         match res {
                             Ok(Ok((manifest, archive))) => {
                                 let body = serde_json::to_value(&manifest).map_err(|e| e.to_string())?;
                                 speak(&me, &mut tx, SessionKind::Done, Some(oid.clone()), body).await?;
-                                if let Err(e) = send_archive(&me, &mut ev, &archive).await {
-                                    speak(&me, &mut tx, SessionKind::Error, Some(oid), json!({"code": "ship", "detail": e, "hint": "工件未收讫,工单可幂等重发"})).await?;
+                                match send_archive(&me, &mut ev, &archive).await {
+                                    Ok(stashed) => {
+                                        // 传输间隙暂存的会话帧补处理(到达序保持)
+                                        for text in stashed {
+                                            handle_frame(cfg, &ch, pid_hint, &me, &mut tx, state, &text, &mut running).await?;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        speak(&me, &mut tx, SessionKind::Error, Some(oid), json!({"code": "ship", "detail": e, "hint": "工件未收讫,工单可幂等重发"})).await?;
+                                    }
                                 }
                             }
                             Ok(Err((code, detail))) => {
@@ -309,7 +324,10 @@ async fn handle_frame(
 }
 
 /// tar.gz 经文件族流式回传(4.1.0:无大小上限;FileDelivered 收讫;拒绝/超时如实报错)
-async fn send_archive(me: &Person, ev: &mut e2ee::Events, data: &[u8]) -> Result<(), String> {
+/// 传输等待期间到达的会话帧(Heard)不得吞——暂存返回,由调用方收官后补处理
+/// (旧实现 `_ => {}` 丢弃:主机在收讫间隙派新单,帧被吃掉,守护永不应答)
+async fn send_archive(me: &Person, ev: &mut e2ee::Events, data: &[u8]) -> Result<Vec<String>, String> {
+    let mut stashed: Vec<String> = Vec::new();
     let name = format!("{}.tar.gz", crate::rand_name("artifacts-"));
     me.file_begin(&name, data.len() as u64).await.map_err(|e| format!("file_begin: {e}"))?;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -319,6 +337,7 @@ async fn send_archive(me: &Person, ev: &mut e2ee::Events, data: &[u8]) -> Result
                 Event::FileAccepted { .. } => break,
                 Event::FileDeclined { reason, .. } => return Err(format!("对端拒收: {reason:?}")),
                 Event::Left { .. } => return Err("线死于文件传输前".into()),
+                Event::Heard { text, .. } => stashed.push(text),
                 _ => {}
             },
             _ = tokio::time::sleep_until(deadline) => return Err("等对端接受超时".into()),
@@ -332,8 +351,9 @@ async fn send_archive(me: &Person, ev: &mut e2ee::Events, data: &[u8]) -> Result
     loop {
         tokio::select! {
             Some(e) = ev.recv() => match e {
-                Event::FileDelivered { .. } => return Ok(()),
+                Event::FileDelivered { .. } => return Ok(stashed),
                 Event::Left { .. } => return Err("线死于等收讫".into()),
+                Event::Heard { text, .. } => stashed.push(text),
                 _ => {}
             },
             _ = tokio::time::sleep_until(deadline) => return Err("等收讫回执超时".into()),

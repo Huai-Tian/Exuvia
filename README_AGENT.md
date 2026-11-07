@@ -265,7 +265,7 @@ release = 两个平台二进制 + SKILL.md + checksums。**纯文件，无目录
 ### 3.3 v0.1 MVP 竖切（窄而完整，勿扩大）
 
 ```
-安装校验（python3 probe · SKILL fence 校验）
+安装校验（python 探针[python3 → python → py -3 序，商店占位拒认] · SKILL fence 校验）
 → APK 解包 → 壳指纹（技术族命名）→ so 函数切分 → 解密例程候选定位
 → 切片与常量扫描喂卡点外包 → 离线解密 → DEX 修复 → L1 骨架
 → debt 清单 → handoff + 静态脱壳脚本
@@ -451,6 +451,7 @@ OS 沙箱按平台分文件实现（单一接口 `run_sandboxed(code, args)`）�
 | 名字候选 molt / cicada / unearth | Exuvia | 撞名与法律姿态（含 crack/break/unlock 的词全排除） |
 | Python 作为可选卫星层 | 演进至**零发行** | 链条：可选→绑定→py/目录→内嵌释放→stdin 喂入。**绑定 ≠ 捆绑**：绑定的本质是版本锁死 + 前提假设；"自我释放执行"会被 AV/EDR 盯上 |
 | 捆绑 Python 运行时（runtime/） | 依赖系统 python3 | 分析机 python3 是基础设施级前提（IDA 模式）；捆绑全负担零收益，是"重复发行生态已有物" |
+| 硬编码单一解释器名 "python3" | 启动器按 python3 → python → py -3 序解析，探针逐个实跑 | Windows python.org 发行版只有 python.exe / py.exe，商店占位 python3.exe 探针拒认——单名硬编码在 Windows 上等于断言装坏；探针与运行时（merge 沙箱 / repair 工具链）共用同一候选表，自检不撒谎 |
 | 自然语言 goal（如"搞清支付签名算法"） | goal.json 格式化 | Rust 读不懂自然语言，其消费必然走私 LLM 或硬编码启发式进二进制——确定性死亡 |
 | `--baseline <apk>` 产品接口 | 不提供 | 真实用户没有原包；法律姿态（不引导不当获取）；分析者信任。对账是 `ci/verify/` 的内部职责 |
 | 自研一代壳模拟器做 CI 语料 | 私有"原包+加固包"对 | **循环论证**：模拟器要先验理解壳，而理解壳正是要产出的东西 |
