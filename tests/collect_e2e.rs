@@ -386,7 +386,7 @@ fn collect_real_daemon_interop() {
     assert_eq!(summary["status"], json!("ok"));
     let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(out.join("manifest.json")).unwrap()).unwrap();
     assert_eq!(manifest["collector"]["name"], json!("exuvia-eclosion"));
-    assert_eq!(manifest["collector"]["version"], json!("0.2.0"));
+    assert_eq!(manifest["collector"]["version"], json!("0.2.1"));
     assert_eq!(manifest["order_id"], json!("wo-e2e-interop"));
     let got = std::fs::read(out.join(format!("classes_0x{DEX_VA:x}.dex"))).unwrap();
     assert_eq!(got, dex, "真守护挖出载荷,字节级一致");

@@ -15,10 +15,13 @@ mod imp {
     use std::process::exit;
 
     fn usage() -> ! {
-        eprintln!("羽化 exuvia-eclosion v0.2.0 —— 零策略纯执行引擎(只读、零注入)");
+        eprintln!("羽化 exuvia-eclosion v0.2.1 —— 零策略纯执行引擎(只读、零注入)");
         eprintln!("用法:");
         eprintln!("  exuvia-eclosion run --host <主机:端口> [--profile <文件>] [--state-root <目录>] [--apk-root <目录>] [--no-harden]");
         eprintln!("      守护启动(反向拨号主机;配对秘密经环境变量 ECLOSION_SECRET 出示——argv 会进 /proc cmdline,不走)");
+        eprintln!("  exuvia-eclosion exec --workorder <工单> [--profile <文件>] [--apk-root <目录>] --out <目录> [--no-harden]");
+        eprintln!("      本地直采(调试通道,无会话):工单 → 闸门 → 引擎 → 工件落盘(manifest/artifacts.tar.gz/events.jsonl/逐件解开)");
+        eprintln!("      采集功能迭代回路专用——通信链路留到采集器收定后测;run 动词的 E2EE 生产面不变");
         eprintln!("  exuvia-eclosion stop [--state-root <目录>] [--dir <状态目录>]    守护停止");
         eprintln!("  exuvia-eclosion status [--state-root <目录>] [--dir <状态目录>]  守护状态");
         eprintln!("  exuvia-eclosion probe <env|art|drv|all> [--pkg <包名>] [--out <文件>]   第 1 段设备探针");
@@ -70,6 +73,37 @@ mod imp {
                 match rt.block_on(daemon::run(cfg)) {
                     Ok(()) => eprintln!("[eclosion] 已退出"),
                     Err(e) => { eprintln!("[eclosion] 响亮拒绝: {e}"); exit(1); }
+                }
+            }
+            "exec" => {
+                let mut workorder: Option<PathBuf> = None;
+                let mut profile: Option<PathBuf> = None;
+                let mut apk_root = PathBuf::from("/data/app");
+                let mut out: Option<PathBuf> = None;
+                let mut harden = true;
+                let mut i = 2;
+                while i < args.len() {
+                    match args[i].as_str() {
+                        "--workorder" if i + 1 < args.len() => { workorder = Some(PathBuf::from(&args[i + 1])); i += 2; }
+                        "--profile" if i + 1 < args.len() => { profile = Some(PathBuf::from(&args[i + 1])); i += 2; }
+                        "--apk-root" if i + 1 < args.len() => { apk_root = PathBuf::from(&args[i + 1]); i += 2; }
+                        "--out" if i + 1 < args.len() => { out = Some(PathBuf::from(&args[i + 1])); i += 2; }
+                        "--no-harden" => { harden = false; i += 1; }
+                        _ => usage(),
+                    }
+                }
+                let Some(workorder) = workorder else {
+                    eprintln!("exec 缺 --workorder <工单文件>(§10.1 v4)");
+                    exit(2);
+                };
+                let Some(out) = out else {
+                    eprintln!("exec 缺 --out <工件落点目录>");
+                    exit(2);
+                };
+                let cfg = eclosion::exec::ExecConfig { workorder, profile_path: profile, apk_root, out, harden };
+                match eclosion::exec::run(&cfg) {
+                    Ok(summary) => println!("{summary}"),
+                    Err(e) => { eprintln!("[eclosion] exec 响亮拒绝: {e}"); exit(1); }
                 }
             }
             "stop" | "status" => {

@@ -9,6 +9,7 @@
 pub mod channel;
 pub mod daemon;
 pub mod engine;
+pub mod exec;
 pub mod probe;
 pub mod profile;
 pub mod proto;

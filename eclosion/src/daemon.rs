@@ -69,6 +69,28 @@ impl State {
     fn cleanup(self) { std::fs::remove_dir_all(&self.dir).ok(); }
 }
 
+/// 工单闸门(run/exec 动词共用,与具体会话形态无关):
+/// schema / 版本 / 卫生对齐 / 驱动能力——任一不符 = 响亮拒绝三元组(code, detail, hint)。
+/// 闸门第①层即终结在 deny_unknown_fields 解析;此处的版本/卫生/能力是语义层核对。
+pub fn wo_gate_check(wo: &WorkOrder, have_channels: &[String]) -> Result<(), (String, String, String)> {
+    if wo.schema != "exuvia.workorder" {
+        return Err(("bad-schema".into(), wo.schema.clone(), "literal exuvia.workorder".into()));
+    }
+    if wo.workorder_version != WORKORDER_VERSION {
+        return Err(("bad-version".into(), format!("{}", wo.workorder_version), format!("本端 = {WORKORDER_VERSION}")));
+    }
+    if wo.hygiene.hygiene_version != HYGIENE_VERSION {
+        return Err(("hygiene-mismatch".into(), format!("{}", wo.hygiene.hygiene_version), format!("本端 = {HYGIENE_VERSION}")));
+    }
+    if let Some(drv) = &wo.stealth.driver {
+        let missing: Vec<&String> = drv.channels.iter().filter(|c| !have_channels.contains(c)).collect();
+        if !missing.is_empty() {
+            return Err(("capability".into(), format!("缺 {missing:?} 现有 {have_channels:?}"), "profile 能力须覆盖工单要求".into()));
+        }
+    }
+    Ok(())
+}
+
 /// 进程硬化(照抄 e2ee CLI 职责;库不碰进程策略,宿主自理——立项书 §6)
 pub fn harden_process() {
     unsafe {
@@ -269,21 +291,8 @@ async fn handle_frame(
                 return ack(me, tx, order_id, false, "busy", "有工单在跑".into(), "先 cancel 或等 done").await;
             }
             // 闸门:schema / 版本 / 卫生对齐 / 驱动能力——任一不符 = 响亮拒绝(不静默执行)
-            if wo.schema != "exuvia.workorder" {
-                return ack(me, tx, order_id, false, "bad-schema", wo.schema.clone(), "literal exuvia.workorder").await;
-            }
-            if wo.workorder_version != WORKORDER_VERSION {
-                return ack(me, tx, order_id, false, "bad-version", format!("{}", wo.workorder_version), &format!("本端 = {WORKORDER_VERSION}")).await;
-            }
-            if wo.hygiene.hygiene_version != HYGIENE_VERSION {
-                return ack(me, tx, order_id, false, "hygiene-mismatch", format!("{}", wo.hygiene.hygiene_version), &format!("本端 = {HYGIENE_VERSION}")).await;
-            }
-            if let Some(drv) = &wo.stealth.driver {
-                let have = ch.channels();
-                let missing: Vec<&String> = drv.channels.iter().filter(|c| !have.contains(c)).collect();
-                if !missing.is_empty() {
-                    return ack(me, tx, order_id, false, "capability", format!("缺 {missing:?} 现有 {have:?}"), "profile 能力须覆盖工单要求").await;
-                }
+            if let Err((code, detail, hint)) = wo_gate_check(&wo, &ch.channels()) {
+                return ack(me, tx, order_id, false, &code, detail, &hint).await;
             }
             ack(me, tx, order_id.clone(), true, "ok", "能力核对通过".into(), "").await?;
             state.write(&json!({"state": format!("running:{order_id}")}))?;

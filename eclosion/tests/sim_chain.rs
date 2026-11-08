@@ -202,7 +202,7 @@ async fn sim_full_chain() {
     assert_eq!(manifest["order_id"], json!("wo-sim-001"));
     assert_eq!(manifest["workorder_sha256"], json!(wo_sha), "工单锚回显");
     assert_eq!(manifest["collector"]["name"], json!("exuvia-eclosion"));
-    assert_eq!(manifest["collector"]["version"], json!("0.2.0"));
+    assert_eq!(manifest["collector"]["version"], json!("0.2.1"));
 
     // 验货:tar.gz 解开,载荷字节 == 种植 dex
     let gz = flate2::read::GzDecoder::new(&archive[..]);
